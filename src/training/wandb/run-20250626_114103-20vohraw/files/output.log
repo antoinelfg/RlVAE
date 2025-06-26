@@ -1,0 +1,347 @@
+✅ Created open loop trainer for cyclic sequences
+   🎯 Experiment: open_cyclic_20250626_114103
+   🔁 Loop mode: open
+   📊 Cycle penalty: 1.0
+   🚀 Riemannian: True (geodesic)
+
+🚀 Starting OPEN loop training on cyclic sequences
+Loading cyclic sprites data from /scratch/alaforgu/longitudinal_experiments/RlVAE/data/processed/Sprites_train_cyclic.pt...
+Cyclic sprites data shape: torch.Size([3000, 8, 3, 64, 64])
+Data range: [0.000, 0.996]
+✅ train cyclic dataset size: 3000
+✅ Final data shape: torch.Size([3000, 8, 3, 64, 64])
+✅ Final data range: [0.000, 0.996]
+🔍 Verifying cyclicity of first 5 sequences:
+   Seq 0: MSE = 0.00e+00
+   Seq 1: MSE = 0.00e+00
+   Seq 2: MSE = 0.00e+00
+   Seq 3: MSE = 0.00e+00
+   Seq 4: MSE = 0.00e+00
+Loading cyclic sprites data from /scratch/alaforgu/longitudinal_experiments/RlVAE/data/processed/Sprites_train_cyclic.pt...
+Cyclic sprites data shape: torch.Size([3000, 8, 3, 64, 64])
+Data range: [0.000, 0.996]
+✅ train cyclic dataset size: 800
+✅ Final data shape: torch.Size([800, 8, 3, 64, 64])
+✅ Final data range: [0.000, 0.996]
+🔍 Verifying cyclicity of first 5 sequences:
+   Seq 0: MSE = 0.00e+00
+   Seq 1: MSE = 0.00e+00
+   Seq 2: MSE = 0.00e+00
+   Seq 3: MSE = 0.00e+00
+   Seq 4: MSE = 0.00e+00
+
+📈 Epoch 1/200 - OPEN Mode
+Epoch 0 (open): 100%|█| 93/93 [00:34<00:00,  2.72it/s, Loss=4391.7969, Recon=449
+🧠 USING RIEMANNIAN METRIC-AWARE POSTERIOR (batch_size=32)
+🧠 Creating sequence trajectory visualization for epoch 0
+🎬 Creating comprehensive reconstruction visualization for epoch 0
+🔬 Creating manifold visualizations for epoch 0
+📊 Analyzing 32 sequences with 8 timesteps
+📍 Computing metrics for timestep 1/8 using flow-evolved coordinates
+   Computing G(z) at 480 flow-evolved points...
+   ✅ Computed metrics: det(G⁻¹) range [1.55e-32, 2.49e-14]
+   ✅ Timestep 0 data collected (metrics: 7 properties)
+📍 Computing metrics for timestep 2/8 using flow-evolved coordinates
+   Computing G(z) at 480 flow-evolved points...
+   ✅ Computed metrics: det(G⁻¹) range [1.00e-32, 1.00e-32]
+   ✅ Timestep 1 data collected (metrics: 7 properties)
+📍 Computing metrics for timestep 3/8 using flow-evolved coordinates
+   Computing G(z) at 480 flow-evolved points...
+   ✅ Computed metrics: det(G⁻¹) range [1.00e-32, 1.00e-32]
+   ✅ Timestep 2 data collected (metrics: 7 properties)
+📍 Computing metrics for timestep 4/8 using flow-evolved coordinates
+   Computing G(z) at 480 flow-evolved points...
+   ✅ Computed metrics: det(G⁻¹) range [1.00e-32, 1.00e-32]
+   ✅ Timestep 3 data collected (metrics: 7 properties)
+📍 Computing metrics for timestep 5/8 using flow-evolved coordinates
+   Computing G(z) at 480 flow-evolved points...
+   ✅ Computed metrics: det(G⁻¹) range [1.00e-32, 1.00e-32]
+   ✅ Timestep 4 data collected (metrics: 7 properties)
+📍 Computing metrics for timestep 6/8 using flow-evolved coordinates
+   Computing G(z) at 480 flow-evolved points...
+   ✅ Computed metrics: det(G⁻¹) range [1.00e-32, 1.00e-32]
+   ✅ Timestep 5 data collected (metrics: 7 properties)
+📍 Computing metrics for timestep 7/8 using flow-evolved coordinates
+   Computing G(z) at 480 flow-evolved points...
+   ✅ Computed metrics: det(G⁻¹) range [1.00e-32, 1.00e-32]
+   ✅ Timestep 6 data collected (metrics: 7 properties)
+📍 Computing metrics for timestep 8/8 using flow-evolved coordinates
+   Computing G(z) at 480 flow-evolved points...
+   ✅ Computed metrics: det(G⁻¹) range [1.00e-32, 1.00e-32]
+   ✅ Timestep 7 data collected (metrics: 7 properties)
+🎨 Creating visualizations with metrics for 8 timesteps...
+📈 Creating enhanced PCA analysis with flow-evolved coordinates...
+✅ Enhanced PCA analysis created: 8/8 timesteps have metrics
+🔥 Creating enhanced manifold heatmaps with flow-evolved coordinates...
+✅ Enhanced manifold heatmaps created
+⏱️ Creating temporal metric analysis...
+✅ Temporal metric analysis created: 8/8 timesteps analyzed
+✨ Manifold visualizations complete for epoch 0
+🌍 Creating enhanced geodesic & metric impact visualizations for epoch 0
+🌍 Creating INTERACTIVE geodesic slider visualization with timestep evolution...
+📊 Computing DYNAMIC geodesic background fields for each timestep...
+   Computing background fields for timestep 0...
+     ✅ Geodesic background computed for t=0: det(G) range [1.00e+04, 1.00e+04]
+   Computing background fields for timestep 1...
+     🔄 Applying 1 forward flow steps to geodesic grid...
+       Applying flow 0: z_0 → z_1
+     ✅ Geodesic grid transformed to timestep 1 coordinate system
+     ✅ Geodesic background computed for t=1: det(G) range [1.00e+04, 1.00e+04]
+   Computing background fields for timestep 2...
+     🔄 Applying 2 forward flow steps to geodesic grid...
+       Applying flow 0: z_0 → z_1
+       Applying flow 1: z_1 → z_2
+     ✅ Geodesic grid transformed to timestep 2 coordinate system
+     ✅ Geodesic background computed for t=2: det(G) range [1.00e+04, 1.00e+04]
+   Computing background fields for timestep 3...
+     🔄 Applying 3 forward flow steps to geodesic grid...
+       Applying flow 0: z_0 → z_1
+       Applying flow 1: z_1 → z_2
+       Applying flow 2: z_2 → z_3
+     ✅ Geodesic grid transformed to timestep 3 coordinate system
+     ✅ Geodesic background computed for t=3: det(G) range [1.00e+04, 1.00e+04]
+   Computing background fields for timestep 4...
+     🔄 Applying 4 forward flow steps to geodesic grid...
+       Applying flow 0: z_0 → z_1
+       Applying flow 1: z_1 → z_2
+       Applying flow 2: z_2 → z_3
+       Applying flow 3: z_3 → z_4
+     ✅ Geodesic grid transformed to timestep 4 coordinate system
+     ✅ Geodesic background computed for t=4: det(G) range [1.00e+04, 1.00e+04]
+   Computing background fields for timestep 5...
+     🔄 Applying 5 forward flow steps to geodesic grid...
+       Applying flow 0: z_0 → z_1
+       Applying flow 1: z_1 → z_2
+       Applying flow 2: z_2 → z_3
+       Applying flow 3: z_3 → z_4
+       Applying flow 4: z_4 → z_5
+     ✅ Geodesic grid transformed to timestep 5 coordinate system
+     ✅ Geodesic background computed for t=5: det(G) range [1.00e+04, 1.00e+04]
+   Computing background fields for timestep 6...
+     🔄 Applying 6 forward flow steps to geodesic grid...
+       Applying flow 0: z_0 → z_1
+       Applying flow 1: z_1 → z_2
+       Applying flow 2: z_2 → z_3
+       Applying flow 3: z_3 → z_4
+       Applying flow 4: z_4 → z_5
+       Applying flow 5: z_5 → z_6
+     ✅ Geodesic grid transformed to timestep 6 coordinate system
+     ✅ Geodesic background computed for t=6: det(G) range [1.00e+04, 1.00e+04]
+   Computing background fields for timestep 7...
+     🔄 Applying 7 forward flow steps to geodesic grid...
+       Applying flow 0: z_0 → z_1
+       Applying flow 1: z_1 → z_2
+       Applying flow 2: z_2 → z_3
+       Applying flow 3: z_3 → z_4
+       Applying flow 4: z_4 → z_5
+       Applying flow 5: z_5 → z_6
+       Applying flow 6: z_6 → z_7
+     ✅ Geodesic grid transformed to timestep 7 coordinate system
+     ✅ Geodesic background computed for t=7: det(G) range [1.00e+04, 1.00e+04]
+    ✅ Geodesic slider: Using FLOW-EVOLVED coordinates for timestep 0
+    ✅ Geodesic slider: Using FLOW-EVOLVED coordinates for timestep 1
+    ✅ Geodesic slider: Using FLOW-EVOLVED coordinates for timestep 2
+    ✅ Geodesic slider: Using FLOW-EVOLVED coordinates for timestep 3
+    ✅ Geodesic slider: Using FLOW-EVOLVED coordinates for timestep 4
+    ✅ Geodesic slider: Using FLOW-EVOLVED coordinates for timestep 5
+    ✅ Geodesic slider: Using FLOW-EVOLVED coordinates for timestep 6
+    ✅ Geodesic slider: Using FLOW-EVOLVED coordinates for timestep 7
+   📊 Geodesic frame 0: using det_G background range [1.00e+04, 1.00e+04]
+   📊 Geodesic frame 1: using det_G background range [1.00e+04, 1.00e+04]
+   📊 Geodesic frame 2: using det_G background range [1.00e+04, 1.00e+04]
+   📊 Geodesic frame 3: using det_G background range [1.00e+04, 1.00e+04]
+   📊 Geodesic frame 4: using det_G background range [1.00e+04, 1.00e+04]
+   📊 Geodesic frame 5: using det_G background range [1.00e+04, 1.00e+04]
+   📊 Geodesic frame 6: using det_G background range [1.00e+04, 1.00e+04]
+   📊 Geodesic frame 7: using det_G background range [1.00e+04, 1.00e+04]
+⚠️ Interactive geodesic slider visualization failed:
+Image export using the "kaleido" engine requires the kaleido package,
+which can be installed using pip:
+    $ pip install -U kaleido
+Traceback (most recent call last):
+  File "/scratch/alaforgu/longitudinal_experiments/RlVAE/src/training/train_cyclic_loop_comparison.py", line 3067, in _create_interactive_geodesic_slider_visualization
+    fig.write_image(png_filename, width=1600, height=1000, scale=2)
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/plotly/basedatatypes.py", line 3835, in write_image
+    return pio.write_image(self, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/plotly/io/_kaleido.py", line 266, in write_image
+    img_data = to_image(
+               ^^^^^^^^^
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/plotly/io/_kaleido.py", line 132, in to_image
+    raise ValueError(
+ValueError:
+Image export using the "kaleido" engine requires the kaleido package,
+which can be installed using pip:
+    $ pip install -U kaleido
+
+✅ Enhanced geodesic visualization created for epoch 0
+✨ Creating FANCY interactive geodesic visualizations...
+✨ Creating FANCY interactive geodesic visualizations for epoch 0
+⚠️ Fancy visualization failed:
+Image export using the "kaleido" engine requires the kaleido package,
+which can be installed using pip:
+    $ pip install -U kaleido
+
+Traceback (most recent call last):
+  File "/scratch/alaforgu/longitudinal_experiments/RlVAE/src/training/train_cyclic_loop_comparison.py", line 3666, in create_fancy_interactive_geodesic_visualizations
+    fig.write_image(png_filename, width=1600, height=1000, scale=2)
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/plotly/basedatatypes.py", line 3835, in write_image
+    return pio.write_image(self, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/plotly/io/_kaleido.py", line 266, in write_image
+    img_data = to_image(
+               ^^^^^^^^^
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/plotly/io/_kaleido.py", line 132, in to_image
+    raise ValueError(
+ValueError:
+Image export using the "kaleido" engine requires the kaleido package,
+which can be installed using pip:
+    $ pip install -U kaleido
+
+🎬 Creating TEMPORAL metric evolution visualization...
+🌊 Creating FLOW-BASED temporal metric evolution visualization for epoch 0
+🌊 Computing flow-based det(G) evolution for 32 sequences with 8 timesteps
+📍 Computing base metric det(G(z_i0))...
+   Base det(G) range: [4.296e+13, 4.498e+31]
+🌊 Propagating det(G) through flow chain...
+   Flow step 1: z_0 → z_1
+     |J_flow_1| range: [32082691568317759488.000, 249080971619072999424.000]
+     det(G) range: [5.590e+33, inf]
+   Flow step 2: z_1 → z_2
+     |J_flow_2| range: [10686474223616.000, 4311231800279040.000]
+     det(G) range: [inf, inf]
+   Flow step 3: z_2 → z_3
+     |J_flow_3| range: [335260000.000, 142299480719360.000]
+     det(G) range: [inf, inf]
+   Flow step 4: z_3 → z_4
+     |J_flow_4| range: [1177747.875, 532048216064.000]
+     det(G) range: [inf, inf]
+   Flow step 5: z_4 → z_5
+     |J_flow_5| range: [532048216064.000, 86593404045099008.000]
+     det(G) range: [inf, inf]
+   Flow step 6: z_5 → z_6
+     |J_flow_6| range: [403.429, 1318815744.000]
+     det(G) range: [inf, inf]
+   Flow step 7: z_6 → z_7
+     |J_flow_7| range: [403.429, 26489122816.000]
+     det(G) range: [inf, inf]
+✅ Flow-based evolution complete!
+   Final det(G) range: [4.296e+13, inf]
+   Det(G) amplification: infx
+📊 PCA projection complete (explained variance: 99.8%)
+🔥 Computing spatial det(G) heatmaps for each timestep...
+   Computing spatial heatmap for timestep 0...
+   Computing spatial heatmap for timestep 1...
+     ✅ Computed heatmap for t=1: det(G) range [1.00e+32, 1.00e+32]
+   Computing spatial heatmap for timestep 2...
+     ✅ Computed heatmap for t=2: det(G) range [1.00e+32, 1.00e+32]
+   Computing spatial heatmap for timestep 3...
+     ✅ Computed heatmap for t=3: det(G) range [1.00e+32, 1.00e+32]
+   Computing spatial heatmap for timestep 4...
+     ✅ Computed heatmap for t=4: det(G) range [1.00e+32, 1.00e+32]
+   Computing spatial heatmap for timestep 5...
+     ✅ Computed heatmap for t=5: det(G) range [1.00e+32, 1.00e+32]
+   Computing spatial heatmap for timestep 6...
+     ✅ Computed heatmap for t=6: det(G) range [1.00e+32, 1.00e+32]
+   Computing spatial heatmap for timestep 7...
+     ✅ Computed heatmap for t=7: det(G) range [1.00e+32, 1.00e+32]
+✅ Computed 8 spatial heatmaps with evolving det(G) fields!
+
+/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/numpy/core/_methods.py:173: RuntimeWarning:
+
+invalid value encountered in subtract
+
+/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/matplotlib/colors.py:2295: RuntimeWarning:
+
+invalid value encountered in divide
+
+/scratch/alaforgu/longitudinal_experiments/RlVAE/src/training/train_cyclic_loop_comparison.py:4918: RuntimeWarning:
+
+invalid value encountered in divide
+
+/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/numpy/core/_methods.py:176: RuntimeWarning:
+
+overflow encountered in multiply
+⚠️ Flow-based interactive animation failed:
+Image export using the "kaleido" engine requires the kaleido package,
+which can be installed using pip:
+    $ pip install -U kaleido
+
+Traceback (most recent call last):
+  File "/scratch/alaforgu/longitudinal_experiments/RlVAE/src/training/train_cyclic_loop_comparison.py", line 5235, in _create_flow_based_interactive_animation
+    fig.write_image(png_filename, width=1600, height=900, scale=2)
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/plotly/basedatatypes.py", line 3835, in write_image
+    return pio.write_image(self, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/plotly/io/_kaleido.py", line 266, in write_image
+    img_data = to_image(
+               ^^^^^^^^^
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/plotly/io/_kaleido.py", line 132, in to_image
+    raise ValueError(
+ValueError:
+Image export using the "kaleido" engine requires the kaleido package,
+which can be installed using pip:
+    $ pip install -U kaleido
+
+Traceback (most recent call last):
+  File "/scratch/alaforgu/longitudinal_experiments/RlVAE/src/training/train_cyclic_loop_comparison.py", line 5721, in <module>
+    main()
+  File "/scratch/alaforgu/longitudinal_experiments/RlVAE/src/training/train_cyclic_loop_comparison.py", line 5697, in main
+    trainer.train(n_epochs=args.n_epochs)
+  File "/scratch/alaforgu/longitudinal_experiments/RlVAE/src/training/train_cyclic_loop_comparison.py", line 500, in train
+    self.create_temporal_metric_evolution_visualization(val_sample, epoch)
+  File "/scratch/alaforgu/longitudinal_experiments/RlVAE/src/training/train_cyclic_loop_comparison.py", line 4682, in create_temporal_metric_evolution_visualization
+    self._create_temporal_evolution_plots(
+  File "/scratch/alaforgu/longitudinal_experiments/RlVAE/src/training/train_cyclic_loop_comparison.py", line 5307, in _create_temporal_evolution_plots
+    self._create_sequence_det_evolution(sequence_dets, epoch)
+  File "/scratch/alaforgu/longitudinal_experiments/RlVAE/src/training/train_cyclic_loop_comparison.py", line 5374, in _create_sequence_det_evolution
+    plt.tight_layout()
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/matplotlib/pyplot.py", line 2833, in tight_layout
+    gcf().tight_layout(pad=pad, h_pad=h_pad, w_pad=w_pad, rect=rect)
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/matplotlib/figure.py", line 3640, in tight_layout
+    engine.execute(self)
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/matplotlib/layout_engine.py", line 183, in execute
+    kwargs = get_tight_layout_figure(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/matplotlib/_tight_layout.py", line 266, in get_tight_layout_figure
+    kwargs = _auto_adjust_subplotpars(fig, renderer,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/matplotlib/_tight_layout.py", line 82, in _auto_adjust_subplotpars
+    bb += [martist._get_tightbbox_for_layout_only(ax, renderer)]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/matplotlib/artist.py", line 1402, in _get_tightbbox_for_layout_only
+    return obj.get_tightbbox(*args, **{**kwargs, "for_layout_only": True})
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/matplotlib/axes/_base.py", line 4548, in get_tightbbox
+    ba = martist._get_tightbbox_for_layout_only(axis, renderer)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/matplotlib/artist.py", line 1402, in _get_tightbbox_for_layout_only
+    return obj.get_tightbbox(*args, **{**kwargs, "for_layout_only": True})
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/matplotlib/axis.py", line 1369, in get_tightbbox
+    bb = self.label.get_window_extent(renderer)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/matplotlib/text.py", line 972, in get_window_extent
+    bbox = bbox.translated(x, y)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/matplotlib/transforms.py", line 618, in translated
+    return Bbox(self._points + (tx, ty))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/matplotlib/transforms.py", line 749, in __init__
+    def __init__(self, points, **kwargs):
+
+KeyboardInterrupt
+Exception ignored in atexit callback: <function _start_and_connect_service.<locals>.teardown_atexit at 0x7f33ead053a0>
+Traceback (most recent call last):
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/wandb/sdk/lib/service_connection.py", line 94, in teardown_atexit
+    conn.teardown(hooks.exit_code)
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/wandb/sdk/lib/service_connection.py", line 226, in teardown
+    self._router.join()
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/site-packages/wandb/sdk/interface/router.py", line 75, in join
+    self._thread.join()
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/threading.py", line 1149, in join
+    self._wait_for_tstate_lock()
+  File "/scratch/alaforgu/miniconda3/lib/python3.12/threading.py", line 1169, in _wait_for_tstate_lock
+    if lock.acquire(block, timeout):
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt:

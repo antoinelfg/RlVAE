@@ -1,0 +1,16 @@
+{"time":"2025-06-26T14:55:48.455168498+02:00","level":"INFO","msg":"stream: starting","core version":"0.19.10","symlink path":"/scratch/alaforgu/longitudinal_experiments/RlVAE/wandb/offline-run-20250626_145548-xlmc82se/logs/debug-core.log"}
+{"time":"2025-06-26T14:55:48.569080818+02:00","level":"WARN","msg":"GraphQL client is nil, skipping feature loading"}
+{"time":"2025-06-26T14:55:48.570250103+02:00","level":"INFO","msg":"created new stream","id":"xlmc82se"}
+{"time":"2025-06-26T14:55:48.570344498+02:00","level":"INFO","msg":"stream: started","id":"xlmc82se"}
+{"time":"2025-06-26T14:55:48.57045611+02:00","level":"INFO","msg":"writer: Do: started","stream_id":"xlmc82se"}
+{"time":"2025-06-26T14:55:48.570524343+02:00","level":"INFO","msg":"sender: started","stream_id":"xlmc82se"}
+{"time":"2025-06-26T14:55:48.570521095+02:00","level":"INFO","msg":"handler: started","stream_id":"xlmc82se"}
+{"time":"2025-06-26T14:55:48.582368847+02:00","level":"INFO","msg":"Starting system monitor"}
+{"time":"2025-06-26T14:56:01.910433161+02:00","level":"INFO","msg":"Stopping system monitor"}
+{"time":"2025-06-26T14:56:01.910603915+02:00","level":"INFO","msg":"Stopped system monitor"}
+{"time":"2025-06-26T14:56:01.911630052+02:00","level":"INFO","msg":"handler: operation stats","stats":{}}
+{"time":"2025-06-26T14:56:01.916325572+02:00","level":"INFO","msg":"stream: closing","id":"xlmc82se"}
+{"time":"2025-06-26T14:56:01.916425382+02:00","level":"INFO","msg":"handler: closed","stream_id":"xlmc82se"}
+{"time":"2025-06-26T14:56:01.916445627+02:00","level":"INFO","msg":"writer: Close: closed","stream_id":"xlmc82se"}
+{"time":"2025-06-26T14:56:01.916460219+02:00","level":"INFO","msg":"sender: closed","stream_id":"xlmc82se"}
+{"time":"2025-06-26T14:56:01.917459552+02:00","level":"INFO","msg":"stream: closed","id":"xlmc82se"}

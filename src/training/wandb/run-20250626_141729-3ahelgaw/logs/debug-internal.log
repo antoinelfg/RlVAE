@@ -1,0 +1,16 @@
+{"time":"2025-06-26T14:17:29.118130258+02:00","level":"INFO","msg":"stream: starting","core version":"0.19.10","symlink path":"/scratch/alaforgu/longitudinal_experiments/RlVAE/src/training/wandb/run-20250626_141729-3ahelgaw/logs/debug-core.log"}
+{"time":"2025-06-26T14:17:29.390921312+02:00","level":"INFO","msg":"created new stream","id":"3ahelgaw"}
+{"time":"2025-06-26T14:17:29.391093296+02:00","level":"INFO","msg":"stream: started","id":"3ahelgaw"}
+{"time":"2025-06-26T14:17:29.391143624+02:00","level":"INFO","msg":"writer: Do: started","stream_id":"3ahelgaw"}
+{"time":"2025-06-26T14:17:29.391170832+02:00","level":"INFO","msg":"sender: started","stream_id":"3ahelgaw"}
+{"time":"2025-06-26T14:17:29.391288216+02:00","level":"INFO","msg":"handler: started","stream_id":"3ahelgaw"}
+{"time":"2025-06-26T14:17:29.609828598+02:00","level":"INFO","msg":"Starting system monitor"}
+{"time":"2025-06-26T14:43:56.585645915+02:00","level":"INFO","msg":"Stopping system monitor"}
+{"time":"2025-06-26T14:43:56.58580969+02:00","level":"INFO","msg":"Stopped system monitor"}
+{"time":"2025-06-26T14:43:57.296740675+02:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2025-06-26T14:43:57.590377451+02:00","level":"INFO","msg":"handler: operation stats","stats":{"operations":[{"desc":"uploading console lines 582-601","runtime_seconds":0.094904315}],"total_operations":1}}
+{"time":"2025-06-26T14:43:57.684645946+02:00","level":"INFO","msg":"stream: closing","id":"3ahelgaw"}
+{"time":"2025-06-26T14:43:57.684736939+02:00","level":"INFO","msg":"handler: closed","stream_id":"3ahelgaw"}
+{"time":"2025-06-26T14:43:57.684778353+02:00","level":"INFO","msg":"writer: Close: closed","stream_id":"3ahelgaw"}
+{"time":"2025-06-26T14:43:57.684820793+02:00","level":"INFO","msg":"sender: closed","stream_id":"3ahelgaw"}
+{"time":"2025-06-26T14:43:57.685394107+02:00","level":"INFO","msg":"stream: closed","id":"3ahelgaw"}

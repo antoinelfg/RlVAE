@@ -1,0 +1,69 @@
+✅ Created open loop trainer for cyclic sequences
+   🎯 Experiment: open_cyclic_20250626_135754
+   🔁 Loop mode: open
+   📊 Cycle penalty: 1.0
+   🚀 Riemannian: True (geodesic)
+
+🚀 Starting OPEN loop training on cyclic sequences
+Loading cyclic sprites data from /scratch/alaforgu/longitudinal_experiments/RlVAE/data/processed/Sprites_train_cyclic.pt...
+Cyclic sprites data shape: torch.Size([3000, 8, 3, 64, 64])
+Data range: [0.000, 0.996]
+✅ train cyclic dataset size: 2
+✅ Final data shape: torch.Size([2, 8, 3, 64, 64])
+✅ Final data range: [0.000, 0.996]
+🔍 Verifying cyclicity of first 5 sequences:
+   Seq 0: MSE = 0.00e+00
+   Seq 1: MSE = 0.00e+00
+Loading cyclic sprites data from /scratch/alaforgu/longitudinal_experiments/RlVAE/data/processed/Sprites_train_cyclic.pt...
+Cyclic sprites data shape: torch.Size([3000, 8, 3, 64, 64])
+Data range: [0.000, 0.996]
+✅ train cyclic dataset size: 2
+✅ Final data shape: torch.Size([2, 8, 3, 64, 64])
+✅ Final data range: [0.000, 0.996]
+🔍 Verifying cyclicity of first 5 sequences:
+   Seq 0: MSE = 0.00e+00
+   Seq 1: MSE = 0.00e+00
+
+📈 Epoch 1/1 - OPEN Mode
+Epoch 0 (open): 100%|██████████| 2/2 [00:02<00:00,  1.18s/it, Loss=4952.4736, Recon=4713.7090, KL=29.8238, Flow=0.1749, Cycle=0.0000, Mode=open]   
+🧠 USING RIEMANNIAN METRIC-AWARE POSTERIOR (batch_size=1)
+🧠 Creating sequence trajectory visualization for epoch 0
+🎬 Creating comprehensive reconstruction visualization for epoch 0
+🔬 Creating manifold visualizations for epoch 0
+📊 Analyzing 1 sequences with 8 timesteps
+📍 Computing metrics for timestep 1/8 using flow-evolved coordinates
+   Computing G(z) at 50 flow-evolved points...
+   ✅ Computed metrics: det(G⁻¹) range [6.02e-06, 3.05e-03]
+   ✅ Timestep 0 data collected (metrics: 7 properties)
+📍 Computing metrics for timestep 2/8 using flow-evolved coordinates
+   Computing G(z) at 50 flow-evolved points...
+   ✅ Computed metrics: det(G⁻¹) range [7.84e-05, 3.93e-01]
+   ✅ Timestep 1 data collected (metrics: 7 properties)
+📍 Computing metrics for timestep 3/8 using flow-evolved coordinates
+   Computing G(z) at 50 flow-evolved points...
+   ✅ Computed metrics: det(G⁻¹) range [2.06e-06, 1.61e-03]
+   ✅ Timestep 2 data collected (metrics: 7 properties)
+📍 Computing metrics for timestep 4/8 using flow-evolved coordinates
+   Computing G(z) at 50 flow-evolved points...
+   ✅ Computed metrics: det(G⁻¹) range [1.98e-08, 5.18e-05]
+   ✅ Timestep 3 data collected (metrics: 7 properties)
+📍 Computing metrics for timestep 5/8 using flow-evolved coordinates
+   Computing G(z) at 50 flow-evolved points...
+   ✅ Computed metrics: det(G⁻¹) range [3.32e-09, 2.09e-06]
+   ✅ Timestep 4 data collected (metrics: 7 properties)
+📍 Computing metrics for timestep 6/8 using flow-evolved coordinates
+   Computing G(z) at 50 flow-evolved points...
+   ✅ Computed metrics: det(G⁻¹) range [2.41e-08, 1.57e-05]
+   ✅ Timestep 5 data collected (metrics: 7 properties)
+📍 Computing metrics for timestep 7/8 using flow-evolved coordinates
+   Computing G(z) at 50 flow-evolved points...
+   ✅ Computed metrics: det(G⁻¹) range [3.96e-10, 4.05e-07]
+   ✅ Timestep 6 data collected (metrics: 7 properties)
+📍 Computing metrics for timestep 8/8 using flow-evolved coordinates
+   Computing G(z) at 50 flow-evolved points...
+   ✅ Computed metrics: det(G⁻¹) range [2.97e-08, 2.06e-05]
+   ✅ Timestep 7 data collected (metrics: 7 properties)
+🎨 Creating visualizations with metrics for 8 timesteps...
+📈 Creating enhanced PCA analysis with flow-evolved coordinates...
+✅ Enhanced PCA analysis created: 8/8 timesteps have metrics
+🔥 Creating enhanced manifold heatmaps with flow-evolved coordinates...
