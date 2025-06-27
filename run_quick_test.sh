@@ -27,8 +27,8 @@ echo ""
 mkdir -p logs
 
 # Activate conda environment
-source ~/miniconda3/etc/profile.d/conda.sh
-conda activate rlvae
+source /scratch/alaforgu/miniconda3/etc/profile.d/conda.sh
+conda activate longitudinal_env
 
 # Set environment variables
 export CUDA_VISIBLE_DEVICES=0

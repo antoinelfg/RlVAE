@@ -31,8 +31,8 @@ mkdir -p logs
 mkdir -p outputs
 
 # Activate conda environment (adjust path as needed)
-source ~/miniconda3/etc/profile.d/conda.sh
-conda activate rlvae  # Adjust environment name as needed
+source /scratch/alaforgu/miniconda3/etc/profile.d/conda.sh
+conda activate longitudinal_env  # Adjust environment name as needed
 
 # Set environment variables
 export CUDA_VISIBLE_DEVICES=0
