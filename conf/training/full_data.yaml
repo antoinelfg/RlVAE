@@ -1,0 +1,78 @@
+# @package training
+
+# Full dataset training configuration
+defaults:
+  - _self_
+
+# Training parameters
+trainer:
+  max_epochs: 50
+  accelerator: "gpu"
+  devices: 1  # Use single GPU to avoid device mismatches
+  strategy: "auto"  # Use auto strategy for single GPU
+  precision: "16-mixed"
+  log_every_n_steps: 5
+  val_check_interval: 0.5
+  num_sanity_val_steps: 2
+  enable_progress_bar: true
+  enable_model_summary: true
+  deterministic: false
+  use_distributed_sampler: false  # Disable for single GPU
+
+# Data parameters
+data:
+  batch_size: 8  # Balanced batch size for larger dataset
+  num_workers: 16
+  pin_memory: true
+
+# Model parameters (keep working configuration)
+model:
+  latent_dim: 16  # Keep successful latent dim
+  n_flows: 8      # Keep successful flow count
+  beta: 1.0
+  riemannian_beta: 8.0  # Keep successful riemannian beta
+  posterior:
+    type: "riemannian_metric"
+  sampling:
+    method: "geodesic"  # Keep successful sampling method
+    use_riemannian: true
+  loop:
+    mode: "open"    # Keep successful loop mode
+    penalty: 5.0    # Keep successful penalty
+
+# Optimization
+optimizer:
+  name: "adam"
+  lr: 0.001
+  weight_decay: 0.0001
+
+# Logging
+logging:
+  log_every_n_steps: 5
+  save_top_k: 3
+  monitor: "val_loss"
+  mode: "min"
+
+# Visualization (reduce frequency for performance)
+visualization:
+  frequency: 10
+  level: "standard"
+
+# Use maximum available data
+n_train_samples: 5000  # Use full training set
+n_val_samples: 888    # Use full validation set (test set size)
+
+# Scheduler
+scheduler:
+  mode: "min"
+  factor: 0.8
+  patience: 5
+  threshold: 0.01
+  min_lr: 1e-7
+
+# Early stopping
+early_stopping:
+  patience: 10
+  monitor: "val_loss"
+  mode: "min"
+  min_delta: 0.001 

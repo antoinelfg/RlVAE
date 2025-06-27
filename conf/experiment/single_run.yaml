@@ -1,0 +1,16 @@
+# @package experiment
+
+# Single experiment run
+type: "single"
+name: "single_run"
+
+# No sweeps, just run once with given config
+sweep: null
+
+# Logging
+log_level: "INFO"
+log_to_file: true
+
+# Reproducibility
+deterministic: true
+benchmark: false 

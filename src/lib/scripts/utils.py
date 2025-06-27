@@ -1,8 +1,8 @@
 import torch
-from pythae.data.datasets import DatasetOutput
+from src.lib.src.pythae.data.datasets import DatasetOutput
 from torch.utils.data import Dataset
-from pythae.models.nn import BaseEncoder, BaseDecoder
-from pythae.models.base.base_utils import ModelOutput
+from src.lib.src.pythae.models.nn import BaseEncoder, BaseDecoder
+from src.lib.src.pythae.models.base.base_utils import ModelOutput
 import torch.nn as nn
 import numpy as np
 

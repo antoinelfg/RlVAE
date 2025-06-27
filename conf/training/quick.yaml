@@ -1,0 +1,78 @@
+# @package training
+
+# Quick training configuration for development and testing
+defaults:
+  - _self_
+
+# Training parameters
+trainer:
+  max_epochs: 20
+  accelerator: "gpu"
+  devices: 1  # Use single GPU to avoid device mismatches
+  strategy: "auto"  # Use auto strategy for single GPU
+  precision: "16-mixed"
+  log_every_n_steps: 1
+  val_check_interval: 0.5
+  num_sanity_val_steps: 2
+  enable_progress_bar: true
+  enable_model_summary: true
+  deterministic: false
+  use_distributed_sampler: false  # Disable for single GPU
+
+# Data parameters
+data:
+  batch_size: 4
+  num_workers: 8
+  pin_memory: true
+
+# Model parameters
+model:
+  latent_dim: 16
+  n_flows: 4
+  beta: 1.0
+  riemannian_beta: 0.1
+  posterior:
+    type: "riemannian_metric"
+  sampling:
+    method: "enhanced_riemannian"
+    use_riemannian: true
+  loop:
+    mode: "open"
+    penalty: 0.1
+
+# Optimization
+optimizer:
+  name: "adam"
+  lr: 0.001
+  weight_decay: 0.0001
+
+# Logging
+logging:
+  log_every_n_steps: 1
+  save_top_k: 2
+  monitor: "val_loss"
+  mode: "min"
+
+# Visualization
+visualization:
+  frequency: 5
+  level: "minimal"
+
+# Small data splits
+n_train_samples: 100
+n_val_samples: 50
+
+# Optimization (same structure as default)
+scheduler:
+  mode: "min"
+  factor: 0.8
+  patience: 3
+  threshold: 0.01
+  min_lr: 1e-7
+
+# Early stopping
+early_stopping:
+  patience: 5
+  monitor: "val_loss"
+  mode: "min"
+  min_delta: 0.001 

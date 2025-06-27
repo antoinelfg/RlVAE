@@ -2,8 +2,8 @@ import os
 
 import torch
 import logging
-from pythae.models import GPVAE, GPVAEConfig, AutoModel
-from pythae.trainers import BaseTrainerConfig, BaseTrainer
+from src.lib.src.pythae.models import GPVAE, GPVAEConfig, AutoModel
+from src.lib.src.pythae.trainers import BaseTrainerConfig, BaseTrainer
 import argparse
 import numpy as np
 
@@ -344,7 +344,7 @@ def main(args):
     callbacks = []
 
     if args.use_wandb:
-        from pythae.trainers.training_callbacks import WandbCallback
+        from src.lib.src.pythae.trainers.training_callbacks import WandbCallback
 
         wandb_cb = WandbCallback()
         wandb_cb.setup(
@@ -403,7 +403,7 @@ def main(args):
     print("Evaluation metric: ", metrics)
 
     if args.use_wandb:
-        from pythae.trainers.training_callbacks import WandbCallback
+        from src.lib.src.pythae.trainers.training_callbacks import WandbCallback
 
         wandb_cb = WandbCallback()
         wandb_cb.setup(

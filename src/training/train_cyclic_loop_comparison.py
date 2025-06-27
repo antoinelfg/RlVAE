@@ -201,9 +201,7 @@ class CyclicLoopTrainer:
         if getattr(config, 'wandb_offline', False):
             print(f"   🌐 WandB mode: OFFLINE")
 
-    def should_save_locally(self):
-        """Check if we should save files locally."""
-        return not (getattr(self.config, 'wandb_only', False) or getattr(self.config, 'disable_local_files', False))
+
     
     def should_log_to_wandb(self):
         """Check if we should log to WandB."""
@@ -321,25 +319,10 @@ class CyclicLoopTrainer:
             saved_file = self._safe_save_plt_figure(filename, dpi=300, bbox_inches='tight')
             
             # Log to WandB
-            if self.should_log_to_wandb():
-                if saved_file and self.should_save_locally():
-                    # Use local file if saved
-                    wandb.log({
-                        "analysis/cyclicity_overview": wandb.Image(saved_file, caption=f"Epoch {epoch} - {self.config.loop_mode} mode"),
-                    })
-                else:
-                    # Create temporary buffer for WandB-only mode
-                    import io
-                    import PIL.Image
-                    import numpy as np
-                    buf = io.BytesIO()
-                    plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
-                    buf.seek(0)
-                    # Convert buffer to PIL Image for WandB
-                    pil_img = PIL.Image.open(buf)
-                    wandb.log({
-                        "analysis/cyclicity_overview": wandb.Image(pil_img, caption=f"Epoch {epoch} - {self.config.loop_mode} mode"),
-                    })
+            if self.should_log_to_wandb() and saved_file:
+                wandb.log({
+                    "analysis/cyclicity_overview": wandb.Image(saved_file, caption=f"Epoch {epoch} - {self.config.loop_mode} mode"),
+                })
             
             plt.close()
         
@@ -565,9 +548,11 @@ class CyclicLoopTrainer:
             # Save best model
             if val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
-                model_path = f'best_cyclic_{self.config.loop_mode}_model_epoch_{epoch}.pt'
+                
+                model_filename = f'best_cyclic_{self.config.loop_mode}_model_epoch_{epoch}.pt'
+                model_path = self._get_output_path(model_filename, "models")
                 torch.save(self.model.state_dict(), model_path)
-                print(f"💾 Saved best {self.config.loop_mode} model (val_loss: {self.best_val_loss:.4f})")
+                print(f"💾 Saved best {self.config.loop_mode} model to {model_path} (val_loss: {self.best_val_loss:.4f})")
                 
                 wandb.log({
                     'best_model/epoch': epoch,
@@ -765,11 +750,16 @@ class CyclicLoopTrainer:
                 # Save with reduced DPI to avoid PIL warnings
                 temp_suffix = f"_T{temperature_override}" if temperature_override else ""
                 filename = f'moderate_detail_metric_heatmap{temp_suffix}_epoch_{epoch}.png'
-                plt.savefig(filename, dpi=150, bbox_inches='tight', facecolor='white')
+                saved_file = self._safe_save_plt_figure(filename, dpi=150, bbox_inches='tight', facecolor='white')
                 
                 # Log with temperature-specific metrics
-                log_dict = {
-                    "manifold/moderate_detail_heatmap": wandb.Image(filename, caption=f"Epoch {epoch} - Moderate detail{temp_str}"),
+                log_dict = {}
+                
+                # Only log image if it was actually saved or create buffer for WandB-only mode
+                if saved_file:
+                    log_dict["manifold/moderate_detail_heatmap"] = wandb.Image(saved_file, caption=f"Epoch {epoch} - Moderate detail{temp_str}")
+                # Add other metrics
+                log_dict.update({
                     "metric_detail/mean_log_det": np.nanmean(log_det_heatmap),
                     "metric_detail/std_log_det": np.nanstd(log_det_heatmap),
                     "metric_detail/mean_condition_number": np.nanmean(cond_heatmap),
@@ -777,7 +767,7 @@ class CyclicLoopTrainer:
                     "metric_detail/mean_eigenvalue": np.nanmean(eigenval_heatmap),
                     "metric_detail/grid_points_computed": len(grid_points_pca),
                     "metric_detail/grid_size": f"{xx.shape[0]}x{xx.shape[1]}",
-                }
+                })
                 
                 if temperature_override:
                     log_dict["metric_detail/temperature_used"] = temperature_override
@@ -817,7 +807,6 @@ class CyclicLoopTrainer:
             import plotly.graph_objects as go
             import plotly.express as px
             from plotly.subplots import make_subplots
-            import numpy as np
             
             print(f"🎬 Creating INTERACTIVE metric slider visualization with timestep evolution...")
             
@@ -1185,18 +1174,22 @@ class CyclicLoopTrainer:
             # Save interactive metric slider visualization
             temp_suffix = f"_T{temperature_override}" if temperature_override else ""
             html_filename = f'interactive_metric_slider{temp_suffix}_epoch_{epoch}.html'
-            fig.write_html(html_filename, include_plotlyjs=True)
+            html_path = self._get_output_path(html_filename, "interactive")
+            fig.write_html(html_path, include_plotlyjs=True)
+            print(f"💾 Saved interactive metric slider: {html_path}")
             
             png_filename = f'interactive_metric_slider{temp_suffix}_epoch_{epoch}.png'
-            self._safe_write_image(fig, png_filename, width=1600, height=1000, scale=2)
+            saved_png = self._safe_write_image(fig, png_filename, width=1600, height=1000, scale=2)
             
             # Log to wandb
             if wandb.run is not None:
-                wandb.log({
-                    "temporal_evolution/interactive_metric_slider": wandb.Html(html_filename),
-                    "temporal_evolution/metric_slider_static": wandb.Image(png_filename, 
-                        caption=f"Epoch {epoch} - Interactive metric slider{temp_str}"),
-                })
+                log_dict = {"temporal_evolution/interactive_metric_slider": wandb.Html(html_path)}
+                
+                # Only log static image if it was actually saved as PNG
+                if saved_png and saved_png.endswith('.png'):
+                    log_dict["temporal_evolution/metric_slider_static"] = wandb.Image(saved_png, 
+                        caption=f"Epoch {epoch} - Interactive metric slider{temp_str}")
+                wandb.log(log_dict)
             
             print(f"🎬 Interactive metric slider visualization saved: {html_filename}")
             print(f"   📊 Tracks det(G), Tr(G), condition number across {n_obs} timesteps")
@@ -1313,11 +1306,27 @@ class CyclicLoopTrainer:
             
             # Save and log
             filename = f'sequence_trajectories_{self.config.loop_mode}_epoch_{epoch}.png'
-            plt.savefig(filename, dpi=300, bbox_inches='tight')
-            # Keep the visualization but remove clutter metrics
-            wandb.log({
-                "analysis/sequence_trajectories": wandb.Image(filename, caption=f"Epoch {epoch} - {self.config.loop_mode} trajectories"),
-            })
+            saved_file = self._safe_save_plt_figure(filename, dpi=300, bbox_inches='tight')
+            
+            # Log to WandB
+            if self.should_log_to_wandb():
+                if saved_file:
+                    # Use local file if saved
+                    wandb.log({
+                        "analysis/sequence_trajectories": wandb.Image(saved_file, caption=f"Epoch {epoch} - {self.config.loop_mode} trajectories"),
+                    })
+                else:
+                    # Create temporary buffer for WandB-only mode
+                    import io
+                    import PIL.Image
+                    buf = io.BytesIO()
+                    plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
+                    buf.seek(0)
+                    pil_img = PIL.Image.open(buf)
+                    wandb.log({
+                        "analysis/sequence_trajectories": wandb.Image(pil_img, caption=f"Epoch {epoch} - {self.config.loop_mode} trajectories"),
+                    })
+            
             plt.close()
         
         self.model.train()
@@ -1380,11 +1389,27 @@ class CyclicLoopTrainer:
             
             # Save and log
             filename = f'comprehensive_reconstruction_{self.config.loop_mode}_epoch_{epoch}.png'
-            plt.savefig(filename, dpi=300, bbox_inches='tight')
-            # Keep the visualization but remove clutter metrics
-            wandb.log({
-                "analysis/reconstruction_overview": wandb.Image(filename, caption=f"Epoch {epoch} - {self.config.loop_mode} reconstruction"),
-            })
+            saved_file = self._safe_save_plt_figure(filename, dpi=300, bbox_inches='tight')
+            
+            # Log to WandB
+            if self.should_log_to_wandb():
+                if saved_file:
+                    # Use local file if saved
+                    wandb.log({
+                        "analysis/reconstruction_overview": wandb.Image(saved_file, caption=f"Epoch {epoch} - {self.config.loop_mode} reconstruction"),
+                    })
+                else:
+                    # Create temporary buffer for WandB-only mode
+                    import io
+                    import PIL.Image
+                    buf = io.BytesIO()
+                    plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
+                    buf.seek(0)
+                    pil_img = PIL.Image.open(buf)
+                    wandb.log({
+                        "analysis/reconstruction_overview": wandb.Image(pil_img, caption=f"Epoch {epoch} - {self.config.loop_mode} reconstruction"),
+                    })
+            
             plt.close()
         
         self.model.train()
@@ -2170,8 +2195,22 @@ class CyclicLoopTrainer:
             
         plt.tight_layout()
         filename = f'enhanced_pca_analysis_epoch_{epoch}.png'
-        plt.savefig(filename, dpi=150, bbox_inches='tight')
-        wandb.log({"enhanced_pca_analysis": wandb.Image(filename, caption=f"Epoch {epoch} - Enhanced PCA")})
+        saved_file = self._safe_save_plt_figure(filename, dpi=150, bbox_inches='tight')
+        
+        # Log to WandB
+        if self.should_log_to_wandb():
+            if saved_file:
+                wandb.log({"enhanced_pca_analysis": wandb.Image(saved_file, caption=f"Epoch {epoch} - Enhanced PCA")})
+            else:
+                # Create temporary buffer for WandB-only mode
+                import io
+                import PIL.Image
+                buf = io.BytesIO()
+                plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+                buf.seek(0)
+                pil_img = PIL.Image.open(buf)
+                wandb.log({"enhanced_pca_analysis": wandb.Image(pil_img, caption=f"Epoch {epoch} - Enhanced PCA")})
+        
         plt.close()
         
         print(f"✅ Enhanced PCA analysis created: {len(timesteps_with_metrics)}/{n_timesteps} timesteps have metrics")
@@ -2274,8 +2313,22 @@ class CyclicLoopTrainer:
         
         plt.tight_layout()
         filename = f'enhanced_manifold_heatmaps_epoch_{epoch}.png'
-        plt.savefig(filename, dpi=150, bbox_inches='tight')
-        wandb.log({"enhanced_heatmaps": wandb.Image(filename, caption=f"Epoch {epoch} - Enhanced Heatmaps")})
+        saved_file = self._safe_save_plt_figure(filename, dpi=150, bbox_inches='tight')
+        
+        # Log to WandB
+        if self.should_log_to_wandb():
+            if saved_file:
+                wandb.log({"enhanced_heatmaps": wandb.Image(saved_file, caption=f"Epoch {epoch} - Enhanced Heatmaps")})
+            else:
+                # Create temporary buffer for WandB-only mode
+                import io
+                import PIL.Image
+                buf = io.BytesIO()
+                plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+                buf.seek(0)
+                pil_img = PIL.Image.open(buf)
+                wandb.log({"enhanced_heatmaps": wandb.Image(pil_img, caption=f"Epoch {epoch} - Enhanced Heatmaps")})
+        
         plt.close()
         
         print(f"✅ Enhanced manifold heatmaps created")
@@ -2410,9 +2463,11 @@ class CyclicLoopTrainer:
         
         plt.tight_layout()
         filename = f'temporal_metric_analysis_epoch_{epoch}.png'
-        plt.savefig(filename, dpi=150, bbox_inches='tight')
-        wandb.log({
-            "temporal_metric_analysis": wandb.Image(filename, caption=f"Epoch {epoch} - Temporal Metrics"),
+        saved_file = self._safe_save_plt_figure(filename, dpi=150, bbox_inches='tight')
+        
+        if wandb.run is not None and saved_file:
+            wandb.log({
+                "temporal_metric_analysis": wandb.Image(saved_file, caption=f"Epoch {epoch} - Temporal Metrics"),
             "metrics/timesteps_with_data": len(timesteps_with_metrics),
             "metrics/total_timesteps": len(timestep_data),
             "metrics/coverage_percentage": 100*len(timesteps_with_metrics)/len(timestep_data)
@@ -2580,7 +2635,7 @@ class CyclicLoopTrainer:
                 
                 # Log with temperature-specific metrics
                 log_dict = {
-                    "manifold/ultra_high_detail_heatmap": wandb.Image(filename, caption=f"Epoch {epoch} - Ultra detail{temp_str}"),
+                    "manifold/ultra_high_detail_heatmap": wandb.Image(saved_file, caption=f"Epoch {epoch} - Ultra detail{temp_str}"),
                     "metric_detail/mean_log_det": np.nanmean(log_det_heatmap),
                     "metric_detail/std_log_det": np.nanstd(log_det_heatmap),
                     "metric_detail/mean_condition_number": np.nanmean(cond_heatmap),
@@ -2628,7 +2683,6 @@ class CyclicLoopTrainer:
                 z_seq = result.z  # [batch_size, n_obs, latent_dim]
                 
                 from sklearn.decomposition import PCA
-                import numpy as np
                 
                 batch_size, n_obs, latent_dim = z_seq.shape
                 
@@ -2664,11 +2718,12 @@ class CyclicLoopTrainer:
                 
                 # Save and log
                 filename = f'enhanced_geodesic_analysis_epoch_{epoch}.png'
-                plt.savefig(filename, dpi=200, bbox_inches='tight', facecolor='white')
+                saved_file = self._safe_save_plt_figure(filename, dpi=200, bbox_inches='tight', facecolor='white')
                 
-                wandb.log({
-                    "geodesic/enhanced_analysis": wandb.Image(filename, caption=f"Epoch {epoch} - Enhanced geodesic & metric analysis"),
-                })
+                if saved_file:
+                    wandb.log({
+                        "geodesic/enhanced_analysis": wandb.Image(saved_file, caption=f"Epoch {epoch} - Enhanced geodesic & metric analysis"),
+                    })
                 plt.close()
                 
                 # 🎬 NEW: Create INTERACTIVE geodesic visualization with time slider (only every 6 epochs to avoid slowdown)
@@ -2693,7 +2748,6 @@ class CyclicLoopTrainer:
             import plotly.graph_objects as go
             import plotly.express as px
             from plotly.subplots import make_subplots
-            import numpy as np
             
             print(f"🌍 Creating INTERACTIVE geodesic slider visualization with timestep evolution...")
             
@@ -3093,18 +3147,22 @@ class CyclicLoopTrainer:
             
             # Save interactive geodesic slider visualization
             html_filename = f'interactive_geodesic_slider_epoch_{epoch}.html'
-            fig.write_html(html_filename, include_plotlyjs=True)
+            html_path = self._get_output_path(html_filename, "interactive")
+            fig.write_html(html_path, include_plotlyjs=True)
+            print(f"💾 Saved interactive geodesic slider: {html_path}")
             
             png_filename = f'interactive_geodesic_slider_epoch_{epoch}.png'
-            self._safe_write_image(fig, png_filename, width=1600, height=1000, scale=2)
+            saved_png = self._safe_write_image(fig, png_filename, width=1600, height=1000, scale=2)
             
             # Log to wandb
             if wandb.run is not None:
-                wandb.log({
-                    "geodesics/interactive_slider": wandb.Html(html_filename),
-                    "geodesics/geodesic_slider_static": wandb.Image(png_filename, 
-                        caption=f"Epoch {epoch} - Interactive geodesic slider"),
-                })
+                log_dict = {"geodesics/interactive_slider": wandb.Html(html_path)}
+                
+                # Only log static image if it was actually saved as PNG
+                if saved_png and saved_png.endswith('.png'):
+                    log_dict["geodesics/geodesic_slider_static"] = wandb.Image(saved_png, 
+                        caption=f"Epoch {epoch} - Interactive geodesic slider")
+                wandb.log(log_dict)
             
             print(f"🌍 Interactive geodesic slider visualization saved: {html_filename}")
             print(f"   📊 Tracks geodesics, eigenvalue fields, metric ellipses across {n_obs} timesteps")
@@ -3618,7 +3676,6 @@ class CyclicLoopTrainer:
                 z_seq = result.z  # [batch_size, n_obs, latent_dim]
                 
                 from sklearn.decomposition import PCA
-                import numpy as np
                 
                 batch_size, n_obs, latent_dim = z_seq.shape
                 
@@ -3691,16 +3748,21 @@ class CyclicLoopTrainer:
                 
                 # Save as interactive HTML
                 html_filename = f'fancy_geodesic_analysis_epoch_{epoch}.html'
-                fig.write_html(html_filename, include_plotlyjs=True)
+                html_path = self._get_output_path(html_filename, "interactive")
+                fig.write_html(html_path, include_plotlyjs=True)
+                print(f"💾 Saved fancy geodesic analysis: {html_path}")
                 
                 # Also save a static high-quality image
                 png_filename = f'fancy_geodesic_analysis_epoch_{epoch}.png'
-                self._safe_write_image(fig, png_filename, width=1600, height=1000, scale=2)
+                saved_png = self._safe_write_image(fig, png_filename, width=1600, height=1000, scale=2)
                 
-                wandb.log({
-                    "geodesic/fancy_interactive": wandb.Html(html_filename),
-                    "geodesic/fancy_static": wandb.Image(png_filename, caption=f"Epoch {epoch} - Fancy geodesic analysis"),
-                })
+                # Log to WandB
+                log_dict = {"geodesic/fancy_interactive": wandb.Html(html_path)}
+                
+                # Only log static image if it was actually saved as PNG
+                if saved_png and saved_png.endswith('.png'):
+                    log_dict["geodesic/fancy_static"] = wandb.Image(saved_png, caption=f"Epoch {epoch} - Fancy geodesic analysis")
+                wandb.log(log_dict)
                 
                 print(f"✨ Fancy interactive visualization created!")
                 print(f"📁 Files: {html_filename} (interactive), {png_filename} (static)")
@@ -3822,7 +3884,6 @@ class CyclicLoopTrainer:
         try:
             import plotly.graph_objects as go
             import plotly.express as px
-            import numpy as np
             # Create grid for eigenvalue field
             x_min, x_max = z_pca_dense[:, :, 0].min() - 1, z_pca_dense[:, :, 0].max() + 1
             y_min, y_max = z_pca_dense[:, :, 1].min() - 1, z_pca_dense[:, :, 1].max() + 1
@@ -3886,7 +3947,6 @@ class CyclicLoopTrainer:
         try:
             import plotly.graph_objects as go
             import plotly.express as px
-            import numpy as np
             # Sample points more densely for ellipses
             x_min, x_max = z_pca_dense[:, :, 0].min() - 1, z_pca_dense[:, :, 0].max() + 1
             y_min, y_max = z_pca_dense[:, :, 1].min() - 1, z_pca_dense[:, :, 1].max() + 1
@@ -4011,7 +4071,6 @@ class CyclicLoopTrainer:
         """Create beautiful and accurate curvature landscape with timestep-specific metrics."""
         try:
             import plotly.graph_objects as go
-            import numpy as np
             x_min, x_max = z_pca_dense[:, :, 0].min() - 1, z_pca_dense[:, :, 0].max() + 1
             y_min, y_max = z_pca_dense[:, :, 1].min() - 1, z_pca_dense[:, :, 1].max() + 1
             
@@ -4231,7 +4290,6 @@ class CyclicLoopTrainer:
         try:
             import plotly.graph_objects as go
             import plotly.express as px
-            import numpy as np
             x_min, x_max = z_pca_dense[:, :, 0].min() - 1, z_pca_dense[:, :, 0].max() + 1
             y_min, y_max = z_pca_dense[:, :, 1].min() - 1, z_pca_dense[:, :, 1].max() + 1
             
@@ -4296,31 +4354,27 @@ class CyclicLoopTrainer:
             print(f"⚠️ Fancy amplification heatmap failed: {e}")
 
     def _safe_write_image(self, fig, filename, **kwargs):
-        """Safely write Plotly figure to image, handling animated figures and file saving options."""
-        # Check if we should save locally
-        if not self.should_save_locally():
-            print(f"📤 Skipping local save for {filename} (WandB-only mode)")
-            return None
+        """Safely write Plotly figure to organized wandb folder."""
+        output_path = self._get_output_path(filename, "interactive")
             
         try:
             # Check if figure has frames (animated)
             if hasattr(fig, 'frames') and fig.frames:
-                print(f"⚠️ Skipping PNG export for animated figure: {filename} (has {len(fig.frames)} frames)")
                 # Save as HTML instead for animated figures
-                html_filename = filename.replace('.png', '.html')
+                html_filename = output_path.replace('.png', '.html')
                 fig.write_html(html_filename)
                 print(f"💾 Saved animated figure as HTML: {html_filename}")
                 return html_filename
             else:
                 # Regular static figure - safe to export as PNG
-                fig.write_image(filename, **kwargs)
-                print(f"💾 Saved static figure as PNG: {filename}")
-                return filename
+                fig.write_image(output_path, **kwargs)
+                print(f"💾 Saved static figure as PNG: {output_path}")
+                return output_path
         except Exception as e:
-            print(f"⚠️ Image export failed for {filename}: {e}")
+            print(f"⚠️ Image export failed for {output_path}: {e}")
             # Fallback: try to save as HTML
             try:
-                html_filename = filename.replace('.png', '.html')
+                html_filename = output_path.replace('.png', '.html')
                 fig.write_html(html_filename)
                 print(f"💾 Fallback: Saved as HTML: {html_filename}")
                 return html_filename
@@ -4328,18 +4382,23 @@ class CyclicLoopTrainer:
                 print(f"❌ Both PNG and HTML export failed: {e2}")
                 return None
     
+    def _get_output_path(self, filename, subfolder="visualizations"):
+        """Get output path for files - organized in wandb folder structure."""
+        import os
+        output_dir = f"wandb/{subfolder}"
+        os.makedirs(output_dir, exist_ok=True)
+        return f"{output_dir}/{filename}"
+    
     def _safe_save_plt_figure(self, filename, **kwargs):
-        """Safely save matplotlib figure with file saving options."""
-        if not self.should_save_locally():
-            print(f"📤 Skipping local save for {filename} (WandB-only mode)")
-            return None
+        """Safely save matplotlib figure to organized wandb folder."""
+        output_path = self._get_output_path(filename, "plots")
         
         try:
-            plt.savefig(filename, **kwargs)
-            print(f"💾 Saved matplotlib figure: {filename}")
-            return filename
+            plt.savefig(output_path, **kwargs)
+            print(f"💾 Saved matplotlib figure: {output_path}")
+            return output_path
         except Exception as e:
-            print(f"❌ Failed to save matplotlib figure {filename}: {e}")
+            print(f"❌ Failed to save matplotlib figure {output_path}: {e}")
             return None
 
     def create_timestep_specific_curvature_analysis(self, x_sample, epoch):
@@ -4360,7 +4419,6 @@ class CyclicLoopTrainer:
             import plotly.express as px
             from plotly.subplots import make_subplots
             from sklearn.decomposition import PCA
-            import numpy as np
             
             self.model.eval()
             with torch.no_grad():
@@ -4626,7 +4684,6 @@ class CyclicLoopTrainer:
             import plotly.express as px
             from plotly.subplots import make_subplots
             from sklearn.decomposition import PCA
-            import numpy as np
             
             self.model.eval()
             with torch.no_grad():
@@ -4787,7 +4844,6 @@ class CyclicLoopTrainer:
             import matplotlib.pyplot as plt
             import matplotlib
             matplotlib.use('Agg')
-            import numpy as np
             
             batch_size, n_obs, _ = z_pca_seq.shape
             
@@ -4945,16 +5001,16 @@ class CyclicLoopTrainer:
             
             # Save flow-based evolution
             filename = f'flow_based_det_evolution_epoch_{epoch}.png'
-            plt.savefig(filename, dpi=150, bbox_inches='tight')
+            saved_file = self._safe_save_plt_figure(filename, dpi=150, bbox_inches='tight')
             plt.close()
             
             # Create temporal difference plots
             self._create_flow_jacobian_analysis_plots(det_G_seq, flow_jacobians, epoch)
             
             # Log to wandb
-            if wandb.run is not None:
+            if wandb.run is not None and saved_file:
                 wandb.log({
-                    "temporal_evolution/flow_based_comprehensive": wandb.Image(filename, 
+                    "temporal_evolution/flow_based_comprehensive": wandb.Image(saved_file, 
                         caption=f"Epoch {epoch} - Flow-based det(G) evolution"),
                 })
             
@@ -4967,7 +5023,6 @@ class CyclicLoopTrainer:
         """Create detailed analysis of flow Jacobians and their impact."""
         try:
             import matplotlib.pyplot as plt
-            import numpy as np
             
             if not flow_jacobians:
                 return
@@ -5090,13 +5145,13 @@ class CyclicLoopTrainer:
             
             # Save Jacobian analysis
             jac_filename = f'flow_jacobian_analysis_epoch_{epoch}.png'
-            plt.savefig(jac_filename, dpi=150, bbox_inches='tight')
+            saved_file = self._safe_save_plt_figure(jac_filename, dpi=150, bbox_inches='tight')
             plt.close()
             
             # Log to wandb
-            if wandb.run is not None:
+            if wandb.run is not None and saved_file:
                 wandb.log({
-                    "temporal_evolution/jacobian_analysis": wandb.Image(jac_filename, 
+                    "temporal_evolution/jacobian_analysis": wandb.Image(saved_file, 
                         caption=f"Epoch {epoch} - Flow Jacobian analysis"),
                 })
             
@@ -5109,7 +5164,6 @@ class CyclicLoopTrainer:
             import plotly.graph_objects as go
             import plotly.express as px
             from plotly.subplots import make_subplots
-            import numpy as np
             
             batch_size, n_obs, _ = z_pca_seq.shape
             
@@ -5313,18 +5367,22 @@ class CyclicLoopTrainer:
             
             # Save interactive animation
             html_filename = f'flow_based_animation_epoch_{epoch}.html'
-            fig.write_html(html_filename, include_plotlyjs=True)
+            html_path = self._get_output_path(html_filename, "interactive")
+            fig.write_html(html_path, include_plotlyjs=True)
+            print(f"💾 Saved flow-based animation: {html_path}")
             
             png_filename = f'flow_based_animation_epoch_{epoch}.png'
-            self._safe_write_image(fig, png_filename, width=1600, height=900, scale=2)
+            saved_png = self._safe_write_image(fig, png_filename, width=1600, height=900, scale=2)
             
             # Log to wandb
             if wandb.run is not None:
-                wandb.log({
-                    "temporal_evolution/flow_based_interactive": wandb.Html(html_filename),
-                    "temporal_evolution/flow_based_animation_static": wandb.Image(png_filename, 
-                        caption=f"Epoch {epoch} - Flow-based interactive animation"),
-                })
+                log_dict = {"temporal_evolution/flow_based_interactive": wandb.Html(html_path)}
+                
+                # Only log static image if it was actually saved as PNG
+                if saved_png and saved_png.endswith('.png'):
+                    log_dict["temporal_evolution/flow_based_animation_static"] = wandb.Image(saved_png, 
+                        caption=f"Epoch {epoch} - Flow-based interactive animation")
+                wandb.log(log_dict)
             
             print(f"🌊 Flow-based interactive animation saved: {html_filename}")
             
@@ -5384,7 +5442,7 @@ class CyclicLoopTrainer:
             
             # Save static temporal evolution
             filename = f'temporal_det_evolution_epoch_{epoch}.png'
-            plt.savefig(filename, dpi=150, bbox_inches='tight')
+            saved_file = self._safe_save_plt_figure(filename, dpi=150, bbox_inches='tight')
             plt.close()
             
             # Create sequence-specific det(G) evolution plot
@@ -5392,11 +5450,11 @@ class CyclicLoopTrainer:
             
             # Log to wandb if available
             if wandb.run is not None:
-                wandb.log({
-                    "temporal_evolution/static_snapshots": wandb.Image(filename, 
-                        caption=f"Epoch {epoch} - Temporal det(G) evolution"),
-                })
-            
+                if saved_file:
+                    wandb.log({
+                        "temporal_evolution/static_snapshots": wandb.Image(saved_file, 
+                            caption=f"Epoch {epoch} - Temporal det(G) evolution"),
+                    })
         except Exception as e:
             print(f"⚠️ Static temporal plots failed: {e}")
 
@@ -5459,16 +5517,15 @@ class CyclicLoopTrainer:
             
             # Save sequence evolution plot
             seq_filename = f'sequence_det_evolution_epoch_{epoch}.png'
-            plt.savefig(seq_filename, dpi=150, bbox_inches='tight')
+            saved_file = self._safe_save_plt_figure(seq_filename, dpi=150, bbox_inches='tight')
             plt.close()
             
             # Log to wandb if available
-            if wandb.run is not None:
+            if wandb.run is not None and saved_file:
                 wandb.log({
-                    "temporal_evolution/sequence_trajectories": wandb.Image(seq_filename, 
+                    "temporal_evolution/sequence_trajectories": wandb.Image(saved_file, 
                         caption=f"Epoch {epoch} - det(G) evolution along sequences"),
                 })
-            
         except Exception as e:
             print(f"⚠️ Sequence det evolution plots failed: {e}")
 
@@ -5656,18 +5713,22 @@ class CyclicLoopTrainer:
             
             # Save interactive animation
             html_filename = f'temporal_metric_animation_epoch_{epoch}.html'
-            fig.write_html(html_filename, include_plotlyjs=True)
+            html_path = self._get_output_path(html_filename, "interactive")
+            fig.write_html(html_path, include_plotlyjs=True)
+            print(f"💾 Saved temporal metric animation: {html_path}")
             
             png_filename = f'temporal_metric_animation_epoch_{epoch}.png'
-            self._safe_write_image(fig, png_filename, width=1600, height=800, scale=2)
+            saved_png = self._safe_write_image(fig, png_filename, width=1600, height=800, scale=2)
             
             # Log to wandb if available  
             if wandb.run is not None:
-                wandb.log({
-                    "temporal_evolution/interactive_animation": wandb.Html(html_filename),
-                    "temporal_evolution/animation_static": wandb.Image(png_filename, 
-                        caption=f"Epoch {epoch} - Interactive temporal animation"),
-                })
+                log_dict = {"temporal_evolution/interactive_animation": wandb.Html(html_path)}
+                
+                # Only log static image if it was actually saved as PNG
+                if saved_png and saved_png.endswith('.png'):
+                    log_dict["temporal_evolution/animation_static"] = wandb.Image(saved_png, 
+                        caption=f"Epoch {epoch} - Interactive temporal animation")
+                wandb.log(log_dict)
             
             print(f"🎬 Interactive temporal animation saved: {html_filename}")
             

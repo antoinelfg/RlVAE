@@ -1,7 +1,7 @@
 import os
 import torch
 import logging
-from pythae.models import AutoModel
+from src.lib.src.pythae.models import AutoModel
 from pytorch_fid.fid_score import calculate_fid_given_arrays
 import argparse
 import numpy as np
@@ -132,12 +132,12 @@ def main(args):
 
 
     elif model.model_name == "VAE":
-        from pythae.samplers import NormalSampler
+        from src.lib.src.pythae.samplers import NormalSampler
         sampler = NormalSampler(model=model)
         gen = torch.clamp(sampler.sample(num_samples=n_gen_vae, return_gen=True), 0, 1)
 
     elif model.model_name == "VAMP":
-        from pythae.samplers import VAMPSampler
+        from src.lib.src.pythae.samplers import VAMPSampler
         sampler = VAMPSampler(model=model)
         gen = torch.clamp(sampler.sample(num_samples=n_gen_vae, return_gen=True), 0, 1)
 

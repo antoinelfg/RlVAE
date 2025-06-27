@@ -1,0 +1,25 @@
+# @package visualization
+
+level: "standard"
+frequency: 3
+
+# Module toggles
+enable_basic: true
+enable_manifold: true
+enable_interactive: false
+enable_flow_analysis: true
+
+# Frequency controls (every N epochs)
+basic_frequency: 2
+manifold_frequency: 3
+interactive_frequency: 10
+flow_frequency: 5
+
+# Performance controls
+disable_curvature: true
+max_sequences: 8
+enable_fancy_plots: false
+
+# Output controls
+save_local: false
+log_to_wandb: true 

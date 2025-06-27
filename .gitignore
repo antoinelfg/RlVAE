@@ -20,6 +20,7 @@ parts/
 sdist/
 var/
 wheels/
+share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
@@ -43,8 +44,34 @@ htmlcov/
 nosetests.xml
 coverage.xml
 *.cover
+*.py,cover
 .hypothesis/
 .pytest_cache/
+cover/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+.pybuilder/
+target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -55,6 +82,25 @@ ipython_config.py
 
 # pyenv
 .python-version
+
+# pipenv
+Pipfile.lock
+
+# poetry
+poetry.lock
+
+# pdm
+.pdm.toml
+
+# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
 
 # Environments
 .env
@@ -80,91 +126,78 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
-# PyTorch models and checkpoints
-*.pth
-*.pt
-best_*.pt
-checkpoint_*.pt
-model_epoch_*.pt
+# Pyre type checker
+.pyre/
 
-# Large data files (too big for GitHub - see data/README.md for download instructions)
-data/raw/
-data/processed/
+# pytype static type analyzer
+.pytype/
 
-# Except for small pretrained models we want to keep
-!data/pretrained/*.pt
+# Cython debug symbols
+cython_debug/
 
-# Lightning logs
-lightning_logs/
-checkpoints/
+# PyCharm
+.idea/
 
-# WandB tracking and logs (exclude all wandb directories)
-wandb/
+# VSCode
+.vscode/
 
-# Experimental outputs
-results/
+# Vim
+*.swp
+*.swo
+
+# Emacs
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Training outputs
 outputs/
+wandb/
+checkpoints/
 logs/
-temp/
-cache/
+results/
 
-# Documentation builds
-docs/_build/
-docs/build/
-site/
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+
+# Large data files (keep structure but not content)
+data/raw/*.pt
+data/processed/*.pt
+
+# Model checkpoints and training artifacts
+*.ckpt
+*.pth
+lightning_logs/
+
+# Hydra outputs
+.hydra/
+multirun/
+
+# Jupyter notebook outputs
+*.ipynb
+
+# Generated images
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+html_latent_images_*/
 
 # IDE and editor files
-*.sublime-project
-*.sublime-workspace
-.vscode/settings.json
-.vscode/launch.json
-.vscode/extensions.json
-.history/
+.vscode/
+.idea/
+*.sublime-*
 
-# Development tools
-.coverage
-.pytest_cache/
-.mypy_cache/
-.bandit
-.tox/
-htmlcov/
-
-# Package build artifacts
-*.egg-info/
-build/
-dist/
-wheels/
-
-# Local development files
-.env.local
-.env.development
-.env.test
-local_config.py
-debug_*.py
-
-# Large data files (uncomment if needed)
-# *.npz
-# *.npy
-# *.h5
-# *.hdf5
-
-# Jupyter notebook checkpoints
-.ipynb_checkpoints/
-
-# macOS
-.DS_Store
-.AppleDouble
-.LSOverride
-Icon?
-._*
-
-# Windows
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-
-# Backup files
-*.bak
-*.backup
-*.orig
-*.tmp 
+# System files
+.nfs* 

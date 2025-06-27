@@ -1,7 +1,0 @@
-{"time":"2025-06-26T11:01:37.911465949+02:00","level":"INFO","msg":"stream: starting","core version":"0.19.9","symlink path":"/scratch/alaforgu/longitudinal_experiments/longitudinal_vaes/clean_riemannian_flow_vae/src/training/wandb/run-20250626_110137-mwat939j/logs/debug-core.log"}
-{"time":"2025-06-26T11:01:38.190846182+02:00","level":"INFO","msg":"created new stream","id":"mwat939j"}
-{"time":"2025-06-26T11:01:38.190987762+02:00","level":"INFO","msg":"stream: started","id":"mwat939j"}
-{"time":"2025-06-26T11:01:38.191135023+02:00","level":"INFO","msg":"writer: Do: started","stream_id":"mwat939j"}
-{"time":"2025-06-26T11:01:38.191181884+02:00","level":"INFO","msg":"sender: started","stream_id":"mwat939j"}
-{"time":"2025-06-26T11:01:38.191156157+02:00","level":"INFO","msg":"handler: started","stream_id":"mwat939j"}
-{"time":"2025-06-26T11:01:38.603659687+02:00","level":"INFO","msg":"Starting system monitor"}

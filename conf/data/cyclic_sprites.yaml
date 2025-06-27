@@ -1,0 +1,26 @@
+# @package data
+
+# Data paths
+train_path: "data/processed/Sprites_train_cyclic.pt"
+test_path: "data/processed/Sprites_test_cyclic.pt"
+train_meta_path: "data/processed/Sprites_train_cyclic_metadata.pt"
+test_meta_path: "data/processed/Sprites_test_cyclic_metadata.pt"
+
+# Data parameters
+sequence_length: 8
+image_size: [64, 64]
+channels: 3
+
+# Data loading
+num_workers: 4
+pin_memory: true
+persistent_workers: true
+
+# Data splits will be overridden by training config
+# but these are the maximum available
+max_train_samples: 5000
+max_test_samples: 1000
+
+# Data validation
+verify_cyclicity: true
+cyclicity_threshold: 0.01  # MSE threshold for cycle validation 

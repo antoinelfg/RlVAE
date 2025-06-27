@@ -1,7 +1,0 @@
-{"time":"2025-06-26T11:28:16.056376196+02:00","level":"INFO","msg":"stream: starting","core version":"0.19.10","symlink path":"/scratch/alaforgu/longitudinal_experiments/RlVAE/src/training/wandb/run-20250626_112815-p0fbozuv/logs/debug-core.log"}
-{"time":"2025-06-26T11:28:16.436213915+02:00","level":"INFO","msg":"created new stream","id":"p0fbozuv"}
-{"time":"2025-06-26T11:28:16.43650325+02:00","level":"INFO","msg":"stream: started","id":"p0fbozuv"}
-{"time":"2025-06-26T11:28:16.436692943+02:00","level":"INFO","msg":"writer: Do: started","stream_id":"p0fbozuv"}
-{"time":"2025-06-26T11:28:16.436732005+02:00","level":"INFO","msg":"sender: started","stream_id":"p0fbozuv"}
-{"time":"2025-06-26T11:28:16.436753124+02:00","level":"INFO","msg":"handler: started","stream_id":"p0fbozuv"}
-{"time":"2025-06-26T11:28:16.653585356+02:00","level":"INFO","msg":"Starting system monitor"}

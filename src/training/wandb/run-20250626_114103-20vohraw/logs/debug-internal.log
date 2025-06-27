@@ -1,7 +1,0 @@
-{"time":"2025-06-26T11:41:03.745430679+02:00","level":"INFO","msg":"stream: starting","core version":"0.19.10","symlink path":"/scratch/alaforgu/longitudinal_experiments/RlVAE/src/training/wandb/run-20250626_114103-20vohraw/logs/debug-core.log"}
-{"time":"2025-06-26T11:41:04.013353818+02:00","level":"INFO","msg":"created new stream","id":"20vohraw"}
-{"time":"2025-06-26T11:41:04.013524948+02:00","level":"INFO","msg":"stream: started","id":"20vohraw"}
-{"time":"2025-06-26T11:41:04.013626028+02:00","level":"INFO","msg":"writer: Do: started","stream_id":"20vohraw"}
-{"time":"2025-06-26T11:41:04.013712696+02:00","level":"INFO","msg":"handler: started","stream_id":"20vohraw"}
-{"time":"2025-06-26T11:41:04.013716405+02:00","level":"INFO","msg":"sender: started","stream_id":"20vohraw"}
-{"time":"2025-06-26T11:41:04.237851469+02:00","level":"INFO","msg":"Starting system monitor"}

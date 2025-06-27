@@ -1,0 +1,26 @@
+# @package visualization
+
+# Full visualization configuration - comprehensive analysis
+level: full
+frequency: 1  # Visualize every epoch for detailed analysis
+
+# Module toggles
+enable_basic: true
+enable_manifold: true
+enable_interactive: true
+enable_flow_analysis: true
+
+# Frequency controls (every N epochs)
+basic_frequency: 1
+manifold_frequency: 5
+interactive_frequency: 10
+flow_frequency: 5
+
+# Performance controls
+disable_curvature: false  # Enable curvature analysis
+max_sequences: 8  # Show more sequences
+enable_fancy_plots: true
+
+# Output controls
+save_local: true
+log_to_wandb: true 

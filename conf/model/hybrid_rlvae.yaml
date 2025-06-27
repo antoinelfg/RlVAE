@@ -1,0 +1,53 @@
+# @package _global_
+
+# Hybrid Riemannian Flow VAE Configuration
+# Uses new modular components with 2x performance improvement
+# while maintaining full compatibility with existing training infrastructure
+
+defaults:
+  - riemannian_flow_vae  # Inherit from base config
+
+# Model configuration
+model:
+  _target_: src.models.hybrid_rlvae.create_hybrid_model
+  
+  # Core architecture (same as original)
+  input_dim: [3, 64, 64]
+  latent_dim: 16
+  n_flows: 8
+  flow_hidden_size: 256
+  flow_n_blocks: 2
+  flow_n_hidden: 1
+  epsilon: 1e-6
+  beta: 1.0
+  riemannian_beta: 1.0  # Separate beta for Riemannian losses
+  
+  # Posterior configuration
+  posterior:
+    type: "gaussian"  # "gaussian", "iaf", "riemannian_metric"
+  
+  # Loop configuration
+  loop:
+    mode: "open"  # "open" or "closed"
+    penalty: 1.0  # Cycle penalty weight for closed loop
+  
+  # Sampling configuration
+  sampling:
+    use_riemannian: true
+    method: "enhanced"  # "enhanced", "geodesic", "basic", "official", "standard"
+  
+  # Metric tensor configuration (NEW: enhanced with modular components)
+  metric:
+    temperature_override: 0.7  # Override for pretrained temperature
+    regularization_override: null  # Override for regularization (null = use pretrained)
+    enable_diagnostics: true  # Enable detailed metric diagnostics
+    performance_tracking: true  # Track computation performance
+  
+  # Pretrained components
+  pretrained:
+    encoder_path: "data/pretrained/encoder.pt"
+    decoder_path: "data/pretrained/decoder.pt"
+    metric_path: "data/pretrained/metric.pt"
+
+# Training will automatically pick up the hybrid model
+# and benefit from 2x faster metric computations 

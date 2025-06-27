@@ -1,0 +1,43 @@
+# @package experiment
+
+# Hyperparameter sweep for optimization
+type: "sweep"
+name: "riemannian_beta_sweep"
+
+# Sweep configuration
+sweep:
+  method: "grid"  # grid, random, bayes
+  
+  # Parameters to sweep
+  parameters:
+    model.riemannian_beta:
+      values: [0.5, 1.0, 2.0, 5.0, 8.0, 10.0]
+    
+    model.sampling.method:
+      values: ["standard", "basic", "enhanced", "geodesic"]
+    
+    training.learning_rate:
+      values: [1e-4, 3e-4, 1e-3]
+
+# Sweep optimization (for bayesian sweeps)
+objective:
+  metric: "val_loss"
+  goal: "minimize"
+
+# Early termination
+early_terminate:
+  type: "hyperband"
+  min_iter: 5
+  
+# Resources
+max_runs: 50
+concurrent_runs: 4
+
+# Quick evaluation for sweeps
+training_override:
+  n_epochs: 15
+  n_train_samples: 800
+
+visualization_override:
+  level: "minimal"
+  frequency: 10 
