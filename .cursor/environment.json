@@ -1,0 +1,204 @@
+{
+  "agentCanUpdateSnapshot": true,
+  "projectInfo": {
+    "name": "RlVAE - Riemannian Flow VAE",
+    "description": "A modular, high-performance implementation of Riemannian Flow VAE for longitudinal data modeling with fully modular architecture, extensive visualization capabilities, and systematic model comparison tools.",
+    "primaryModel": "modular_rlvae.py",
+    "framework": "PyTorch Lightning + Hydra",
+    "researchArea": "Riemannian Geometry, Variational Autoencoders, Longitudinal Data Modeling"
+  },
+  "architecture": {
+    "primaryRecommendation": "Use modular_rlvae.py as the main model for all research",
+    "modelHierarchy": {
+      "primary": "modular_rlvae.py - 100% modular architecture, research-friendly",
+      "performance": "hybrid_rlvae.py - 2x faster metrics, hybrid approach", 
+      "legacy": "riemannian_flow_vae.py - original implementation, compatibility"
+    },
+    "coreComponents": {
+      "MetricTensor": "src/models/components/metric_tensor.py - Optimized Riemannian metric computations (2x speedup)",
+      "MetricLoader": "src/models/components/metric_loader.py - Flexible pretrained metric loading",
+      "FlowManager": "src/models/components/flow_manager.py - Temporal flow dynamics management",
+      "LossManager": "src/models/components/loss_manager.py - Modular loss computation",
+      "EncoderManager": "src/models/components/encoder_manager.py - Pluggable encoder architectures",
+      "DecoderManager": "src/models/components/decoder_manager.py - Pluggable decoder architectures"
+    },
+    "samplers": {
+      "BaseRiemannianSampler": "src/models/samplers/base_sampler.py - Abstract base class",
+      "WorkingRiemannianSampler": "src/models/samplers/riemannian_sampler.py - Enhanced sampling",
+      "RiemannianHMCSampler": "src/models/samplers/hmc_sampler.py - HMC sampling on manifolds",
+      "OfficialRHVAESampler": "src/models/samplers/rhvae_sampler.py - RHVAE integration"
+    }
+  },
+  "directoryStructure": {
+    "src/models/": "Core model implementations - START HERE for model development",
+    "src/models/components/": "Modular components - MetricTensor, FlowManager, LossManager, etc.",
+    "src/models/samplers/": "Sampling strategies - 4 different approaches",
+    "src/training/": "Training infrastructure with PyTorch Lightning",
+    "src/visualizations/": "Comprehensive visualization suite",
+    "src/data/": "Data loading and processing utilities",
+    "conf/": "Hydra configuration files - model, training, experiment configs",
+    "tests/": "Essential test files - test_setup.py, test_modular_components.py, test_hybrid_model.py",
+    "docs/": "Complete documentation - training guides, architecture docs",
+    "scripts/": "Automation scripts - experiment runners, monitoring tools"
+  },
+  "keyFiles": {
+    "run_experiment.py": "MAIN ENTRY POINT - Single script for all experiments and training",
+    "src/models/modular_rlvae.py": "PRIMARY MODEL - Use this for all new research",
+    "src/models/hybrid_rlvae.py": "Performance-optimized model with 2x speedup",
+    "conf/config.yaml": "Main Hydra configuration file",
+    "conf/model/modular_rlvae.yaml": "Primary model configuration",
+    "tests/test_modular_components.py": "Component validation tests",
+    "tests/test_hybrid_model.py": "Integration tests",
+    "README.md": "Complete project overview and quick start"
+  },
+  "developmentWorkflows": {
+    "quickStart": "python run_experiment.py model=modular_rlvae training=quick visualization=minimal",
+    "fullTraining": "python run_experiment.py model=modular_rlvae training=full_data visualization=standard",
+    "modelComparison": "python run_experiment.py experiment=comparison_study",
+    "hyperparameterSweep": "python run_experiment.py experiment=hyperparameter_sweep -m",
+    "testing": {
+      "environment": "python tests/test_setup.py",
+      "components": "python tests/test_modular_components.py", 
+      "integration": "python tests/test_hybrid_model.py",
+      "all": "make test-all"
+    },
+    "makeCommands": {
+      "test-modular": "Test modular components",
+      "train-quick": "Quick training with modular model",
+      "train-full": "Full training with modular model",
+      "train-comparison": "Compare all models"
+    }
+  },
+  "configurationPatterns": {
+    "modelSelection": {
+      "modular": "model=modular_rlvae (recommended for research)",
+      "hybrid": "model=hybrid_rlvae (for performance)",
+      "standard": "model=riemannian_flow_vae (for compatibility)",
+      "baseline": "model=vanilla_vae (for comparison)"
+    },
+    "trainingModes": {
+      "quick": "training=quick (20 epochs, 100 sequences, ~10 min)",
+      "default": "training=default (30 epochs, 1000 sequences, ~45 min)",
+      "full": "training=full_data (50 epochs, 3000 sequences, ~2 hours)"
+    },
+    "visualizations": {
+      "minimal": "visualization=minimal (basic plots, fastest)",
+      "standard": "visualization=standard (manifold analysis, balanced)",
+      "full": "visualization=full (complete diagnostics, comprehensive)"
+    },
+    "experiments": {
+      "single": "experiment=single_run",
+      "comparison": "experiment=comparison_study", 
+      "sweep": "experiment=hyperparameter_sweep"
+    }
+  },
+  "mathematicalConcepts": {
+    "riemannianMetric": "G^{-1}(z) = Σ_k M_k * exp(-||z - c_k||² / T²) + λI",
+    "metricComputation": "G(z) = [G^{-1}(z)]^{-1}",
+    "components": {
+      "z": "latent coordinates [batch_size, latent_dim]",
+      "c_k": "centroids [n_centroids, latent_dim]",
+      "M_k": "metric matrices [n_centroids, latent_dim, latent_dim]",
+      "T": "temperature parameter (controls locality)",
+      "λ": "regularization parameter (ensures positive definiteness)"
+    }
+  },
+  "performanceBenchmarks": {
+    "modularComponents": {
+      "numericalAccuracy": "Perfect (G difference: 9.459e-19)",
+      "speedImprovement": "2x faster metric computations",
+      "memoryUsage": "Same as original, better efficiency",
+      "compatibility": "100% backward compatible"
+    },
+    "modelComparison": {
+      "modularRlVAE": "100% modular, maximum flexibility",
+      "hybridRlVAE": "2x faster metrics, 1.5x faster training",
+      "standardRlVAE": "Baseline performance, original implementation"
+    }
+  },
+  "codingPatterns": {
+    "modularComponents": {
+      "inheritance": "All components inherit from nn.Module",
+      "deviceHandling": "Use register_buffer() for proper device management",
+      "typeHints": "Full type annotations required",
+      "errorHandling": "Comprehensive exception handling with graceful fallbacks",
+      "documentation": "Complete docstrings with mathematical formulations"
+    },
+    "configurationStyle": {
+      "hydra": "Use @hydra.main decorator for configuration",
+      "omegaconf": "Access configs with cfg.model.param_name",
+      "overrides": "Command line: param.subparam=value",
+      "multirun": "Use -m flag for hyperparameter sweeps"
+    },
+    "testingPatterns": {
+      "unitTests": "Test individual components in isolation",
+      "integrationTests": "Test complete model workflows",
+      "numericalTests": "Validate mathematical accuracy (G * G_inv ≈ I)",
+      "performanceTests": "Benchmark timing and memory usage"
+    }
+  },
+  "commonTasks": {
+    "addingNewComponent": {
+      "location": "src/models/components/ or src/models/samplers/",
+      "pattern": "Inherit from nn.Module, add type hints, comprehensive docstrings",
+      "testing": "Add tests in tests/test_modular_components.py",
+      "config": "Add configuration in conf/model/ if needed"
+    },
+    "addingNewModel": {
+      "location": "src/models/",
+      "pattern": "Follow modular_rlvae.py patterns",
+      "config": "Create new config file in conf/model/",
+      "testing": "Add integration tests"
+    },
+    "experimentSetup": {
+      "quickTest": "Use training=quick for development",
+      "development": "Start with modular_rlvae model",
+      "comparison": "Use experiment=comparison_study",
+      "production": "Use training=full_data with proper logging"
+    }
+  },
+  "dependencies": {
+    "core": ["torch", "pytorch-lightning", "hydra-core", "omegaconf"],
+    "visualization": ["matplotlib", "seaborn", "plotly"],
+    "research": ["wandb", "tensorboard"],
+    "data": ["numpy", "scipy", "scikit-learn"],
+    "external": ["pythae (for RHVAE integration)"]
+  },
+  "troubleshooting": {
+    "deviceErrors": "Ensure all components use register_buffer() for tensors",
+    "configErrors": "Check Hydra configuration files in conf/",
+    "importErrors": "Run 'python tests/test_setup.py' to validate environment",
+    "numericalIssues": "Check metric regularization parameters",
+    "performanceIssues": "Use hybrid_rlvae.py for speed, modular_rlvae.py for flexibility"
+  },
+  "researchDirections": {
+    "preferredAreas": [
+      "New sampling strategies in src/models/samplers/",
+      "Advanced metric learning in src/models/components/",
+      "Visualization improvements in src/visualizations/",
+      "Performance optimizations across components",
+      "New model architectures following modular patterns"
+    ],
+    "extensionPoints": {
+      "customMetrics": "Extend MetricTensor class",
+      "newSamplers": "Inherit from BaseRiemannianSampler",
+      "customLosses": "Extend LossManager class",
+      "newArchitectures": "Use EncoderManager/DecoderManager patterns"
+    }
+  },
+  "shortcuts": {
+    "quickCommands": {
+      "experiment": "python run_experiment.py model=modular_rlvae training=quick",
+      "test": "python tests/test_modular_components.py",
+      "validate": "make test-all",
+      "comparison": "python run_experiment.py experiment=comparison_study"
+    },
+    "fileNavigation": {
+      "primaryModel": "src/models/modular_rlvae.py",
+      "components": "src/models/components/",
+      "configs": "conf/model/",
+      "tests": "tests/",
+      "docs": "docs/"
+    }
+  }
+}
