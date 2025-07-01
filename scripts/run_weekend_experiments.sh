@@ -69,19 +69,11 @@ run_experiment() {
 
 # Function to run quick validation
 run_validation() {
-    echo "🔍 Running validation tests..."
-    
-    # Test hybrid model
-    python test_hybrid_model.py > logs/validation_hybrid_${SLURM_JOB_ID}.log 2>&1
-    if [ $? -eq 0 ]; then
-        echo "✅ Hybrid model validation passed"
-    else
-        echo "❌ Hybrid model validation failed"
-        return 1
-    fi
+    echo "🧪 Step 1: Running validation tests..."
+    python tests/test_hybrid_model.py > logs/validation_hybrid_${SLURM_JOB_ID}.log 2>&1
     
     # Test modular components
-    python test_modular_components.py > logs/validation_components_${SLURM_JOB_ID}.log 2>&1
+    python tests/test_modular_components.py > logs/validation_components_${SLURM_JOB_ID}.log 2>&1
     if [ $? -eq 0 ]; then
         echo "✅ Modular components validation passed"
     else

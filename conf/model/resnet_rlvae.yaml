@@ -11,19 +11,23 @@ flow_n_blocks: 2
 flow_n_hidden: 1
 epsilon: 1e-6
 
-# Encoder configuration
+# Encoder configuration - ResNet
 encoder:
-  architecture: "mlp"  # mlp, cnn, resnet
-  # Additional encoder-specific parameters can be added here
-  # For CNN: layers, channels, kernel_size, etc.
-  # For ResNet: layers, channels, etc.
+  architecture: "resnet"
+  layers: [64, 128, 256, 512]  # Number of channels per layer
+  block_type: "basic"  # basic, bottleneck
+  num_blocks: [2, 2, 2, 2]  # Number of blocks per layer
+  activation: "relu"
+  batch_norm: true
 
-# Decoder configuration  
+# Decoder configuration - ResNet
 decoder:
-  architecture: "mlp"  # mlp, cnn, resnet
-  # Additional decoder-specific parameters can be added here
-  # For CNN: layers, channels, kernel_size, etc.
-  # For ResNet: layers, channels, etc.
+  architecture: "resnet"
+  layers: [512, 256, 128, 64]  # Number of channels per layer (reverse of encoder)
+  block_type: "basic"  # basic, bottleneck
+  num_blocks: [2, 2, 2, 2]  # Number of blocks per layer
+  activation: "relu"
+  batch_norm: true
 
 # VAE parameters
 beta: 1.0

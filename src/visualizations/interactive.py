@@ -61,7 +61,7 @@ class InteractiveVisualizations(BaseVisualization):
                 elif hasattr(self.model.G_inv, '__self__') and hasattr(self.model.G_inv.__self__, 'to'):
                     self.model.G_inv.__self__ = self.model.G_inv.__self__.to(self.device)
             
-            # Ensure flows are on device
+            # Move flows to device if available
             if hasattr(self.model, 'flows') and self.model.flows is not None:
                 if isinstance(self.model.flows, (list, nn.ModuleList)):
                     for i, flow in enumerate(self.model.flows):
@@ -69,6 +69,15 @@ class InteractiveVisualizations(BaseVisualization):
                             self.model.flows[i] = flow.to(self.device)
                 elif hasattr(self.model.flows, 'to'):
                     self.model.flows = self.model.flows.to(self.device)
+            elif hasattr(self.model, 'flow_manager') and hasattr(self.model.flow_manager, 'flows'):
+                # Handle modular model structure
+                flows = self.model.flow_manager.flows
+                if isinstance(flows, (list, nn.ModuleList)):
+                    for i, flow in enumerate(flows):
+                        if hasattr(flow, 'to'):
+                            flows[i] = flow.to(self.device)
+                elif hasattr(flows, 'to'):
+                    self.model.flow_manager.flows = flows.to(self.device)
             
             # Ensure any centroids/metric components are on device
             if hasattr(self.model, 'centroids') and self.model.centroids is not None:
@@ -111,6 +120,17 @@ class InteractiveVisualizations(BaseVisualization):
         if isinstance(tensor, torch.Tensor):
             return tensor.to(self.device)
         return tensor
+    
+    def _get_flows(self):
+        """Get flows from either legacy or modular model structure."""
+        # Try legacy structure first
+        if hasattr(self.model, 'flows') and self.model.flows is not None:
+            return self.model.flows
+        # Try modular structure
+        elif hasattr(self.model, 'flow_manager') and hasattr(self.model.flow_manager, 'flows'):
+            return self.model.flow_manager.flows
+        else:
+            return None
     
     def create_geodesic_sliders(self, x_sample: torch.Tensor, epoch: int):
         """Create interactive geodesic slider visualizations with timestep evolution."""
@@ -227,10 +247,26 @@ class InteractiveVisualizations(BaseVisualization):
                     else:
                         # Apply flows to transform grid
                         grid_tensor_t = grid_tensor_base.clone()
-                        for flow_idx in range(min(t_bg, len(self.model.flows))):
+                        for flow_idx in range(min(t_bg, len(self._get_flows()))):
+                            flow = self._get_flows()[flow_idx]
+                            flow_result = flow(grid_tensor_t)
+                            # Handle tuple output (e.g., (tensor, log_det))
+                            if isinstance(flow_result, tuple):
+                                flow_result = flow_result[0]
+                            # Extract tensor if ModelOutput, else pass through
+                            if hasattr(flow_result, 'sample'):
+                                grid_tensor_t = flow_result.sample
+                            elif hasattr(flow_result, 'z'):
+                                grid_tensor_t = flow_result.z
+                            elif hasattr(flow_result, 'out'):
+                                grid_tensor_t = flow_result.out
+                            elif isinstance(flow_result, torch.Tensor):
+                                grid_tensor_t = flow_result
+                            else:
+                                raise TypeError(f"Flow {flow_idx} did not return a tensor, ModelOutput, or tuple with tensor as first element. Got: {type(flow_result)}")
+                            if not isinstance(grid_tensor_t, torch.Tensor):
+                                raise TypeError(f"After extraction, flow {flow_idx} did not yield a tensor.")
                             grid_tensor_t = self._ensure_tensor_on_device(grid_tensor_t)
-                            flow_result = self.model.flows[flow_idx](grid_tensor_t)
-                            grid_tensor_t = self._ensure_tensor_on_device(flow_result.out)
                     
                     # Ensure tensor is on correct device
                     grid_tensor_t = self._ensure_tensor_on_device(grid_tensor_t)
@@ -410,21 +446,9 @@ class InteractiveVisualizations(BaseVisualization):
             # Update layout - SMALLER SIZE
             fig.update_layout(
                 title=f"🎚️ Interactive Geodesic Evolution - Epoch {epoch}",
-                updatemenus=[{
-                    "buttons": [
-                        {"args": [None, {"frame": {"duration": 600, "redraw": True}}], 
-                         "label": "▶️ Play", "method": "animate"},
-                        {"args": [[None], {"frame": {"duration": 0, "redraw": True}}], 
-                         "label": "⏸️ Pause", "method": "animate"}
-                    ],
-                    "direction": "left",
-                    "pad": {"r": 10, "t": 50},
-                    "type": "buttons",
-                    "x": 0.1, "y": 0
-                }],
                 sliders=[{
                     "active": 0,
-                    "currentvalue": {"prefix": "Timestep: ", "visible": True},
+                    "currentvalue": {"prefix": "Timestep: ", "visible": True, "font": {"color": "white"}},
                     "pad": {"b": 10, "t": 50},
                     "steps": [{"args": [[f], {"frame": {"duration": 300, "redraw": True}}], 
                              "label": str(t), "method": "animate"} 
@@ -432,7 +456,17 @@ class InteractiveVisualizations(BaseVisualization):
                 }],
                 width=1000,  # SMALLER
                 height=500,  # SMALLER
-                showlegend=True
+                showlegend=True,
+                legend=dict(
+                    bgcolor='rgba(20,20,20,0.9)',  # Dark background for visibility
+                    bordercolor='white',
+                    borderwidth=2,
+                    font=dict(size=12, color='white')
+                ),
+                # Dark theme to match Wandb
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                font=dict(color='white')
             )
             
             # Save interactive HTML
@@ -517,7 +551,16 @@ class InteractiveVisualizations(BaseVisualization):
                 width=1000,  # SMALLER
                 height=800,  # SMALLER
                 showlegend=True,
-                font={'size': 10}  # Smaller font
+                legend=dict(
+                    bgcolor='rgba(20,20,20,0.9)',  # Dark background for visibility
+                    bordercolor='white',
+                    borderwidth=2,
+                    font=dict(size=12, color='white')
+                ),
+                font={'size': 10, 'color': 'white'},  # Smaller font with white color
+                # Dark theme to match Wandb
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)'
             )
             
             # Save as interactive HTML
@@ -725,10 +768,26 @@ class InteractiveVisualizations(BaseVisualization):
                     try:
                         if t > 0 and hasattr(self.model, 'flows'):
                             grid_t = grid_tensor.clone()
-                            for flow_idx in range(min(t, len(self.model.flows))):
+                            for flow_idx in range(min(t, len(self._get_flows()))):
+                                flow = self._get_flows()[flow_idx]
+                                flow_result = flow(grid_t)
+                                # Handle tuple output (e.g., (tensor, log_det))
+                                if isinstance(flow_result, tuple):
+                                    flow_result = flow_result[0]
+                                # Extract tensor if ModelOutput, else pass through
+                                if hasattr(flow_result, 'sample'):
+                                    grid_t = flow_result.sample
+                                elif hasattr(flow_result, 'z'):
+                                    grid_t = flow_result.z
+                                elif hasattr(flow_result, 'out'):
+                                    grid_t = flow_result.out
+                                elif isinstance(flow_result, torch.Tensor):
+                                    grid_t = flow_result
+                                else:
+                                    raise TypeError(f"Flow {flow_idx} did not return a tensor, ModelOutput, or tuple with tensor as first element. Got: {type(flow_result)}")
+                                if not isinstance(grid_t, torch.Tensor):
+                                    raise TypeError(f"After extraction, flow {flow_idx} did not yield a tensor.")
                                 grid_t = self._ensure_tensor_on_device(grid_t)
-                                flow_result = self.model.flows[flow_idx](grid_t)
-                                grid_t = self._ensure_tensor_on_device(flow_result.out)
                         else:
                             grid_t = self._ensure_tensor_on_device(grid_tensor)
                         
@@ -797,8 +856,7 @@ class InteractiveVisualizations(BaseVisualization):
                         
                         frame_data.append(
                             go.Scatter(
-                                x=timesteps_so_far,
-                                y=det_seq,
+                                x=timesteps_so_far, y=det_seq,
                                 mode='lines+markers',
                                 line=dict(color=colors[seq_idx], width=2),
                                 marker=dict(size=4, color=colors[seq_idx]),
@@ -822,44 +880,50 @@ class InteractiveVisualizations(BaseVisualization):
                 # Add controls - SMALLER SIZE
                 fig.update_layout(
                     title=f"🎬 Interactive Metric Evolution - Epoch {epoch}",
-                    updatemenus=[{
-                        "buttons": [
-                            {"args": [None, {"frame": {"duration": 400, "redraw": True}}], 
-                             "label": "▶️", "method": "animate"},
-                            {"args": [[None], {"frame": {"duration": 0}}], 
-                             "label": "⏸️", "method": "animate"}
-                        ],
-                        "direction": "left", "showactive": False, "type": "buttons"
-                    }],
                     sliders=[{
                         "active": 0,
-                        "currentvalue": {"prefix": "Timestep: "},
-                        "steps": [{"args": [[f.name], {"frame": {"duration": 300}}], 
+                        "yanchor": "top",
+                        "xanchor": "left",
+                        "currentvalue": {
+                            "font": {"size": 14, "color": "white"}, 
+                            "prefix": "Sequence: ", 
+                            "visible": True, 
+                            "xanchor": "left"
+                        },
+                        "transition": {"duration": 300, "easing": "cubic-in-out"},
+                        "pad": {"b": 10, "t": 10},
+                        "len": 0.6,  # Even shorter slider to make room for wider layout
+                        "x": 0.2,    # More centered
+                        "y": -0.06,  # Match play button position
+                        "steps": [{"args": [[f], {"frame": {"duration": 300}}], 
                                  "label": str(t), "method": "animate"} 
                                 for t, f in enumerate(frames)]
                     }],
-                    width=800,   # SMALLER WIDTH
-                    height=400   # SMALLER HEIGHT
+                    showlegend=True,
+                    legend=dict(
+                        bgcolor='rgba(20,20,20,0.9)',  # Dark background for visibility
+                        bordercolor='white',
+                        borderwidth=2,
+                        font=dict(size=12, color='white')
+                    ),
+                    # Dark theme for overall figure
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color='white'),
+                    # Better margins to accommodate larger layout
+                    margin=dict(l=80, r=120, t=60, b=60)
                 )
                 
-                # Save visualization
+                # Save without opening in browser
                 html_filename = f'interactive_metric_slider_epoch_{epoch}.html'
                 html_path = self._get_output_path(html_filename, "interactive")
                 fig.write_html(html_path, include_plotlyjs=True)
-                
-                static_filename = f'interactive_metric_slider_epoch_{epoch}.png'
-                saved_png = self._safe_write_image(fig, static_filename, width=800, height=400)
+                print(f"💾 Saved interactive metric slider: {html_path}")
                 
                 if self.should_log_to_wandb():
-                    log_dict = {"interactive/metric_slider": wandb.Html(html_path)}
-                    if saved_png and saved_png.endswith('.png'):
-                        log_dict["interactive/metric_slider_static"] = wandb.Image(saved_png)
-                    wandb.log(log_dict)
-                
-                print(f"✅ Interactive metric slider saved: {html_filename}")
-                
+                    wandb.log({f"interactive/metric_slider_epoch_{epoch}": wandb.Html(html_path)})
         except Exception as e:
-            print(f"⚠️ Failed to create metric slider: {e}")
+            print(f"⚠️ Failed to create interactive metric slider: {e}")
             import traceback
             traceback.print_exc()
 
@@ -916,11 +980,12 @@ class InteractiveVisualizations(BaseVisualization):
                         temporal_det_maps.append(np.ones(xx.shape))
                         sequence_dets[t, :] = 1.0
                 
-                # Create SMALLER animation figure
+                # Create WIDER animation figure with better proportions
                 fig = make_subplots(
                     rows=1, cols=2,
                     subplot_titles=["🎬 Temporal det(G) Evolution", "📈 det(G) Along Sequences"],
-                    horizontal_spacing=0.12
+                    horizontal_spacing=0.08,  # Reduced spacing for wider layout
+                    column_widths=[0.6, 0.4]  # Give more space to the spatial plot
                 )
                 
                 frames = []
@@ -938,7 +1003,7 @@ class InteractiveVisualizations(BaseVisualization):
                             colorscale='Viridis',
                             opacity=0.7,
                             showscale=True,
-                            colorbar=dict(title="det(G)", x=0.4, len=0.6),
+                            colorbar=dict(title="det(G)", x=0.52, len=0.8, thickness=15),  # Adjusted for medium layout
                             name="det(G) field",
                             xaxis='x', yaxis='y'
                         )
@@ -1002,33 +1067,41 @@ class InteractiveVisualizations(BaseVisualization):
                 
                 fig.frames = frames
                 
-                # Add animation controls - SMALLER SIZE
+                # Add animation controls - MEDIUM SIZE
                 fig.update_layout(
                     title=f"🎬 Temporal Metric Animation - Epoch {epoch}",
-                    updatemenus=[{
-                        "buttons": [
-                            {"args": [None, {"frame": {"duration": 400}}], 
-                             "label": "▶️", "method": "animate"},
-                            {"args": [[None], {"frame": {"duration": 0}}], 
-                             "label": "⏸️", "method": "animate"}
-                        ],
-                        "direction": "left", "showactive": False, "type": "buttons"
-                    }],
+                    # Remove play buttons entirely - only keep slider
                     sliders=[{
                         "active": 0,
-                        "currentvalue": {"prefix": "Timestep: "},
-                        "steps": [{"args": [[f.name], {"frame": {"duration": 300}}], 
+                        "currentvalue": {"prefix": "Timestep: ", "font": {"color": "white", "size": 14}},
+                        "pad": {"b": 20, "t": 20},
+                        "len": 0.8,  # Longer slider since no play button
+                        "x": 0.1,
+                        "y": -0.08,
+                        "steps": [{"args": [[f], {"frame": {"duration": 0, "redraw": True}}],  # No auto-duration
                                  "label": str(t), "method": "animate"} 
                                 for t, f in enumerate(frames)]
                     }],
-                    width=800,   # SMALLER WIDTH
-                    height=500   # SMALLER HEIGHT
+                    width=1200,   # Reduced from 1400 to 1200
+                    height=500,   # Reduced from 600 to 500 (tinier)
+                    showlegend=True,
+                    legend=dict(
+                        bgcolor='rgba(20,20,20,0.9)',  # Dark background for visibility
+                        bordercolor='white',
+                        borderwidth=2,
+                        font=dict(size=12, color='white')
+                    ),
+                    # Dark theme to match Wandb
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color='white'),
+                    margin=dict(l=80, r=80, t=60, b=80)  # Better margins for medium layout
                 )
                 
-                # Update axes
+                # Update axes with proper ranges to show all timesteps
                 fig.update_xaxes(title_text="PC1", row=1, col=1)
                 fig.update_yaxes(title_text="PC2", row=1, col=1)
-                fig.update_xaxes(title_text="Timestep", row=1, col=2)
+                fig.update_xaxes(title_text="Timestep", range=[-0.5, n_obs-0.5], row=1, col=2)  # Ensure all timesteps visible
                 fig.update_yaxes(title_text="det(G)", row=1, col=2)
                 
                 # Save animation
@@ -1037,7 +1110,7 @@ class InteractiveVisualizations(BaseVisualization):
                 fig.write_html(html_path, include_plotlyjs=True)
                 
                 static_filename = f'temporal_metric_animation_epoch_{epoch}.png'
-                saved_png = self._safe_write_image(fig, static_filename, width=800, height=500)
+                saved_png = self._safe_write_image(fig, static_filename, width=1200, height=500)
                 
                 if self.should_log_to_wandb():
                     log_dict = {"interactive/temporal_animation": wandb.Html(html_path)}
@@ -1048,7 +1121,7 @@ class InteractiveVisualizations(BaseVisualization):
                 print(f"✅ Interactive temporal animation saved: {html_filename}")
                 
         except Exception as e:
-            print(f"⚠️ Failed to create temporal animation: {e}")
+            print(f"⚠️ Failed to create interactive temporal animation: {e}")
             import traceback
             traceback.print_exc()
 
@@ -1118,7 +1191,7 @@ class InteractiveVisualizations(BaseVisualization):
                 print(f"✅ Interactive HTML latent space created for epoch {epoch}")
                 
         except Exception as e:
-            print(f"⚠️ Failed to create HTML latent space: {e}")
+            print(f"⚠️ Failed to create interactive HTML latent space: {e}")
             import traceback
             traceback.print_exc()
 
@@ -1257,3 +1330,253 @@ class InteractiveVisualizations(BaseVisualization):
             wandb.log({"interactive/html_latent_space": wandb.Html(html_path)})
         
         print(f"💾 Saved compact HTML: {html_path}")
+
+    def create_sequence_slider_visualization(self, x_sample: torch.Tensor, epoch: int):
+        """
+        Interactive visualization: slider to select a sequence, showing
+        - Original sequence (row of images)
+        - Reconstructed sequence (row of images)
+        - Latent trajectory (PCA) for that sequence
+        """
+        if not PLOTLY_AVAILABLE:
+            print("⚠️ Plotly not available - skipping sequence slider visualization")
+            return
+        print(f"🖼️ Creating interactive sequence slider visualization for epoch {epoch}")
+        try:
+            from plotly.subplots import make_subplots
+            import plotly.io as pio
+            self._ensure_model_on_device()
+            self.model.eval()
+            with torch.no_grad():
+                result = self.model_forward(x_sample)
+                # x_sample: [batch, n_obs, C, H, W]
+                if isinstance(result, dict):
+                    z_seq = result['latent_samples']  # [batch, n_obs, latent_dim]
+                    # Accept both 'reconstructions' and 'reconstruction'
+                    if 'reconstructions' in result:
+                        recon_seq = result['reconstructions']
+                    elif 'reconstruction' in result:
+                        recon_seq = result['reconstruction']
+                    else:
+                        raise KeyError("Model output dict must contain 'reconstructions' or 'reconstruction'")
+                else:
+                    z_seq = result.z
+                    recon_seq = result.recon_x
+                x_seq = x_sample.cpu().numpy()
+                recon_seq = recon_seq.cpu().numpy()
+                z_seq = z_seq.cpu().numpy()
+                batch_size, n_obs = x_seq.shape[0], x_seq.shape[1]
+                # Limit number of sequences
+                max_sequences = getattr(self.config.visualization, 'max_sequences', 8)
+                n_sequences = min(batch_size, max_sequences)
+                # PCA for latent trajectory
+                from sklearn.decomposition import PCA
+                z_flat = z_seq[:n_sequences].reshape(-1, z_seq.shape[-1])
+                pca = PCA(n_components=2)
+                z_pca = pca.fit_transform(z_flat).reshape(n_sequences, n_obs, 2)
+                # Prepare images for plotly
+                def to_img_array(img):
+                    # img: [C, H, W] or [H, W, C]
+                    if img.shape[0] <= 4:  # [C, H, W]
+                        img = np.transpose(img, (1, 2, 0))
+                    img = np.clip(img, 0, 1)
+                    return (img * 255).astype(np.uint8)
+                # Build frames for slider
+                frames = []
+                for seq_idx in range(n_sequences):
+                    # Original and recon images
+                    orig_imgs = [to_img_array(x_seq[seq_idx, t]) for t in range(n_obs)]
+                    recon_imgs = [to_img_array(recon_seq[seq_idx, t]) for t in range(n_obs)]
+                    # Latent trajectory
+                    z_traj = z_pca[seq_idx]
+                    # Build subplot
+                    fig = make_subplots(
+                        rows=3, cols=n_obs,
+                        subplot_titles=None,  # We'll add custom annotations instead
+                        row_heights=[0.2, 0.2, 0.6],  # Even larger trajectory plot (was 0.25, 0.25, 0.5)
+                        vertical_spacing=0.02,  # Much reduced spacing (was 0.05)
+                        horizontal_spacing=0.02,  # Slightly more horizontal spacing
+                        specs=[[{"type": "xy"} for _ in range(n_obs)] for _ in range(2)] + 
+                              [[{"type": "xy", "colspan": n_obs}] + [None] * (n_obs-1)]  # Trajectory spans ALL columns for maximum width
+                    )
+                    
+                    # Add custom row labels (cleaner than overlapping titles)
+                    fig.add_annotation(
+                        text="<b>Original</b>", 
+                        xref="paper", yref="paper",
+                        x=-0.05, y=0.9, xanchor='right', yanchor='middle',  # Adjusted for new spacing
+                        showarrow=False, font=dict(size=14, color='white')
+                    )
+                    fig.add_annotation(
+                        text="<b>Reconstructed</b>", 
+                        xref="paper", yref="paper", 
+                        x=-0.05, y=0.7, xanchor='right', yanchor='middle',  # Adjusted for new spacing
+                        showarrow=False, font=dict(size=14, color='white')
+                    )
+                    fig.add_annotation(
+                        text="<b>Latent Trajectory (PCA)</b>", 
+                        xref="paper", yref="paper",
+                        x=-0.05, y=0.3, xanchor='right', yanchor='middle',  # Adjusted for larger plot
+                        showarrow=False, font=dict(size=16, color='white', family='Arial Black')
+                    )
+                    
+                    # Add timestep labels at the top
+                    for t in range(n_obs):
+                        fig.add_annotation(
+                            text=f"<b>t={t}</b>",
+                            xref="paper", yref="paper",
+                            x=(t + 0.5) / n_obs, y=0.98,  # Top of the figure
+                            xanchor='center', yanchor='top',
+                            showarrow=False, font=dict(size=12, color='white')
+                        )
+                    
+                    # Row 1: original images
+                    for t in range(n_obs):
+                        fig.add_trace(
+                            go.Image(z=orig_imgs[t], name=f"Original t={t}"),
+                            row=1, col=t+1
+                        )
+                    # Row 2: recon images
+                    for t in range(n_obs):
+                        fig.add_trace(
+                            go.Image(z=recon_imgs[t], name=f"Recon t={t}"),
+                            row=2, col=t+1
+                        )
+                    # Calculate auto-scaling bounds for PCA plot (across all sequences)
+                    all_z_pca = np.array([z_pca[i] for i in range(n_sequences)])
+                    x_min, x_max = all_z_pca[:, :, 0].min(), all_z_pca[:, :, 0].max()
+                    y_min, y_max = all_z_pca[:, :, 1].min(), all_z_pca[:, :, 1].max()
+                    # Add some padding (10%)
+                    x_padding = (x_max - x_min) * 0.1
+                    y_padding = (y_max - y_min) * 0.1
+                    x_range = [x_min - x_padding, x_max + x_padding]
+                    y_range = [y_min - y_padding, y_max + y_padding]
+                    
+                    # Row 3: latent trajectory (PCA) - spans multiple columns for larger display
+                    fig.add_trace(
+                        go.Scatter(x=z_traj[:, 0], y=z_traj[:, 1], mode='lines+markers',
+                                   marker=dict(size=12, color='cyan', line=dict(width=2, color='white')),
+                                   line=dict(width=4, color='cyan'),
+                                   name='Trajectory'),
+                        row=3, col=1
+                    )
+                    fig.add_trace(
+                        go.Scatter(x=[z_traj[0, 0]], y=[z_traj[0, 1]], mode='markers',
+                                   marker=dict(size=16, color='lime', symbol='square', line=dict(width=2, color='white')),
+                                   name='Start'),
+                        row=3, col=1
+                    )
+                    fig.add_trace(
+                        go.Scatter(x=[z_traj[-1, 0]], y=[z_traj[-1, 1]], mode='markers',
+                                   marker=dict(size=16, color='red', symbol='star', line=dict(width=2, color='white')),
+                                   name='End'),
+                        row=3, col=1
+                    )
+                    
+                    # Hide axes for image rows
+                    for t in range(n_obs):
+                        fig.update_xaxes(showticklabels=False, showgrid=False, zeroline=False, row=1, col=t+1)
+                        fig.update_yaxes(showticklabels=False, showgrid=False, zeroline=False, row=1, col=t+1)
+                        fig.update_xaxes(showticklabels=False, showgrid=False, zeroline=False, row=2, col=t+1)
+                        fig.update_yaxes(showticklabels=False, showgrid=False, zeroline=False, row=2, col=t+1)
+                    
+                    # Show proper labels and styling for trajectory plot (larger and more prominent) with auto-scaling
+                    fig.update_xaxes(
+                        title_text='<b>PC1</b>', 
+                        showgrid=True, 
+                        zeroline=True, 
+                        gridcolor='rgba(255,255,255,0.3)',
+                        title_font=dict(size=14, color='white'),
+                        tickfont=dict(size=12, color='white'),
+                        range=x_range,  # Auto-scaled range
+                        row=3, col=1
+                    )
+                    fig.update_yaxes(
+                        title_text='<b>PC2</b>', 
+                        showgrid=True, 
+                        zeroline=True, 
+                        gridcolor='rgba(255,255,255,0.3)',
+                        title_font=dict(size=14, color='white'),
+                        tickfont=dict(size=12, color='white'),
+                        range=y_range,  # Auto-scaled range
+                        row=3, col=1
+                    )
+                    
+                    fig.update_layout(
+                        title=dict(
+                            text=f"<b>Sequence {seq_idx} (Epoch {epoch})</b>",
+                            x=0.5,
+                            xanchor='center',
+                            font=dict(size=18, color='white')
+                        ),
+                        height=800,  # Taller to accommodate larger trajectory plot
+                        width=max(1000, 120*n_obs),  # Wider to accommodate better layout
+                        margin=dict(l=80, r=120, t=60, b=40),  # More right margin for legend
+                        showlegend=True,
+                        legend=dict(
+                            x=1.02,  # Position legend outside plot area
+                            y=0.25,   # Align with trajectory plot
+                            xanchor='left',
+                            yanchor='middle',
+                            bgcolor='rgba(20,20,20,0.9)',  # Darker background
+                            bordercolor='white',
+                            borderwidth=2,
+                            font=dict(size=12, color='white')
+                        ),
+                        # Dark theme to match Wandb
+                        paper_bgcolor='rgba(0,0,0,0)',  # Transparent background
+                        plot_bgcolor='rgba(0,0,0,0)',   # Transparent plot area
+                        font=dict(color='white', size=11)  # White text
+                    )
+                    frames.append(fig)
+                # Create slider
+                # Use the first frame as the initial figure
+                fig = frames[0]
+                # Add slider steps
+                steps = []
+                for i, frame in enumerate(frames):
+                    steps.append(dict(
+                        method="animate",
+                        args=[[f"frame{i}"], {"frame": {"duration": 0, "redraw": True}, "mode": "immediate"}],
+                        label=f"Seq {i}"
+                    ))
+                # Add frames to the figure
+                fig.frames = [go.Frame(data=frame.data, name=f"frame{i}") for i, frame in enumerate(frames)]
+                fig.update_layout(
+                    sliders=[{
+                        "active": 0,
+                        "yanchor": "top",
+                        "xanchor": "left",
+                        "currentvalue": {
+                            "font": {"size": 14, "color": "white"}, 
+                            "prefix": "Sequence: ", 
+                            "visible": True, 
+                            "xanchor": "left"
+                        },
+                        "transition": {"duration": 300, "easing": "cubic-in-out"},
+                        "pad": {"b": 10, "t": 10},
+                        "len": 0.6,  # Even shorter slider to make room for wider layout
+                        "x": 0.2,    # More centered
+                        "y": -0.06,  # Match play button position
+                        "steps": steps
+                    }],
+                    # Dark theme for overall figure
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color='white'),
+                    # Better margins to accommodate larger layout
+                    margin=dict(l=80, r=120, t=60, b=60)
+                )
+                # Save without opening in browser
+                html_filename = f'sequence_slider_epoch_{epoch}.html'
+                html_path = self._get_output_path(html_filename, "interactive")
+                fig.write_html(html_path, include_plotlyjs=True)
+                print(f"💾 Saved interactive sequence slider: {html_path}")
+                
+                if self.should_log_to_wandb():
+                    wandb.log({f"interactive/sequence_slider_epoch_{epoch}": wandb.Html(html_path)})
+        except Exception as e:
+            print(f"⚠️ Sequence slider visualization failed: {e}")
+            import traceback
+            traceback.print_exc()
+        self.model.train()

@@ -3,9 +3,9 @@
 # Main configuration for RlVAE experiments
 defaults:
   - model: riemannian_flow_vae
-  - training: default
+  - training: full_data
   - data: cyclic_sprites
-  - visualization: standard
+  - visualization: full
   - experiment: single_run
   - _self_
 

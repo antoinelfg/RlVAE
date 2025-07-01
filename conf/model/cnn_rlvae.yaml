@@ -11,19 +11,26 @@ flow_n_blocks: 2
 flow_n_hidden: 1
 epsilon: 1e-6
 
-# Encoder configuration
+# Encoder configuration - CNN
 encoder:
-  architecture: "mlp"  # mlp, cnn, resnet
-  # Additional encoder-specific parameters can be added here
-  # For CNN: layers, channels, kernel_size, etc.
-  # For ResNet: layers, channels, etc.
+  architecture: "cnn"
+  layers: [32, 64, 128, 256]  # Number of channels per layer
+  kernel_size: 3
+  stride: 2
+  padding: 1
+  activation: "relu"
+  batch_norm: true
 
-# Decoder configuration  
+# Decoder configuration - CNN
 decoder:
-  architecture: "mlp"  # mlp, cnn, resnet
-  # Additional decoder-specific parameters can be added here
-  # For CNN: layers, channels, kernel_size, etc.
-  # For ResNet: layers, channels, etc.
+  architecture: "cnn"
+  layers: [256, 128, 64, 32]  # Number of channels per layer (reverse of encoder)
+  kernel_size: 3
+  stride: 2
+  padding: 1
+  output_padding: 1
+  activation: "relu"
+  batch_norm: true
 
 # VAE parameters
 beta: 1.0

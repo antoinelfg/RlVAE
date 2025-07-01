@@ -219,6 +219,11 @@ class VisualizationManager:
         # HTML latent space for full level only
         if self.viz_config.level == VisualizationLevel.FULL:
             interactive.create_html_latent_space(x_sample, epoch)
+        
+        # Call the new sequence slider visualization every 5 epochs
+        if epoch % 5 == 0:
+            print("🎞️ Creating sequence slider visualization...")
+            interactive.create_sequence_slider_visualization(x_sample, epoch)
     
     def _run_flow_visualizations(self, x_sample: torch.Tensor, epoch: int):
         """Run flow-based analysis visualizations."""

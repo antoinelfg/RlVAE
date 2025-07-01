@@ -15,8 +15,14 @@ install-dev: ## Install the package in development mode with all dependencies
 test: ## Run the test suite
 	python tests/test_setup.py
 
-test-quick: ## Run a quick training test
-	python run_clean_training.py --loop_mode open --n_epochs 1 --n_train_samples 10
+test-modular: ## Test modular components
+	python tests/test_modular_components.py
+
+test-integration: ## Test hybrid model integration
+	python tests/test_hybrid_model.py
+
+test-all: ## Run all tests
+	python tests/test_setup.py && python tests/test_modular_components.py && python tests/test_hybrid_model.py
 
 lint: ## Run linting checks
 	flake8 src/ scripts/ --count --select=E9,F63,F7,F82 --show-source --statistics
@@ -56,11 +62,20 @@ clean-training: ## Clean up training files (interactive)
 docs: ## Build documentation
 	@echo "Documentation build not yet implemented"
 
-train-quick: ## Quick training run for testing
-	python run_clean_training.py --loop_mode open --n_epochs 5 --n_train_samples 100 --wandb_only --wandb_offline
+train-quick: ## Quick training with modular model
+	python run_experiment.py model=modular_rlvae training=quick visualization=minimal
 
-train-full: ## Full training run
-	python run_clean_training.py --loop_mode open --n_epochs 25 --n_train_samples 3000 --wandb_only
+train-full: ## Full training with modular model
+	python run_experiment.py model=modular_rlvae training=full_data visualization=standard
+
+train-comparison: ## Compare all models
+	python run_experiment.py experiment=comparison_study
+
+experiment-quick: ## Quick experiment validation
+	scripts/run_quick_test.sh
+
+experiment-suite: ## Full weekend experiment suite
+	scripts/run_weekend_experiments.sh
 
 setup-data: ## Set up data files
 	python scripts/extract_cyclic_sequences.py

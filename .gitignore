@@ -192,7 +192,7 @@ multirun/
 *.jpeg
 *.gif
 *.svg
-html_latent_images_*/
+html_latent_images_epoch_*/
 
 # IDE and editor files
 .vscode/
@@ -200,4 +200,28 @@ html_latent_images_*/
 *.sublime-*
 
 # System files
-.nfs* 
+.nfs*
+
+# Generated visualization artifacts
+html_latent_images_epoch_*/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+
+# Temporary experiment files
+WEEKEND_EXPERIMENT_PLAN.md
+*_EXPERIMENT_PLAN.md
+
+# Legacy training scripts (if recreated)
+run_training.py
+run_clean_training*.py
+
+# Development test files (if recreated)
+test_100_percent_modular.py
+test_integration.py
+test_modular_architectures.py
+test_loss_manager_simple.py
+test_modular_samplers.py
+test_modular_visualizations.py 

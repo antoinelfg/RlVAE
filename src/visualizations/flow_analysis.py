@@ -30,7 +30,12 @@ class FlowAnalysisVisualizations(BaseVisualization):
         """Create flow-based temporal metric evolution visualizations."""
         print(f"🌊 Creating temporal evolution analysis for epoch {epoch}")
         
-        if not hasattr(self.model, 'G') or not hasattr(self.model, 'flows'):
+        # Check for metric tensor and flows in both legacy and modular structures
+        has_metric = (hasattr(self.model, 'G') and self.model.G is not None) or \
+                     (hasattr(self.model, 'metric_tensor') and self.model.metric_tensor is not None)
+        has_flows = self._get_flows() is not None
+        
+        if not has_metric or not has_flows:
             print("⚠️ No metric tensor or flows available for temporal evolution")
             return
             
@@ -65,7 +70,7 @@ class FlowAnalysisVisualizations(BaseVisualization):
         """Create flow Jacobian analysis visualizations."""
         print(f"📊 Creating flow Jacobian analysis for epoch {epoch}")
         
-        if not hasattr(self.model, 'flows'):
+        if self._get_flows() is None:
             print("⚠️ No flows available for Jacobian analysis")
             return
             
@@ -101,9 +106,20 @@ class FlowAnalysisVisualizations(BaseVisualization):
         batch_size, n_obs, latent_dim = z_seq.shape
         det_G_seq = torch.zeros(batch_size, n_obs)
         
+        # Get metric tensor from either legacy or modular structure
+        metric_tensor = None
+        if hasattr(self.model, 'G') and self.model.G is not None:
+            metric_tensor = self.model.G
+        elif hasattr(self.model, 'metric_tensor') and self.model.metric_tensor is not None:
+            metric_tensor = self.model.metric_tensor
+        
+        if metric_tensor is None:
+            print("⚠️ No metric tensor available for det(G) computation")
+            return det_G_seq.cpu().numpy()
+        
         for t in range(n_obs):
             z_t = z_seq[:, t, :]  # Flow-evolved coordinates at timestep t
-            G_t = self.model.G(z_t)
+            G_t = metric_tensor(z_t)
             det_G_t = torch.linalg.det(G_t)
             det_G_seq[:, t] = det_G_t
         
@@ -114,10 +130,13 @@ class FlowAnalysisVisualizations(BaseVisualization):
         batch_size, n_obs, latent_dim = z_seq.shape
         flow_jacobians = []
         
-        for flow_idx in range(min(n_obs - 1, len(self.model.flows))):
+        for flow_idx in range(min(n_obs - 1, len(self._get_flows() or []))):
             try:
                 z_input = z_seq[:, flow_idx, :]  # Input to flow
-                flow = self.model.flows[flow_idx]
+                flows = self._get_flows()
+                if flows is None:
+                    break
+                flow = flows[flow_idx]
                 
                 # Compute Jacobian determinant
                 z_input.requires_grad_(True)
@@ -478,18 +497,6 @@ class FlowAnalysisVisualizations(BaseVisualization):
             # Update layout - SMALLER SIZE
             fig.update_layout(
                 title=f"🌊 Flow Evolution Animation - Epoch {epoch}",
-                updatemenus=[{
-                    "buttons": [
-                        {"args": [None, {"frame": {"duration": 800, "redraw": True}}], 
-                         "label": "▶️ Play", "method": "animate"},
-                        {"args": [[None], {"frame": {"duration": 0, "redraw": True}}], 
-                         "label": "⏸️ Pause", "method": "animate"}
-                    ],
-                    "direction": "left",
-                    "pad": {"r": 10, "t": 50},
-                    "type": "buttons",
-                    "x": 0.1, "y": 0
-                }],
                 sliders=[{
                     "active": 0,
                     "currentvalue": {"prefix": "Flow Step: ", "visible": True},
@@ -522,3 +529,49 @@ class FlowAnalysisVisualizations(BaseVisualization):
             
         except Exception as e:
             print(f"⚠️ Flow interactive animation failed: {e}")
+
+    def _get_flows(self):
+        """Get flows from either legacy or modular model structure."""
+        # Try legacy structure first
+        if hasattr(self.model, 'flows') and self.model.flows is not None:
+            return self.model.flows
+        # Try modular structure
+        elif hasattr(self.model, 'flow_manager') and hasattr(self.model.flow_manager, 'flows'):
+            return self.model.flow_manager.flows
+        else:
+            return None
+    
+    def create_flow_jacobian_analysis(self, x_sample: torch.Tensor, epoch: int):
+        """Create flow Jacobian analysis visualizations."""
+        print(f"📊 Creating flow Jacobian analysis for epoch {epoch}")
+        
+        if self._get_flows() is None:
+            print("⚠️ No flows available for Jacobian analysis")
+            return
+            
+        try:
+            self.model.eval()
+            with torch.no_grad():
+                result = self.model_forward(x_sample)
+                z_seq = result['latent_samples'] if isinstance(result, dict) else result.z
+                
+                # Compute det(G) evolution
+                det_G_seq = self._compute_flow_evolved_det_G(z_seq)
+                
+                # Compute flow Jacobians
+                flow_jacobians = self._compute_flow_jacobians(z_seq)
+                
+                # Create detailed Jacobian analysis
+                self._create_detailed_jacobian_analysis(det_G_seq, flow_jacobians, epoch)
+                
+                # Create interactive animation if Plotly available
+                if PLOTLY_AVAILABLE:
+                    z_pca_seq, _ = self._prepare_pca_data(z_seq, n_components=2)
+                    self._create_flow_interactive_animation(z_pca_seq, det_G_seq, flow_jacobians, epoch)
+                
+        except Exception as e:
+            print(f"⚠️ Jacobian analysis visualization failed: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        self.model.train()

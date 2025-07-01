@@ -112,10 +112,15 @@ class ManifoldVisualizations(BaseVisualization):
                     if t > 0:
                         # Apply flow sequence to see transformation
                         for flow_idx in range(t):
-                            if flow_idx < len(self.model.flows):
+                            # Handle both legacy and modular model structures
+                            flows = getattr(self.model, 'flows', None)
+                            if flows is None and hasattr(self.model, 'flow_manager'):
+                                flows = self.model.flow_manager.flows
+                            
+                            if flows is not None and flow_idx < len(flows):
                                 try:
                                     z_prev = z_flow_traj.clone()
-                                    flow_result = self.model.flows[flow_idx](z_flow_traj)
+                                    flow_result = flows[flow_idx](z_flow_traj)
                                     z_flow_traj = flow_result.out
                                     
                                     flow_intermediate.append({

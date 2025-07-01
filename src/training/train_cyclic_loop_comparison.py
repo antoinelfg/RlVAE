@@ -1156,8 +1156,9 @@ class CyclicLoopTrainer:
                 width=1600,
                 height=1000,
                 showlegend=False,  # Too cluttered with legends
-                paper_bgcolor='rgba(240,248,255,0.95)',
-                plot_bgcolor='rgba(255,255,255,0.8)',
+                paper_bgcolor='rgba(0,0,0,0)',  # Dark theme for Wandb
+                plot_bgcolor='rgba(0,0,0,0)',   # Dark theme for Wandb
+                font=dict(color='white'),       # White text for dark theme
                 margin=dict(l=80, r=80, t=120, b=100)
             )
             
@@ -3131,8 +3132,9 @@ class CyclicLoopTrainer:
                 width=1600,
                 height=1000,
                 showlegend=False,
-                paper_bgcolor='rgba(240,248,255,0.95)',
-                plot_bgcolor='rgba(255,255,255,0.8)',
+                paper_bgcolor='rgba(0,0,0,0)',  # Dark theme for Wandb
+                plot_bgcolor='rgba(0,0,0,0)',   # Dark theme for Wandb
+                font=dict(color='white'),       # White text for dark theme
             )
             
             # Update subplot axes
@@ -3738,11 +3740,17 @@ class CyclicLoopTrainer:
                         'font': {'size': 20, 'color': '#2E86AB'}
                     },
                     showlegend=True,
+                    legend=dict(
+                        bgcolor='rgba(20,20,20,0.9)',  # Dark background for visibility
+                        bordercolor='white',
+                        borderwidth=2,
+                        font=dict(size=12, color='white')
+                    ),
                     width=1600,
                     height=1000,
-                    paper_bgcolor='rgba(240,248,255,0.95)',
-                    plot_bgcolor='rgba(255,255,255,0.8)',
-                    font={'family': 'Arial Black, Arial, sans-serif', 'color': '#2C3E50'},
+                    paper_bgcolor='rgba(0,0,0,0)',  # Dark theme for Wandb
+                    plot_bgcolor='rgba(0,0,0,0)',   # Dark theme for Wandb
+                    font={'family': 'Arial Black, Arial, sans-serif', 'color': 'white'},
                     margin=dict(l=80, r=80, t=120, b=80)
                 )
                 
@@ -5351,6 +5359,12 @@ class CyclicLoopTrainer:
                 width=1600,
                 height=900,
                 showlegend=True,
+                legend=dict(
+                    bgcolor='rgba(20,20,20,0.9)',  # Dark background for visibility
+                    bordercolor='white',
+                    borderwidth=2,
+                    font=dict(size=12, color='white')
+                ),
                 paper_bgcolor='rgba(240,248,255,0.95)',
                 plot_bgcolor='rgba(255,255,255,0.8)',
             )
@@ -5701,6 +5715,12 @@ class CyclicLoopTrainer:
                 width=1600,
                 height=800,
                 showlegend=True,
+                legend=dict(
+                    bgcolor='rgba(20,20,20,0.9)',  # Dark background for visibility
+                    bordercolor='white',
+                    borderwidth=2,
+                    font=dict(size=12, color='white')
+                ),
                 paper_bgcolor='rgba(240,248,255,0.95)',
                 plot_bgcolor='rgba(255,255,255,0.8)',
             )

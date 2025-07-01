@@ -10,6 +10,7 @@ from pythae.models.base.base_utils import ModelOutput
 from pythae.models.normalizing_flows.iaf import IAF, IAFConfig
 from pythae.models.nn import BaseEncoder, BaseDecoder
 from pythae.models.nn.default_architectures import Encoder_VAE_MLP, Decoder_AE_MLP
+from src.models.components.flow_manager import FlowManager
 
 # Import official RHVAE components
 try:
@@ -840,17 +841,15 @@ class RiemannianFlowVAE(nn.Module):
         else:
             self.decoder = decoder
         
-        # Create normalizing flows (IAF)
-        self.flows = nn.ModuleList()
-        for i in range(n_flows):
-            config = IAFConfig(
-                input_dim=(latent_dim,),  # IAF expects tuple
-                hidden_size=flow_hidden_size,
-                n_blocks=flow_n_blocks,
-                n_hidden=flow_n_hidden,
-            )
-            flow = IAF(config)
-            self.flows.append(flow)
+        # Create normalizing flows (IAF) via FlowManager
+        self.flow_manager = FlowManager(
+            latent_dim=latent_dim,
+            n_flows=n_flows,
+            flow_hidden_size=flow_hidden_size,
+            flow_n_blocks=flow_n_blocks,
+            flow_n_hidden=flow_n_hidden,
+            device=self.device
+        )
         
         # Riemannian components (will be loaded later)
         self._use_pure_rhvae = False
@@ -858,7 +857,7 @@ class RiemannianFlowVAE(nn.Module):
         self._riemannian_sampler = None
         self._official_sampler = None
         
-        print(f"✅ Created RiemannianFlowVAE with {n_flows} IAF flows")
+        print(f"✅ Created RiemannianFlowVAE with {n_flows} IAF flows (via FlowManager)")
         print(f"🧠 Posterior type: {posterior_type}")
 
         def set_loop_mode(self, mode: str = "open", penalty_weight: float = 1.0):
@@ -1166,14 +1165,16 @@ class RiemannianFlowVAE(nn.Module):
         log_det_sum = torch.zeros(batch_size, device=x.device)
 
         # Propagate through flows (temporal evolution)
-        for t in range(1, n_obs):
-            flow_res = self.flows[t-1](z_seq[-1])
-            z_t = flow_res.out
-            log_det = flow_res.log_abs_det_jac
-            z_seq.append(z_t)
-            log_det_sum += log_det
+        if self.n_flows > 0:
+            z_seq_out, log_det_jacobians = self.flow_manager.apply_flows(z_seq, n_obs=n_obs)
+            z_seq = z_seq_out
+            if len(log_det_jacobians) > 0:
+                log_det_sum = sum(log_det_jacobians)
 
         # Stack sequence
+        if len(z_seq) != n_obs:
+            print(f"❌ z_seq length {len(z_seq)} != n_obs {n_obs}. Shape(s): {[z.shape for z in z_seq]}")
+            raise RuntimeError(f"z_seq length {len(z_seq)} != n_obs {n_obs}")
         z_seq = torch.stack(z_seq, dim=1)  # [batch_size, n_obs, latent_dim]
         # Keep a copy of the *original* last‑timestep latent (before any cycle hack)
         z_T_raw = z_seq[:, -1].clone()

@@ -24,6 +24,7 @@ from .riemannian_flow_vae import RiemannianFlowVAE
 from .components.metric_tensor import MetricTensor
 from .components.metric_loader import MetricLoader
 from pythae.models.base.base_utils import ModelOutput
+from src.models.components.flow_manager import FlowManager
 
 
 class HybridRiemannianFlowVAE(RiemannianFlowVAE):
@@ -71,6 +72,16 @@ class HybridRiemannianFlowVAE(RiemannianFlowVAE):
         
         # 🚀 NEW: Initialize modular metric loader
         self.metric_loader = MetricLoader(device=self.device)
+        
+        # 🚀 NEW: Initialize modular flow manager
+        self.flow_manager = FlowManager(
+            latent_dim=config.latent_dim,
+            n_flows=config.n_flows,
+            flow_hidden_size=config.flow_hidden_size,
+            flow_n_blocks=config.flow_n_blocks,
+            flow_n_hidden=config.flow_n_hidden,
+            device=self.device
+        )
         
         # Setup model from config
         self._setup_from_config()
@@ -189,15 +200,39 @@ class HybridRiemannianFlowVAE(RiemannianFlowVAE):
         self.lbd = self.modular_metric.regularization
     
     def _setup_sampling_components(self):
-        """Setup sampling components using modular metric tensor."""
-        # Import existing sampler classes
-        from .riemannian_flow_vae import WorkingRiemannianSampler, OfficialRHVAESampler
-        
-        # Create samplers that use the modular metric tensor
-        self._riemannian_sampler = WorkingRiemannianSampler(self)
-        self._official_sampler = OfficialRHVAESampler(self)
-        
-        print("✅ Setup sampling components with modular metric tensor")
+        """Setup sampling components using modular samplers."""
+        # Import modular sampler classes
+        from src.models.samplers import (
+            WorkingRiemannianSampler,
+            RiemannianHMCSampler,
+            OfficialRHVAESampler
+        )
+
+        # Select sampler type from config, default to 'working'
+        sampler_type = getattr(self.config.sampling, 'sampler_type', 'working')
+        if sampler_type == 'working':
+            self.sampler = WorkingRiemannianSampler(self)
+        elif sampler_type == 'hmc':
+            self.sampler = RiemannianHMCSampler(self)
+        elif sampler_type == 'official':
+            self.sampler = OfficialRHVAESampler(self)
+        else:
+            raise ValueError(f"Unknown sampler_type: {sampler_type}")
+        print(f"✅ Setup modular sampler: {self.sampler.__class__.__name__}")
+
+    def sample_latents(self, mu, log_var, method=None):
+        """Unified interface for sampling latents using the selected sampler."""
+        if not hasattr(self, 'sampler'):
+            raise RuntimeError("Sampler not initialized. Call _setup_sampling_components() first.")
+        method = method or getattr(self.config.sampling, 'method', 'enhanced')
+        return self.sampler.sample_riemannian_latents(mu, log_var, method=method)
+
+    def sample_prior(self, num_samples, method=None):
+        """Unified interface for sampling from the prior using the selected sampler."""
+        if not hasattr(self, 'sampler'):
+            raise RuntimeError("Sampler not initialized. Call _setup_sampling_components() first.")
+        method = method or getattr(self.config.sampling, 'method', 'geodesic')
+        return self.sampler.sample_prior(num_samples, method=method)
     
     def _fallback_to_original_metric_loading(self):
         """Fallback to original metric loading if modular approach fails."""

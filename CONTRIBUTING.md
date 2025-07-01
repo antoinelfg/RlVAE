@@ -1,117 +1,211 @@
-# Contributing to RlVAE
+# Contributing to RlVAE 🤝
 
-Thank you for your interest in contributing to the Riemannian Flow VAE project! 🎉
+We welcome contributions to the RlVAE project! This guide will help you get started.
 
 ## 🚀 Quick Start
 
-1. **Fork the repository** on GitHub
-2. **Clone your fork** locally:
-   ```bash
-   git clone https://github.com/antoinelfg/RlVAE.git
-   cd RlVAE
-   ```
-3. **Set up the development environment**:
-   ```bash
-   pip install -e .
-   python test_setup.py
-   ```
-
-## 🧪 Development Workflow
-
-### Setting up the Environment
-
+### Environment Setup
 ```bash
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+# Clone the repository
+git clone https://github.com/antoinelfg/RlVAE.git
+cd RlVAE
 
 # Install in development mode
 pip install -e .
 
-# Verify setup
+# Validate installation
 python tests/test_setup.py
 ```
 
-### Running Tests
+## 🧪 Testing
+
+Before submitting contributions, ensure all tests pass:
 
 ```bash
-# Validate setup and imports
+# Environment validation
 python tests/test_setup.py
 
-# Quick training test (1 epoch)
-python run_clean_training.py --loop_mode open --n_epochs 1 --n_train_samples 10
+# Component validation
+python tests/test_modular_components.py
+
+# Integration testing
+python tests/test_hybrid_model.py
+
+# All tests at once
+make test-all
 ```
 
-### Code Style
+### Quick Development Test
+```bash
+# Test with modular model (recommended)
+python run_experiment.py model=modular_rlvae training=quick visualization=minimal
+```
 
-- **Format with Black**: `black src/ scripts/`
-- **Type hints**: Use type hints for function signatures
-- **Docstrings**: Use Google-style docstrings
-- **Imports**: Use absolute imports from `src/`
+## 🏗️ Development Workflow
 
-## 📝 Contribution Types
+### 1. Setting Up Your Development Environment
+```bash
+# Fork the repository and clone your fork
+git clone https://github.com/YOUR_USERNAME/RlVAE.git
+cd RlVAE
 
-### 🐛 Bug Reports
-- Use the GitHub issue template
-- Include minimal reproduction steps
-- Provide system information and logs
+# Create a development branch
+git checkout -b feature/your-feature-name
 
-### ✨ Feature Requests
-- Open an issue first to discuss the feature
-- Describe the use case and expected behavior
-- Consider backward compatibility
+# Install development dependencies
+make install-dev
+```
 
-### 🧠 Model Improvements
-- New sampling methods
-- Alternative posterior types
-- Enhanced training strategies
-- Performance optimizations
+### 2. Making Changes
+- **Focus on modular components** in `src/models/components/` and `src/models/samplers/`
+- **Follow the modular architecture** patterns
+- **Add tests** for new functionality
+- **Update documentation** as needed
 
-### 📊 Data Processing
-- New dataset support
-- Preprocessing improvements
-- Evaluation metrics
+### 3. Testing Your Changes
+```bash
+# Quick validation
+make test
 
-## 🔄 Pull Request Process
+# Full test suite
+make test-all
 
-1. **Create a feature branch**: `git checkout -b feature/your-feature`
-2. **Make your changes** with clear, focused commits
-3. **Test your changes**: Run `python tests/test_setup.py`
-4. **Update documentation** if needed
-5. **Submit a pull request** with:
-   - Clear description of changes
-   - Reference to related issues
-   - Screenshots/plots for visual changes
+# Code quality checks
+make lint format type-check
+```
+
+## 📝 Code Style
+
+We use automated code formatting and linting:
+
+```bash
+# Format code
+make format
+
+# Check formatting
+make format-check
+
+# Run linting
+make lint
+
+# Type checking
+make type-check
+```
+
+## 🧩 Contributing to Modular Components
+
+### Adding New Components
+1. **Create component** in appropriate directory (`src/models/components/` or `src/models/samplers/`)
+2. **Follow existing patterns** (see `MetricTensor` or `LossManager` for examples)
+3. **Add comprehensive tests** in `tests/`
+4. **Update configurations** in `conf/model/` if needed
+
+### Component Guidelines
+- **Inherit from `nn.Module`** for PyTorch components
+- **Include type hints** for all methods
+- **Add comprehensive docstrings**
+- **Handle device placement** properly
+- **Include error handling** and validation
 
 ## 📚 Documentation
 
-- **Code comments**: Explain complex algorithms and mathematical operations
-- **README updates**: Keep examples and usage up-to-date
-- **Training guides**: Document new training procedures
-- **Configuration**: Document new config options
+### Update Documentation When:
+- Adding new models or components
+- Changing configuration options
+- Adding new experiment types
+- Modifying installation requirements
 
-## 🎯 Research Contributions
+### Documentation Files
+- `README.md` - Main project overview
+- `docs/TRAINING_GUIDE.md` - Training workflows
+- `docs/MODULAR_TRAINING_GUIDE.md` - Modular system guide
+- Component docstrings and type hints
 
-For research-related contributions:
+## 🔬 Research Contributions
 
-- **Mathematical notation**: Use consistent notation in comments
-- **Algorithm references**: Cite relevant papers in docstrings
-- **Experimental validation**: Include results and comparisons
-- **Reproducibility**: Provide seed values and configuration
+### Adding New Research Features
+1. **Use modular architecture** - leverage existing components
+2. **Follow configuration patterns** - use Hydra configs
+3. **Add experiments** - create new experiment configurations
+4. **Benchmark performance** - compare against existing methods
+5. **Document thoroughly** - explain research contribution
 
-## 💡 Tips for Contributors
+### Preferred Areas for Contributions
+- **New sampling strategies** in `src/models/samplers/`
+- **Advanced metric learning** in `src/models/components/`
+- **Visualization improvements** in `src/visualizations/`
+- **Performance optimizations** across all components
+- **New model architectures** following modular patterns
 
-- **Start small**: Begin with documentation improvements or small bug fixes
-- **Ask questions**: Open an issue if you're unsure about implementation details
-- **Stay focused**: Keep PRs focused on a single feature or fix
-- **Be patient**: Allow time for review and discussion
+## 🚦 Pull Request Process
 
-## 📞 Getting Help
+1. **Ensure tests pass**: `make ci`
+2. **Update documentation** as needed
+3. **Create descriptive PR title** and description
+4. **Reference issues** if applicable
+5. **Be responsive** to code review feedback
 
-- **GitHub Issues**: For bugs and feature requests
-- **Discussions**: For general questions and ideas
-- **Documentation**: Check README and training guides first
+### PR Checklist
+- [ ] All tests pass (`make test-all`)
+- [ ] Code follows style guidelines (`make format lint`)
+- [ ] Documentation updated if needed
+- [ ] New functionality includes tests
+- [ ] Modular architecture patterns followed
+
+## 🐛 Bug Reports
+
+### Before Reporting
+1. **Search existing issues** for similar problems
+2. **Test with latest version**
+3. **Validate environment**: `python tests/test_setup.py`
+
+### Bug Report Template
+```markdown
+**Environment**
+- Python version:
+- PyTorch version:
+- CUDA version (if applicable):
+- Operating system:
+
+**Description**
+Clear description of the bug
+
+**Steps to Reproduce**
+1. 
+2. 
+3. 
+
+**Expected Behavior**
+What you expected to happen
+
+**Actual Behavior**
+What actually happened
+
+**Additional Context**
+Logs, screenshots, or other relevant information
+```
+
+## 💡 Feature Requests
+
+We welcome feature requests! Please:
+1. **Check existing issues** for similar requests
+2. **Describe the use case** clearly
+3. **Explain the benefit** to the research community
+4. **Consider modular implementation** approaches
+
+## 🏆 Recognition
+
+Contributors will be acknowledged in:
+- Repository contributors list
+- Release notes for significant contributions
+- Documentation acknowledgments
+
+## 📞 Questions?
+
+- **Create an issue** for questions about contributing
+- **Start a discussion** for design questions
+- **Reference existing code** for implementation patterns
 
 ---
 
-Happy contributing! 🎉 
+**Thank you for contributing to RlVAE! Your contributions help advance Riemannian geometry research.** 🙏 

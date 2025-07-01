@@ -40,7 +40,7 @@ echo ""
 
 # Run validation tests
 echo "🔍 Running validation tests..."
-python test_hybrid_model.py > logs/validation_hybrid_${SLURM_JOB_ID}.log 2>&1
+python tests/test_hybrid_model.py > logs/validation_hybrid_${SLURM_JOB_ID}.log 2>&1
 if [ $? -eq 0 ]; then
     echo "✅ Hybrid model validation passed"
 else
@@ -48,7 +48,7 @@ else
     exit 1
 fi
 
-python test_modular_components.py > logs/validation_components_${SLURM_JOB_ID}.log 2>&1
+python tests/test_modular_components.py > logs/validation_components_${SLURM_JOB_ID}.log 2>&1
 if [ $? -eq 0 ]; then
     echo "✅ Modular components validation passed"
 else
