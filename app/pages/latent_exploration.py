@@ -172,11 +172,11 @@ def render_nd_latent_grid(latent_dim: int):
     
     with col3:
         if st.button("🔄 Generate ND Grid", type="primary"):
-            generate_nd_grid(latent_dim, dim1, dim2, fixed_values, grid_size, z_range)
+            generate_2d_grid(latent_dim, dim1, dim2, fixed_values, grid_size, z_range)
     
     # Display grid if available
     if 'latent_nd_grid' in st.session_state:
-        display_nd_grid()
+        display_2d_grid()
 
 
 def render_interpolation_interface():
@@ -512,18 +512,47 @@ def generate_interpolation(start: torch.Tensor, end: torch.Tensor, steps: int, m
             ])
         
         elif method == "spherical":
-            # Spherical interpolation
-            start_norm = start / torch.norm(start)
-            end_norm = end / torch.norm(end)
+            # Spherical interpolation with numerical stability
+            eps = 1e-8  # Small epsilon to prevent numerical issues
             
-            dot_product = torch.dot(start_norm, end_norm)
-            theta = torch.acos(torch.clamp(dot_product, -1, 1))
+            # Check for zero norms and handle gracefully
+            start_norm_val = torch.norm(start)
+            end_norm_val = torch.norm(end)
             
-            alphas = torch.linspace(0, 1, steps)
-            interpolated = torch.stack([
-                (torch.sin((1 - alpha) * theta) * start_norm + torch.sin(alpha * theta) * end_norm) / torch.sin(theta)
-                for alpha in alphas
-            ])
+            if start_norm_val < eps or end_norm_val < eps:
+                st.warning("⚠️ One of the vectors has zero/near-zero norm. Falling back to linear interpolation.")
+                # Fall back to linear interpolation
+                alphas = torch.linspace(0, 1, steps)
+                interpolated = torch.stack([
+                    (1 - alpha) * start + alpha * end for alpha in alphas
+                ])
+            else:
+                # Normalize vectors
+                start_norm = start / start_norm_val
+                end_norm = end / end_norm_val
+                
+                # Calculate dot product (works for both 1D and batched inputs)
+                dot_product = torch.sum(start_norm * end_norm, dim=-1 if start_norm.dim() > 1 else 0)
+                dot_product = torch.clamp(dot_product, -1 + eps, 1 - eps)  # Prevent numerical issues in acos
+                
+                theta = torch.acos(dot_product)
+                sin_theta = torch.sin(theta)
+                
+                # Check if vectors are parallel/anti-parallel (theta ≈ 0 or π)
+                if abs(sin_theta) < eps:
+                    st.info("ℹ️ Vectors are parallel/anti-parallel. Using linear interpolation.")
+                    # Fall back to linear interpolation
+                    alphas = torch.linspace(0, 1, steps)
+                    interpolated = torch.stack([
+                        (1 - alpha) * start + alpha * end for alpha in alphas
+                    ])
+                else:
+                    # Proper spherical interpolation
+                    alphas = torch.linspace(0, 1, steps)
+                    interpolated = torch.stack([
+                        (torch.sin((1 - alpha) * theta) * start_norm + torch.sin(alpha * theta) * end_norm) / sin_theta
+                        for alpha in alphas
+                    ])
         
         elif method == "geodesic":
             # Simplified geodesic (would need Riemannian metric for true geodesic)
