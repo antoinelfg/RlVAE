@@ -20,12 +20,31 @@ src_dir = current_dir / "src"
 if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
+# Real backend integration
+try:
+    from ..backend.model_manager import ModelManager
+    BACKEND_AVAILABLE = True
+except ImportError:
+    BACKEND_AVAILABLE = False
+    print("⚠️ Backend not available - using simulation mode")
+
 
 def render():
     """Render the model inference page."""
     
     st.title("🔮 Model Inference")
     st.markdown("Load trained VAE models and perform encoding/decoding operations")
+    
+    # Initialize model manager if available
+    if BACKEND_AVAILABLE and 'model_manager' not in st.session_state:
+        try:
+            st.session_state.model_manager = ModelManager()
+            # Auto-load default model
+            if st.session_state.model_manager.load_default_model():
+                st.success("✅ Default model loaded with pre-trained components!")
+        except Exception as e:
+            st.error(f"Failed to initialize model manager: {e}")
+            st.session_state.model_manager = None
     
     # Main tabs
     tab1, tab2, tab3 = st.tabs(["📂 Load Model", "🔍 Encode", "🎨 Decode"])

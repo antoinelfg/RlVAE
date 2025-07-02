@@ -22,6 +22,15 @@ src_dir = current_dir / "src"
 if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
+# Real backend integration
+try:
+    from ..backend.model_manager import ModelManager
+    from ..backend.experiment_runner import StreamlitExperimentRunner
+    BACKEND_AVAILABLE = True
+except ImportError:
+    BACKEND_AVAILABLE = False
+    print("⚠️ Backend not available - using simulation mode")
+
 
 def render():
     """Render the experiment manager page."""
@@ -730,35 +739,94 @@ def render_experiment_history():
 
 def start_experiment():
     """Start a new experiment with current configuration."""
-    
-    st.session_state.experiment_status = 'running'
-    
-    # In a real implementation, this would:
-    # 1. Generate Hydra configuration from UI settings
-    # 2. Start the training process in a separate thread
-    # 3. Set up real-time monitoring
-    
-    # For now, we'll simulate the experiment
-    experiment_name = f"experiment_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    
-    experiment_data = {
-        'name': experiment_name,
-        'status': 'running',
-        'model_type': st.session_state.model_config['model_type'],
-        'timestamp': datetime.now().isoformat(),
-        'config': {
-            'model': st.session_state.model_config,
-            'training': st.session_state.training_config,
-            'data': st.session_state.data_config,
-            'visualization': st.session_state.visualization_config
-        }
-    }
-    
-    st.session_state.current_experiment = experiment_data
-    st.session_state.experiments[experiment_name] = experiment_data
-    
-    st.success(f"🚀 Started experiment: {experiment_name}")
-    st.rerun()
+    try:
+        # Get configurations from session state
+        model_config = st.session_state.get('model_config', {})
+        training_config = st.session_state.get('training_config', {})
+        data_config = st.session_state.get('data_config', {})
+        
+        # Create experiment name
+        exp_name = f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        if BACKEND_AVAILABLE:
+            # Use real backend
+            if 'experiment_runner' not in st.session_state:
+                st.session_state.experiment_runner = StreamlitExperimentRunner()
+            
+            runner = st.session_state.experiment_runner
+            
+            # Create full experiment configuration
+            config = runner.create_experiment_config(
+                model_config=model_config,
+                training_config=training_config,
+                data_config=data_config,
+                experiment_name=exp_name
+            )
+            
+            # Define callbacks for real-time updates
+            def progress_callback(progress):
+                if 'current_experiment' in st.session_state:
+                    st.session_state.current_experiment['progress'] = progress
+            
+            def metrics_callback(metrics):
+                if 'experiment_metrics' not in st.session_state:
+                    st.session_state.experiment_metrics = []
+                st.session_state.experiment_metrics.append(metrics)
+            
+            # Start training
+            success = runner.start_training(
+                config=config,
+                progress_callback=progress_callback,
+                metrics_callback=metrics_callback
+            )
+            
+            if success:
+                # Set status to running
+                st.session_state.experiment_status = 'running'
+                st.session_state.current_experiment = {
+                    'name': exp_name,
+                    'start_time': datetime.now(),
+                    'model_config': model_config,
+                    'training_config': training_config,
+                    'data_config': data_config,
+                    'status': 'running',
+                    'progress': 0.0,
+                    'config': config
+                }
+                st.session_state.experiment_metrics = []
+                
+                st.success(f"✅ Started real experiment: {exp_name}")
+                st.info("🚀 Training is running in background with GPU support!")
+            else:
+                st.error("❌ Failed to start training")
+                st.session_state.experiment_status = 'error'
+        else:
+            # Fallback to simulation mode  
+            st.session_state.experiment_status = 'running'
+            experiment_data = {
+                'name': exp_name,
+                'status': 'running',
+                'model_type': model_config.get('model_type', 'unknown'),
+                'timestamp': datetime.now().isoformat(),
+                'config': {
+                    'model': model_config,
+                    'training': training_config,
+                    'data': data_config,
+                    'visualization': st.session_state.get('visualization_config', {})
+                }
+            }
+            st.session_state.current_experiment = experiment_data
+            if 'experiments' not in st.session_state:
+                st.session_state.experiments = {}
+            st.session_state.experiments[exp_name] = experiment_data
+            st.warning("⚠️ Running in simulation mode - install dependencies for real training")
+        
+        st.rerun()
+        
+    except Exception as e:
+        st.error(f"❌ Failed to start experiment: {e}")
+        st.session_state.experiment_status = 'error'
+        st.session_state.experiment_error = str(e)
 
 
 def save_experiment_configuration(exp_name: str):
