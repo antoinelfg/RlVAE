@@ -1,0 +1,57 @@
+# @package sweep
+
+# Architecture Optimization Sweep
+# ===============================
+# Focus on finding the best architecture combinations
+
+name: "rlvae_architecture_optimization"
+description: "Optimize architecture choices for VAE and RLVAE components"
+
+method: grid  # Grid search for systematic comparison
+
+metric:
+  name: "val_loss"
+  goal: minimize
+
+# Parameters to sweep
+parameters:
+  # Architecture combinations
+  stage1_architecture:
+    values: ["mlp", "cnn", "resnet"]
+  
+  # Consistent stage2 architecture
+  stage2_model:
+    values: ["mlp_rlvae", "cnn_rlvae", "resnet_rlvae"]
+  
+  # Latent dimensions
+  stage1_latent_dim:
+    values: [16, 32, 64]
+  
+  # Key hyperparameters
+  riemannian_beta:
+    values: [1.0, 5.0, 10.0]
+  
+  n_flows:
+    values: [6, 8, 12]
+
+# Fixed parameters for fair comparison
+parameters_fixed:
+  # Training
+  training.trainer.max_epochs: 50
+  training.optimizer.lr: 0.001
+  training.data.batch_size: 16
+  
+  # Data
+  training.n_train_samples: 2000
+  training.n_val_samples: 600
+  
+  # Stage 1
+  experiment.stage1.epochs: 50
+  experiment.stage1.temperature: 0.5
+  experiment.stage1.regularization: 0.01
+  
+  # Reproducibility
+  seed: 42
+  
+  # Visualization (only at beginning and end)
+  visualization: "final_only" 

@@ -51,6 +51,7 @@ from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 import datetime
 from typing import Dict, Any, List, Optional
+import yaml
 
 # Local imports
 from models.modular_rlvae import ModularRiemannianFlowVAE, ModelFactory, MetricsCollector
@@ -86,15 +87,15 @@ class ExperimentRunner:
     def run(self):
         """Run the experiment based on configuration."""
         experiment_type = self.config.experiment.type
-        
         print(f"\n🧪 Running {experiment_type} experiment: {self.config.experiment.name}")
-        
         if experiment_type == "single":
             self.run_single_experiment()
         elif experiment_type == "comparison":
             self.run_comparison_study()
         elif experiment_type == "sweep":
             self.run_hyperparameter_sweep()
+        elif experiment_type == "pipeline":
+            self.run_pipeline_experiment()
         else:
             raise ValueError(f"Unknown experiment type: {experiment_type}")
     
@@ -213,6 +214,257 @@ class ExperimentRunner:
         # For individual sweep runs, just run single experiment
         self.run_single_experiment()
     
+    def run_pipeline_experiment(self):
+        """
+        Run a two-stage pipeline:
+        1. Vanilla VAE training + diverse metric extraction (with wandb logging and results file)
+        2. RLVAE training with pretrained components from stage 1
+        """
+        import torch
+        import wandb
+        from pathlib import Path
+        from datetime import datetime
+        from scripts.train_diverse_metric_vae import create_model, SpritesDataset, extract_diverse_metric, save_model_components
+        from torch.utils.data import DataLoader, ConcatDataset
+        import torch.nn.functional as F
+        import torchvision.utils as vutils
+        import numpy as np
+        import yaml
+        # --- Stage 1: Vanilla VAE + Diverse Metric ---
+        stage1_cfg = self.config.experiment.stage1
+        print("\n=== [Pipeline] Stage 1: Vanilla VAE + Diverse Metric ===")
+        architecture = getattr(stage1_cfg, 'architecture', 'mlp') if hasattr(stage1_cfg, 'architecture') else 'mlp'
+        latent_dim = getattr(stage1_cfg, 'latent_dim', 16) if hasattr(stage1_cfg, 'latent_dim') else 16
+        epochs = getattr(stage1_cfg, 'epochs', 50) if hasattr(stage1_cfg, 'epochs') else 50
+        temperature = getattr(stage1_cfg, 'temperature', 0.5) if hasattr(stage1_cfg, 'temperature') else 0.5
+        regularization = getattr(stage1_cfg, 'regularization', 0.01) if hasattr(stage1_cfg, 'regularization') else 0.01
+        preset = getattr(stage1_cfg, 'preset', 'balanced') if hasattr(stage1_cfg, 'preset') else 'balanced'
+        n_heatmaps = getattr(stage1_cfg, 'n_heatmaps', 6) if hasattr(stage1_cfg, 'n_heatmaps') else 6
+        # Data loading
+        train_dataset = SpritesDataset('data/processed/Sprites_train_cyclic.pt', normalize=False)
+        test_dataset = SpritesDataset('data/processed/Sprites_test_cyclic.pt', normalize=False)
+        full_dataset = ConcatDataset([train_dataset, test_dataset])
+        train_loader = DataLoader(full_dataset, batch_size=32, shuffle=True)
+        val_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+        # Model
+        model = create_model(architecture, input_dim=(3, 64, 64), latent_dim=latent_dim).to(self.device)
+        
+        # Use lower learning rate for CNN/ResNet to prevent NaN issues
+        if architecture.lower() in ['cnn', 'resnet']:
+            lr = 5e-5  # Lower learning rate for stability
+            print(f"[Stage 1] Using lower learning rate {lr} for {architecture} architecture")
+        else:
+            lr = 1e-4  # Standard learning rate for MLP
+            
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+        # --- WandB logging for Stage 1 ---
+        wandb_run = wandb.init(
+            project=self.config.wandb.project, 
+            name=f"pipeline_stage1_vanilla_vae_{architecture}_ld{latent_dim}",
+            settings=wandb.Settings(init_timeout=300),  # 5 minutes timeout
+            config={
+            "architecture": architecture,
+            "latent_dim": latent_dim,
+            "epochs": epochs,
+            "temperature": temperature,
+            "regularization": regularization,
+            "preset": preset,
+            "n_heatmaps": n_heatmaps,
+            "stage": "pipeline_stage1_vanilla_vae"
+        })
+        print(f"[Stage 1] Training for {epochs} epochs...")
+        batch_counter = 0
+        for epoch in range(epochs):
+            model.train()
+            total_loss = 0
+            total_recon_loss = 0
+            total_kld_loss = 0
+            for batch in train_loader:
+                batch = batch.to(self.device)
+                if architecture.lower() in ["mlp", "pythae"]:
+                    output = model({"data": batch})
+                    loss = output.loss
+                    recon_loss = output.recon_loss.item()
+                    kld_loss = output.reg_loss.item()
+                    recon_batch = output.recon_x
+                else:
+                    output = model(batch)
+                    loss = output.loss
+                    recon_loss = output.reconstruction_loss.item()
+                    kld_loss = output.reg_loss.item()
+                    recon_batch = output.recon_x
+                optimizer.zero_grad()
+                loss.backward()
+                
+                # Add gradient clipping for CNN/ResNet to prevent NaN issues
+                if architecture.lower() in ['cnn', 'resnet']:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
+                optimizer.step()
+                total_loss += loss.item()
+                total_recon_loss += recon_loss
+                total_kld_loss += kld_loss
+                # Log reconstructions every 100 batches
+                if batch_counter % 100 == 0:
+                    with torch.no_grad():
+                        recon_display = recon_batch.clamp(0, 1)
+                        comparison = torch.cat([batch[:8], recon_display[:8]], dim=0)
+                        grid = vutils.make_grid(comparison, nrow=8, normalize=False)
+                        wandb.log({
+                            "reconstructions": wandb.Image(grid),
+                            "batch": batch_counter,
+                            "epoch": epoch + 1
+                        })
+                batch_counter += 1
+            avg_loss = total_loss / len(train_loader)
+            avg_recon_loss = total_recon_loss / len(train_loader)
+            avg_kld_loss = total_kld_loss / len(train_loader)
+            # Validation
+            model.eval()
+            val_loss = 0
+            val_recon_loss = 0
+            val_kld_loss = 0
+            val_batches = 0
+            with torch.no_grad():
+                for batch in val_loader:
+                    batch = batch.to(self.device)
+                    if architecture.lower() in ["mlp", "pythae"]:
+                        output = model({"data": batch})
+                        recon_loss_val = output.recon_loss.item()
+                        kld_loss_val = output.reg_loss.item()
+                    else:
+                        output = model(batch)
+                        recon_loss_val = output.reconstruction_loss.item()
+                        kld_loss_val = output.reg_loss.item()
+                    if not (torch.isnan(output.loss) or torch.isinf(output.loss)):
+                        val_loss += output.loss.item()
+                        val_recon_loss += recon_loss_val
+                        val_kld_loss += kld_loss_val
+                        val_batches += 1
+            if val_batches > 0:
+                avg_val_loss = val_loss / val_batches
+                avg_val_recon_loss = val_recon_loss / val_batches
+                avg_val_kld_loss = val_kld_loss / val_batches
+            else:
+                avg_val_loss = avg_val_recon_loss = avg_val_kld_loss = 0
+            # Log metrics to wandb
+            wandb.log({
+                "epoch": epoch + 1,
+                "train/loss": avg_loss,
+                "train/reconstruction_loss": avg_recon_loss,
+                "train/kld_loss": avg_kld_loss,
+                "val/loss": avg_val_loss,
+                "val/reconstruction_loss": avg_val_recon_loss,
+                "val/kld_loss": avg_val_kld_loss
+            })
+            print(f"[Stage 1] Epoch {epoch+1}/{epochs} - Train Loss: {avg_loss:.4f} (Recon: {avg_recon_loss:.4f} + KL: {avg_kld_loss:.4f}) | Val Loss: {avg_val_loss:.4f}")
+        print("[Stage 1] Training complete. Saving components...")
+        component_paths = save_model_components(model, architecture, latent_dim)
+        print("[Stage 1] Extracting diverse metric...")
+        metric_path = extract_diverse_metric(model, architecture, latent_dim, temperature=temperature, regularization=regularization)
+        
+        # --- METRIC ANALYSIS & VISUALIZATION (from train_diverse_metric_vae.py) ---
+        print("[Stage 1] Creating metric analysis and visualizations...")
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        plt.style.use('default')
+        sns.set_palette("husl")
+        
+        try:
+            metric_data = torch.load(metric_path, map_location='cpu', weights_only=False)
+            M_matrices = metric_data['M_matrices']
+            centroids = metric_data['centroids']
+            eigenvals = torch.linalg.eigvals(M_matrices).real
+            min_eigenvals = eigenvals.min(dim=-1)[0]
+            max_eigenvals = eigenvals.max(dim=-1)[0]
+            mean_eigenvals = eigenvals.mean(dim=-1)
+            cond_nums = max_eigenvals / (min_eigenvals + 1e-12)
+            determinants = torch.linalg.det(M_matrices)
+            eigenval_spread = max_eigenvals - min_eigenvals
+            
+            # 1. Eigenvalue distributions
+            fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+            fig.suptitle('Metric Eigenvalue & Condition Analysis', fontsize=16, fontweight='bold')
+            axes[0,0].hist(min_eigenvals.numpy(), bins=40, color='red', edgecolor='black')
+            axes[0,0].set_title('Min Eigenvalue')
+            axes[0,1].hist(max_eigenvals.numpy(), bins=40, color='blue', edgecolor='black')
+            axes[0,1].set_title('Max Eigenvalue')
+            axes[0,2].hist(mean_eigenvals.numpy(), bins=40, color='green', edgecolor='black')
+            axes[0,2].set_title('Mean Eigenvalue')
+            axes[1,0].hist(cond_nums.numpy(), bins=40, color='orange', edgecolor='black')
+            axes[1,0].set_title('Condition Number')
+            log_dets = torch.log10(torch.abs(determinants) + 1e-50)
+            axes[1,1].hist(log_dets.numpy(), bins=40, color='purple', edgecolor='black')
+            axes[1,1].set_title('Log₁₀|Determinant|')
+            axes[1,2].hist(eigenval_spread.numpy(), bins=40, color='cyan', edgecolor='black')
+            axes[1,2].set_title('Eigenvalue Spread')
+            plt.tight_layout()
+            wandb.log({"metric_analysis/eigenvalue_distributions": wandb.Image(fig)})
+            plt.close(fig)
+            
+            # 2. Heatmaps of metric matrices (configurable number, or fewer if less matrices available)
+            n_heatmaps = min(n_heatmaps, len(M_matrices))
+            fig, axes = plt.subplots(1, n_heatmaps, figsize=(4*n_heatmaps, 4))
+            for i in range(n_heatmaps):
+                im = axes[i].imshow(M_matrices[i].numpy(), cmap='RdYlBu_r', aspect='auto')
+                axes[i].set_title(f'Matrix {i}')
+                plt.colorbar(im, ax=axes[i], fraction=0.046, pad=0.04)
+            plt.tight_layout()
+            wandb.log({"metric_analysis/metric_matrix_heatmaps": wandb.Image(fig)})
+            plt.close(fig)
+            
+            # 3. Centroid statistics
+            centroid_norms = torch.norm(centroids, dim=1)
+            pairwise_dists = torch.cdist(centroids, centroids)
+            triu_mask = torch.triu(torch.ones_like(pairwise_dists, dtype=bool), diagonal=1)
+            pairwise_vals = pairwise_dists[triu_mask]
+            fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+            axes[0].hist(centroid_norms.numpy(), bins=30, color='red', edgecolor='black')
+            axes[0].set_title('Centroid Norms')
+            axes[1].hist(pairwise_vals.numpy(), bins=40, color='blue', edgecolor='black')
+            axes[1].set_title('Pairwise Centroid Distances')
+            plt.tight_layout()
+            wandb.log({"metric_analysis/centroid_stats": wandb.Image(fig)})
+            plt.close(fig)
+            
+            print(f"[Stage 1] ✅ Metric analysis complete: {n_heatmaps} matrix heatmaps created")
+            
+        except Exception as e:
+            print(f"[Stage 1] ⚠️ Could not analyze metric for graphs: {e}")
+        
+        # Log metric file as wandb artifact
+        if Path(metric_path).exists():
+            artifact = wandb.Artifact(f"diverse_metric_{architecture}_ld{latent_dim}", type="metric")
+            artifact.add_file(metric_path)
+            wandb.log_artifact(artifact)
+        
+        # Save results YAML for Stage 1
+        vanilla_results = {
+            'architecture': architecture,
+            'latent_dim': latent_dim,
+            'epochs': epochs,
+            'temperature': temperature,
+            'regularization': regularization,
+            'preset': preset,
+            'encoder_path': component_paths['encoder'],
+            'decoder_path': component_paths['decoder'],
+            'metric_path': metric_path
+        }
+        results_path = Path(self.output_dir) / "vanilla_vae_results.yaml"
+        with open(results_path, 'w') as f:
+            yaml.dump(vanilla_results, f)
+        print(f"[Stage 1] Results saved to: {results_path}")
+        wandb.finish()
+        # --- Stage 2: RLVAE Training ---
+        print("\n=== [Pipeline] Stage 2: RLVAE Training ===")
+        stage2_cfg = self.config.experiment.stage2
+        # Update config for pretrained paths
+        self.config.model.pretrained.encoder_path = component_paths['encoder']
+        self.config.model.pretrained.decoder_path = component_paths['decoder']
+        self.config.model.pretrained.metric_path = metric_path
+        # Run RLVAE training as in single experiment
+        self.run_single_experiment()
+    
     def _create_model_config(self, model_name: str) -> DictConfig:
         """Create configuration for a specific model variant."""
         config = OmegaConf.structured(self.config)
@@ -244,9 +496,16 @@ class ExperimentRunner:
         if self.config.wandb.mode == "disabled":
             return None
         
-        # Create unique run name
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        full_run_name = f"{run_name}_{timestamp}"
+        # For pipeline experiments, include stage information in the run name
+        if hasattr(self.config.experiment, 'type') and self.config.experiment.type == "pipeline":
+            # Extract architecture and latent_dim for consistent naming
+            architecture = getattr(self.config.experiment.stage1, 'architecture', 'mlp')
+            latent_dim = getattr(self.config.experiment.stage1, 'latent_dim', 16)
+            full_run_name = f"pipeline_stage2_rlvae_{architecture}_ld{latent_dim}"
+        else:
+            # Create unique run name for other experiments
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            full_run_name = f"{run_name}_{timestamp}"
         
         wandb_logger = WandbLogger(
             project=self.config.wandb.project,

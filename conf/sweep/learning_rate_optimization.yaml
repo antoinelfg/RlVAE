@@ -1,0 +1,82 @@
+# @package sweep
+
+# Learning Rate and Training Optimization Sweep  
+# ==============================================
+# Focus on training dynamics and optimization parameters
+
+name: "rlvae_training_optimization"
+description: "Optimize learning rates, batch sizes, and training dynamics"
+
+method: random
+
+metric:
+  name: "val_loss"
+  goal: minimize
+
+early_terminate:
+  type: hyperband
+  max_iter: 30
+  eta: 2
+
+run_cap: 50
+
+# Parameters to sweep
+parameters:
+  # Learning rates
+  lr:
+    distribution: log_uniform_values
+    min: 0.00001
+    max: 0.01
+  
+  # Weight decay
+  weight_decay:
+    distribution: log_uniform_values
+    min: 0.000001
+    max: 0.001
+  
+  # Batch sizes
+  batch_size:
+    values: [8, 16, 32, 64]
+  
+  # Training length
+  max_epochs:
+    distribution: int_uniform
+    min: 30
+    max: 80
+  
+  # Beta parameters
+  beta:
+    distribution: log_uniform_values
+    min: 0.5
+    max: 3.0
+  
+  riemannian_beta:
+    distribution: log_uniform_values
+    min: 1.0
+    max: 15.0
+  
+  # Data efficiency
+  n_train_samples:
+    values: [1000, 2000, 3000, 5000]
+
+# Fixed parameters
+parameters_fixed:
+  # Architecture (use best from architecture sweep)
+  experiment.stage1.architecture: "cnn"
+  experiment.stage2.model: "cnn_rlvae"
+  experiment.stage1.latent_dim: 32
+  
+  # Model structure
+  model.n_flows: 8
+  model.flow_hidden_size: 256
+  
+  # Stage 1 parameters
+  experiment.stage1.epochs: 50
+  experiment.stage1.temperature: 0.5
+  experiment.stage1.regularization: 0.01
+  
+  # Reproducibility
+  seed: 42
+  
+  # Visualization (only at beginning and end)
+  visualization: "final_only" 

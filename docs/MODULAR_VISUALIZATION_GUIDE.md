@@ -1,8 +1,34 @@
-# Modular Visualization System Guide
+# Modular Visualization System Guide (Unified Pipeline)
 
-## 🎉 System Status: **FULLY IMPLEMENTED & WORKING**
+## System Status: **FULLY INTEGRATED WITH GLOBAL PIPELINE**
 
-The RlVAE training system now features a **completely modular visualization architecture** that separates concerns, improves maintainability, and provides flexible configuration options.
+All visualizations are now managed and triggered via the **Global RLVAE Pipeline** and the `VisualizationManager`.
+
+- **No more legacy scripts:** All visualization is handled through the pipeline
+- **Wandb logging:** All visualizations are logged to wandb, with options for large files
+- **Configurable levels:** minimal, standard, full
+- **Extensible:** Add new modules to `src/visualizations/` and register with the manager
+
+---
+
+## Usage
+
+- Visualizations are automatically created during both vanilla VAE and RLVAE training stages
+- Use the `--visualization-level` flag to control which visualizations are run
+- Use the `--include-large-files` flag to optionally log large files (HTML, high-res images) to wandb
+
+---
+
+## Extensibility
+
+- Add new visualizations by creating a module in `src/visualizations/` and registering it with the manager
+- All visualizations are triggered via the `VisualizationManager` (see `src/visualizations/manager.py`)
+
+---
+
+## For More Details
+
+See `GLOBAL_RLVAE_PIPELINE.md` and the updated documentation for quickstart, advanced usage, and extensibility examples.
 
 ## 🏗️ Architecture
 
@@ -39,6 +65,12 @@ docs/MODULAR_VISUALIZATION_GUIDE.md  # ✅ This comprehensive guide
   - Trajectory length distribution analysis
   - Start vs end point visualization with connection lines
   - Distance statistics and correlation analysis
+  - **NEW:**
+    - Configurable number of sequences to plot (`sequence_viz_count`: int or 'all')
+    - Optional clustering of sequences (`cluster_sequences`: bool, `n_clusters`: int)
+    - Cluster-based coloring (`cluster_coloring`: bool)
+    - Optionally show cluster centroids (`show_cluster_centroids`: bool)
+    - Performance-aware plotting for large numbers of sequences
 
 - **`create_reconstruction_analysis()`** - Complete implementation
   - Comprehensive grid showing original, reconstructed, and error
@@ -222,3 +254,18 @@ The system provides:
 - **Proven performance** with real training runs
 
 **Recommendation**: Use the current system for all training runs while continuing development of the remaining interactive and flow analysis modules. 
+
+## Configuration File
+
+The pipeline is configured via `conf/experiment/global_vanilla_rlvae_pipeline.yaml`:
+
+```yaml
+# ... existing code ...
+visualization:
+  sequence_viz_count: 64         # Number of sequences to plot (int or "all")
+  cluster_sequences: true        # Whether to cluster sequences
+  n_clusters: 5                  # Number of clusters (if clustering enabled)
+  cluster_coloring: true         # Use cluster colors in plots
+  show_cluster_centroids: true   # Optionally plot centroids
+# ... existing code ...
+``` 

@@ -18,7 +18,8 @@ flow_frequency: 5
 
 # Performance controls
 disable_curvature: false  # Enable curvature analysis
-max_sequences: 8  # Show more sequences
+# max_sequences: 64  # Deprecated: use sequence_viz_count in your main config
+# sequence_viz_count now controls the number of sequences for all visualizations
 enable_fancy_plots: true
 
 # Output controls

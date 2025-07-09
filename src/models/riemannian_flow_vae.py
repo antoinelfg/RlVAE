@@ -10,7 +10,7 @@ from pythae.models.base.base_utils import ModelOutput
 from pythae.models.normalizing_flows.iaf import IAF, IAFConfig
 from pythae.models.nn import BaseEncoder, BaseDecoder
 from pythae.models.nn.default_architectures import Encoder_VAE_MLP, Decoder_AE_MLP
-from src.models.components.flow_manager import FlowManager
+from models.components.flow_manager import FlowManager
 
 # Import official RHVAE components
 try:
@@ -870,7 +870,7 @@ class RiemannianFlowVAE(nn.Module):
         """Load pretrained metric tensors using the working approach."""
         print(f"🔧 Loading pretrained metrics from: {metric_path}")
         
-        metric_data = torch.load(metric_path, map_location=self.device)
+        metric_data = torch.load(metric_path, map_location=self.device, weights_only=False)
         
         # Extract components exactly like working test
         centroids = metric_data.get("centroids", metric_data.get("metric_centroids", None))
@@ -922,7 +922,7 @@ class RiemannianFlowVAE(nn.Module):
         """Load all pretrained components."""
         if encoder_path:
             print(f"🔧 Loading encoder from: {encoder_path}")
-            encoder_weights = torch.load(encoder_path, map_location=self.device)
+            encoder_weights = torch.load(encoder_path, map_location=self.device, weights_only=False)
             if hasattr(encoder_weights, 'state_dict'):
                 self.encoder.load_state_dict(encoder_weights.state_dict())
             else:
@@ -931,7 +931,7 @@ class RiemannianFlowVAE(nn.Module):
         
         if decoder_path:
             print(f"🔧 Loading decoder from: {decoder_path}")
-            decoder_weights = torch.load(decoder_path, map_location=self.device)
+            decoder_weights = torch.load(decoder_path, map_location=self.device, weights_only=False)
             if hasattr(decoder_weights, 'state_dict'):
                 self.decoder.load_state_dict(decoder_weights.state_dict())
             else:
@@ -1186,7 +1186,22 @@ class RiemannianFlowVAE(nn.Module):
 
         # Decode sequence
         z_flat = z_seq.reshape(-1, self.latent_dim)
-        recon_x = self.decoder(z_flat)["reconstruction"]
+        decoder_out = self.decoder(z_flat)
+        
+        # Handle different decoder output formats
+        if hasattr(decoder_out, 'reconstruction'):
+            # Object with attribute (CNN, ResNet)
+            recon_x = decoder_out.reconstruction
+        elif isinstance(decoder_out, dict) and "reconstruction" in decoder_out:
+            # Dictionary format (MLP)
+            recon_x = decoder_out["reconstruction"]
+        elif hasattr(decoder_out, 'recon_x'):
+            # Alternative attribute name
+            recon_x = decoder_out.recon_x
+        else:
+            # Fallback - assume direct tensor return
+            recon_x = decoder_out
+            
         recon_x = recon_x.view(batch_size, n_obs, *self.input_dim)
         
         # ====== LOSS COMPUTATION BASED ON POSTERIOR TYPE ======

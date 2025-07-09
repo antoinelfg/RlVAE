@@ -1,0 +1,26 @@
+# @package visualization
+
+# End-only visualization configuration - no visualizations during training
+level: "full"
+frequency: 999999  # Effectively disable during training
+
+# Module toggles (enable all for final run)
+enable_basic: true
+enable_manifold: true
+enable_interactive: true
+enable_flow_analysis: true
+
+# Set very high frequencies to disable during training
+basic_frequency: 999999
+manifold_frequency: 999999
+interactive_frequency: 999999
+flow_frequency: 999999
+
+# Performance controls (enable all for final comprehensive analysis)
+disable_curvature: false
+max_sequences: 32
+enable_fancy_plots: true
+
+# Output controls
+save_local: true
+log_to_wandb: true 

@@ -1,0 +1,24 @@
+# @package visualization
+
+# No visualizations at all (only losses logged)
+level: minimal
+frequency: 999999
+
+# Module toggles
+enable_basic: false
+enable_manifold: false
+enable_interactive: false
+enable_flow_analysis: false
+enable_dynamics: false
+
+# Frequencies (irrelevant since all modules are off)
+basic_frequency: 999999
+manifold_frequency: 999999
+interactive_frequency: 999999
+flow_frequency: 999999
+
+disable_curvature: true
+max_sequences: 1
+enable_fancy_plots: false
+save_local: false
+log_to_wandb: true 
