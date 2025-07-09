@@ -492,6 +492,23 @@ def render_experiment_execution():
     
     st.header("▶️ Run & Monitor Experiments")
     
+    # Initialize backend components
+    if 'experiment_runner' not in st.session_state:
+        try:
+            from ..backend.experiment_runner import StreamlitExperimentRunner
+            st.session_state.experiment_runner = StreamlitExperimentRunner()
+        except ImportError:
+            st.warning("⚠️ Backend components not available. Running in simulation mode.")
+            st.session_state.experiment_runner = None
+    
+    if 'training_visualizer' not in st.session_state:
+        try:
+            from ..components.visualization_components import TrainingProgressVisualizer
+            st.session_state.training_visualizer = TrainingProgressVisualizer()
+        except ImportError:
+            st.warning("⚠️ Visualization components not available.")
+            st.session_state.training_visualizer = None
+    
     # Check if configuration is ready
     if not hasattr(st.session_state, 'model_config'):
         st.warning("⚠️ Please configure your experiment in the **Configure** tab first.")
@@ -618,60 +635,112 @@ def render_error_experiment_interface():
 def render_real_time_metrics():
     """Render real-time training metrics."""
     
-    # Placeholder for real metrics - in a real implementation, 
-    # this would connect to the actual training process
-    import plotly.graph_objects as go
-    import numpy as np
-    
     st.subheader("📈 Training Metrics")
     
-    # Simulate some training progress
-    epochs = list(range(1, 21))
-    train_loss = [3.0 - 1.5 * np.exp(-x/5) + 0.1 * np.random.randn() for x in epochs]
-    val_loss = [2.8 - 1.2 * np.exp(-x/5) + 0.15 * np.random.randn() for x in epochs]
+    # Get experiment runner and visualizer
+    runner = st.session_state.get('experiment_runner')
+    visualizer = st.session_state.get('training_visualizer')
     
-    # Loss plot
-    fig = go.Figure()
+    if runner and visualizer:
+        # Get current status
+        status = runner.get_status()
+        
+        # Display current status
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(
+                "Status", 
+                status.status.title(),
+                delta=None
+            )
+        
+        with col2:
+            st.metric(
+                "Progress", 
+                f"{status.progress:.1%}",
+                delta=None
+            )
+        
+        with col3:
+            st.metric(
+                "Current Epoch", 
+                f"{status.current_epoch}/{status.total_epochs}",
+                delta=None
+            )
+        
+        with col4:
+            st.metric(
+                "Current Loss", 
+                f"{status.current_loss:.4f}",
+                delta=None
+            )
+        
+        # Display training curves
+        visualizer.plot_training_curves("Real-time Training Progress")
+        
+        # Display loss breakdown
+        visualizer.plot_loss_breakdown()
+        
+        # System monitoring
+        if hasattr(runner, 'get_device_info'):
+            device_info = runner.get_device_info()
+            from ..components.visualization_components import SystemMonitorVisualizer
+            system_viz = SystemMonitorVisualizer()
+            system_viz.plot_system_metrics(device_info)
     
-    fig.add_trace(go.Scatter(
-        x=epochs,
-        y=train_loss,
-        mode='lines+markers',
-        name='Training Loss',
-        line=dict(color='#1f77b4', width=2)
-    ))
-    
-    fig.add_trace(go.Scatter(
-        x=epochs,
-        y=val_loss,
-        mode='lines+markers',
-        name='Validation Loss',
-        line=dict(color='#ff7f0e', width=2)
-    ))
-    
-    fig.update_layout(
-        title="Training Progress",
-        xaxis_title="Epoch",
-        yaxis_title="Loss",
-        height=400
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # Current metrics
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric("Current Epoch", "20", "2")
-    
-    with col2:
-        st.metric("Training Loss", "1.234", "-0.045")
-    
-    with col3:
-        st.metric("Validation Loss", "1.189", "-0.032")
-    
-    with col4:
-        st.metric("Learning Rate", "0.0005", "0")
+    else:
+        # Fallback to simulation
+        import plotly.graph_objects as go
+        import numpy as np
+        
+        # Simulate some training progress
+        epochs = list(range(1, 21))
+        train_loss = [3.0 - 1.5 * np.exp(-x/5) + 0.1 * np.random.randn() for x in epochs]
+        val_loss = [2.8 - 1.2 * np.exp(-x/5) + 0.15 * np.random.randn() for x in epochs]
+        
+        # Loss plot
+        fig = go.Figure()
+        
+        fig.add_trace(go.Scatter(
+            x=epochs,
+            y=train_loss,
+            mode='lines+markers',
+            name='Training Loss',
+            line=dict(color='#1f77b4', width=2)
+        ))
+        
+        fig.add_trace(go.Scatter(
+            x=epochs,
+            y=val_loss,
+            mode='lines+markers',
+            name='Validation Loss',
+            line=dict(color='#ff7f0e', width=2)
+        ))
+        
+        fig.update_layout(
+            title="Training Progress (Simulation)",
+            xaxis_title="Epoch",
+            yaxis_title="Loss",
+            height=400
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Current metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Current Epoch", "20", "2")
+        
+        with col2:
+            st.metric("Training Loss", "1.234", "-0.045")
+        
+        with col3:
+            st.metric("Validation Loss", "1.189", "-0.032")
+        
+        with col4:
+            st.metric("Learning Rate", "0.0005", "0")
 
 
 def render_experiment_results():
