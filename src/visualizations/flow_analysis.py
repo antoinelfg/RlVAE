@@ -4,7 +4,8 @@ Flow Analysis Visualizations Module
 
 Flow Jacobian analysis and temporal evolution:
 - Flow-based temporal plots
-- Jacobian determinant evolution
+- Jacobian determinant evolution using built-in flow methods
+- Flow stability and volume preservation analysis
 - Interactive temporal animations
 """
 
@@ -24,11 +25,11 @@ except ImportError:
 
 
 class FlowAnalysisVisualizations(BaseVisualization):
-    """Flow Jacobian and temporal evolution visualization suite."""
+    """Flow Jacobian and temporal evolution visualization suite with enhanced metrics."""
     
     def create_temporal_evolution(self, x_sample: torch.Tensor, epoch: int):
         """Create flow-based temporal metric evolution visualizations."""
-        print(f"🌊 Creating temporal evolution analysis for epoch {epoch}")
+        print(f"🌊 Creating enhanced temporal evolution analysis for epoch {epoch}")
         
         # Check for metric tensor and flows in both legacy and modular structures
         has_metric = (hasattr(self.model, 'G') and self.model.G is not None) or \
@@ -50,14 +51,16 @@ class FlowAnalysisVisualizations(BaseVisualization):
                 # Create PCA projection
                 z_pca_seq, pca = self._prepare_pca_data(z_seq, n_components=2)
                 
-                # Compute det(G) at each timestep using flow-evolved coordinates
+                # Compute enhanced flow metrics
+                print("🔬 Computing enhanced flow metrics...")
                 det_G_seq = self._compute_flow_evolved_det_G(z_seq)
-                
-                # Compute flow Jacobians
-                flow_jacobians = self._compute_flow_jacobians(z_seq)
+                flow_jacobians = self._compute_flow_jacobians_enhanced(z_seq)
+                flow_stability = self._compute_flow_stability_metrics(z_seq)
+                volume_preservation = self._compute_volume_preservation_metrics(flow_jacobians)
                 
                 # Create comprehensive flow-based visualization
-                self._create_flow_based_temporal_plots(z_pca_seq, det_G_seq, flow_jacobians, epoch, pca)
+                self._create_enhanced_flow_temporal_plots(z_pca_seq, det_G_seq, flow_jacobians, 
+                                                        flow_stability, volume_preservation, epoch, pca)
                 
         except Exception as e:
             print(f"⚠️ Temporal evolution visualization failed: {e}")
@@ -67,10 +70,11 @@ class FlowAnalysisVisualizations(BaseVisualization):
         self.model.train()
         
     def create_jacobian_analysis(self, x_sample: torch.Tensor, epoch: int):
-        """Create flow Jacobian analysis visualizations."""
-        print(f"📊 Creating flow Jacobian analysis for epoch {epoch}")
+        """Create enhanced flow Jacobian analysis visualizations."""
+        print(f"📊 Creating enhanced flow Jacobian analysis for epoch {epoch}")
         
-        if self._get_flows() is None:
+        flows = self._get_flows()
+        if flows is None:
             print("⚠️ No flows available for Jacobian analysis")
             return
             
@@ -80,22 +84,17 @@ class FlowAnalysisVisualizations(BaseVisualization):
                 result = self.model_forward(x_sample)
                 z_seq = result['latent_samples'] if isinstance(result, dict) else result.z
                 
-                # Compute det(G) evolution
+                # Compute enhanced flow metrics
+                print("🔬 Computing enhanced Jacobian metrics...")
                 det_G_seq = self._compute_flow_evolved_det_G(z_seq)
+                flow_jacobians = self._compute_flow_jacobians_enhanced(z_seq)
+                flow_stability = self._compute_flow_stability_metrics(z_seq)
                 
-                # Compute flow Jacobians
-                flow_jacobians = self._compute_flow_jacobians(z_seq)
-                
-                # Create detailed Jacobian analysis
-                self._create_detailed_jacobian_analysis(det_G_seq, flow_jacobians, epoch)
-                
-                # Create interactive animation if Plotly available
-                if PLOTLY_AVAILABLE:
-                    z_pca_seq, _ = self._prepare_pca_data(z_seq, n_components=2)
-                    self._create_flow_interactive_animation(z_pca_seq, det_G_seq, flow_jacobians, epoch)
+                # Create detailed enhanced Jacobian analysis
+                self._create_enhanced_jacobian_analysis(det_G_seq, flow_jacobians, flow_stability, epoch)
                 
         except Exception as e:
-            print(f"⚠️ Jacobian analysis visualization failed: {e}")
+            print(f"⚠️ Enhanced Jacobian analysis visualization failed: {e}")
             import traceback
             traceback.print_exc()
         
@@ -125,411 +124,448 @@ class FlowAnalysisVisualizations(BaseVisualization):
         
         return det_G_seq.cpu().numpy()
     
-    def _compute_flow_jacobians(self, z_seq):
-        """Compute Jacobian determinants for each flow step."""
+    def _compute_flow_jacobians_enhanced(self, z_seq):
+        """Enhanced Jacobian computation using built-in flow methods when available."""
         batch_size, n_obs, latent_dim = z_seq.shape
         flow_jacobians = []
+        flows = self._get_flows()
         
-        for flow_idx in range(min(n_obs - 1, len(self._get_flows() or []))):
+        if flows is None:
+            print("⚠️ No flows available for Jacobian computation")
+            return []
+        
+
+        
+        for flow_idx, flow in enumerate(flows):
+            if flow_idx >= n_obs - 1:
+                break
+                
             try:
-                z_input = z_seq[:, flow_idx, :]  # Input to flow
-                flows = self._get_flows()
-                if flows is None:
-                    break
-                flow = flows[flow_idx]
+                z_input = z_seq[:, flow_idx, :].clone().detach().requires_grad_(True)
                 
-                # Compute Jacobian determinant
-                z_input.requires_grad_(True)
-                flow_result = flow(z_input)
-                z_output = flow_result.out
+                # Try to use built-in log_abs_det_jac method first (IAF flows have this)
+                if hasattr(flow, 'log_abs_det_jac'):
+                    print(f"✅ Using built-in log_abs_det_jac for flow {flow_idx}")
+                    # Apply the flow
+                    flow_result = flow(z_input)
+                    if hasattr(flow_result, 'out'):
+                        z_output = flow_result.out
+                    else:
+                        z_output = flow_result
+                    
+                    # Compute log absolute determinant of Jacobian
+                    log_abs_det_jac = flow.log_abs_det_jac(z_input, z_output)
+                    jac_det = torch.exp(log_abs_det_jac).detach()
                 
-                # Compute Jacobian matrix and its determinant
-                jac_det = torch.zeros(batch_size)
-                for i in range(batch_size):
-                    try:
-                        jac_matrix = torch.autograd.functional.jacobian(
-                            lambda x: flow(x.unsqueeze(0)).out.squeeze(0), 
-                            z_input[i]
-                        )
-                        jac_det[i] = torch.linalg.det(jac_matrix)
-                    except:
-                        jac_det[i] = 1.0  # Fallback
+                else:
+                    # Fallback to manual Jacobian computation
+
+                    jac_det = torch.zeros(batch_size, device=z_input.device)
+                    
+                    for i in range(batch_size):
+                        try:
+                            # Use functional Jacobian computation
+                            jac_matrix = torch.autograd.functional.jacobian(
+                                lambda x: flow(x.unsqueeze(0)).out.squeeze(0) if hasattr(flow(x.unsqueeze(0)), 'out') else flow(x.unsqueeze(0)).squeeze(0), 
+                                z_input[i]
+                            )
+                            jac_det[i] = torch.abs(torch.linalg.det(jac_matrix))
+                        except Exception as e:
+                            print(f"⚠️ Jacobian computation failed for sample {i}, flow {flow_idx}: {e}")
+                            jac_det[i] = 1.0  # Identity fallback
                 
-                flow_jacobians.append(jac_det.detach())
+                flow_jacobians.append(jac_det.cpu().numpy())
+                print(f"✅ Flow {flow_idx}: Jacobian det range [{jac_det.min():.3e}, {jac_det.max():.3e}]")
                 
             except Exception as e:
-                print(f"⚠️ Jacobian computation failed for flow {flow_idx}: {e}")
-                flow_jacobians.append(torch.ones(batch_size))
+                print(f"⚠️ Enhanced Jacobian computation failed for flow {flow_idx}: {e}")
+                flow_jacobians.append(np.ones(batch_size))
         
         return flow_jacobians
     
-    def _create_flow_based_temporal_plots(self, z_pca_seq, det_G_seq, flow_jacobians, epoch, pca):
-        """Create comprehensive flow-based temporal visualization - SMALLER SIZE."""
+    def _compute_flow_stability_metrics(self, z_seq):
+        """Compute flow stability metrics including eigenvalue analysis."""
+        flows = self._get_flows()
+        if flows is None:
+            return {}
+        
+        batch_size, n_obs, latent_dim = z_seq.shape
+        stability_metrics = {}
+        
+
+        
+        for flow_idx, flow in enumerate(flows):
+            if flow_idx >= n_obs - 1:
+                break
+                
+            try:
+                z_input = z_seq[:, flow_idx, :].clone().detach().requires_grad_(True)
+                
+                # Compute Jacobian eigenvalues for stability analysis
+                eigenvalues = []
+                condition_numbers = []
+                
+                for i in range(min(batch_size, 8)):  # Limit for performance
+                    try:
+                        # Compute full Jacobian matrix
+                        def flow_func(x):
+                            result = flow(x.unsqueeze(0))
+                            return result.out.squeeze(0) if hasattr(result, 'out') else result.squeeze(0)
+                        
+                        jac_matrix = torch.autograd.functional.jacobian(flow_func, z_input[i])
+                        
+                        # Compute eigenvalues
+                        eigvals = torch.linalg.eigvals(jac_matrix)
+                        eigenvalues.append(eigvals.cpu().numpy())
+                        
+                        # Compute condition number
+                        cond_num = torch.linalg.cond(jac_matrix).item()
+                        condition_numbers.append(cond_num)
+                        
+                    except Exception as e:
+                        print(f"⚠️ Stability analysis failed for sample {i}, flow {flow_idx}: {e}")
+                        eigenvalues.append(np.ones(latent_dim, dtype=complex))
+                        condition_numbers.append(1.0)
+                
+                stability_metrics[flow_idx] = {
+                    'eigenvalues': eigenvalues,
+                    'condition_numbers': condition_numbers,
+                    'mean_condition_number': np.mean(condition_numbers),
+                    'max_eigenvalue_magnitude': np.max([np.abs(ev).max() for ev in eigenvalues])
+                }
+                
+                print(f"✅ Flow {flow_idx}: Mean condition number: {np.mean(condition_numbers):.2f}")
+                
+            except Exception as e:
+                print(f"⚠️ Flow stability computation failed for flow {flow_idx}: {e}")
+                stability_metrics[flow_idx] = {
+                    'eigenvalues': [],
+                    'condition_numbers': [1.0],
+                    'mean_condition_number': 1.0,
+                    'max_eigenvalue_magnitude': 1.0
+                }
+        
+        return stability_metrics
+    
+    def _compute_volume_preservation_metrics(self, flow_jacobians):
+        """Compute volume preservation metrics from Jacobian determinants."""
+        if not flow_jacobians:
+            return {}
+        
+        print("📏 Computing volume preservation metrics...")
+        
+        volume_metrics = {}
+        
+        for flow_idx, jac_dets in enumerate(flow_jacobians):
+            # Volume expansion/contraction analysis
+            log_jac_dets = np.log(np.clip(jac_dets, 1e-12, None))
+            
+            volume_metrics[flow_idx] = {
+                'mean_log_det': np.mean(log_jac_dets),
+                'std_log_det': np.std(log_jac_dets),
+                'volume_expansion_ratio': np.mean(jac_dets),
+                'volume_preservation_score': 1.0 - np.abs(np.mean(log_jac_dets)),  # Closer to 1 is better
+                'max_volume_change': np.max(np.abs(log_jac_dets))
+            }
+            
+            print(f"✅ Flow {flow_idx}: Volume expansion ratio: {np.mean(jac_dets):.3f}, Preservation score: {volume_metrics[flow_idx]['volume_preservation_score']:.3f}")
+        
+        return volume_metrics
+    
+    def _create_enhanced_flow_temporal_plots(self, z_pca_seq, det_G_seq, flow_jacobians, 
+                                           flow_stability, volume_preservation, epoch, pca):
+        """Create enhanced comprehensive flow-based temporal visualization."""
         try:
             batch_size, n_obs, _ = z_pca_seq.shape
             
-            # Create smaller visualization
-            fig, axes = plt.subplots(2, 3, figsize=(15, 10))  # SMALLER
-            fig.suptitle(f'Flow-Based det(G) Evolution - Epoch {epoch}', fontsize=14)
+            # Create enhanced visualization with more panels
+            fig, axes = plt.subplots(3, 3, figsize=(18, 15))
+            fig.suptitle(f'Enhanced Flow Analysis - Epoch {epoch}', fontsize=16)
             
             colors = plt.get_cmap("tab10")(np.linspace(0, 1, min(batch_size, 8)))
-            timesteps = np.linspace(0, n_obs-1, min(6, n_obs), dtype=int)  # Fewer timesteps
+            timesteps = np.linspace(0, n_obs-1, min(4, n_obs), dtype=int)
             
             # Row 1: Flow-evolved det(G) spatial distribution
-            for idx, t in enumerate(timesteps[:3]):  # Show only 3 timesteps
+            for idx, t in enumerate(timesteps[:3]):
                 ax = axes[0, idx]
                 
                 x_coords = z_pca_seq[:, t, 0]
                 y_coords = z_pca_seq[:, t, 1]
                 det_values = det_G_seq[:, t]
                 
-                scatter = ax.scatter(x_coords, y_coords, c=det_values, s=60,  # Smaller markers
+                scatter = ax.scatter(x_coords, y_coords, c=det_values, s=40,
                                    cmap='viridis', alpha=0.8, edgecolors='white',
                                    vmin=det_G_seq.min(), vmax=det_G_seq.max())
                 
-                # Draw trajectories up to this timestep (limit sequences)
+                # Draw trajectories up to this timestep
                 for seq_idx in range(min(batch_size, 6)):
                     traj = z_pca_seq[seq_idx, :t+1, :]
                     ax.plot(traj[:, 0], traj[:, 1], color=colors[seq_idx], 
-                           linewidth=1.5, alpha=0.6)  # Thinner lines
+                           linewidth=1.2, alpha=0.6)
                 
-                ax.set_title(f'Flow Step t={t}', fontsize=10)
-                ax.set_xlabel('PC1', fontsize=9)
-                ax.set_ylabel('PC2', fontsize=9)
+                ax.set_title(f'Flow-evolved det(G) at t={t}', fontsize=11)
+                ax.set_xlabel('PC1', fontsize=10)
+                ax.set_ylabel('PC2', fontsize=10)
                 ax.grid(True, alpha=0.3)
-                ax.tick_params(labelsize=8)
-                
-                if idx == 0:
-                    cbar = plt.colorbar(scatter, ax=ax, fraction=0.046, pad=0.04)
-                    cbar.set_label('det(G)', fontsize=9)
-                    cbar.ax.tick_params(labelsize=8)
+                plt.colorbar(scatter, ax=ax, shrink=0.7)
             
-            # Row 2: Temporal evolution plots
-            
-            # Plot 1: det(G) evolution over time (limit sequences)
-            ax = axes[1, 0]
-            timesteps_full = np.arange(n_obs)
-            for seq_idx in range(min(batch_size, 6)):  # Limit sequences
-                det_trajectory = det_G_seq[seq_idx, :]
-                ax.plot(timesteps_full, det_trajectory, 'o-', color=colors[seq_idx], 
-                       linewidth=1.5, markersize=4, alpha=0.8, label=f'Seq {seq_idx}')
-            
-            ax.set_xlabel('Timestep', fontsize=9)
-            ax.set_ylabel('det(G)', fontsize=9)
-            ax.set_title('det(G) Evolution', fontsize=10)
-            ax.grid(True, alpha=0.3)
-            ax.legend(fontsize=8, ncol=2)  # Smaller legend
-            ax.set_yscale('log')
-            ax.tick_params(labelsize=8)
-            
-            # Plot 2: Jacobian determinants over time
-            ax = axes[1, 1]
+            # Row 2: Volume preservation and Jacobian analysis
             if flow_jacobians:
-                jac_array = torch.stack(flow_jacobians, dim=0).cpu().numpy()
+                # Plot 1: Jacobian determinants over flows
+                ax = axes[1, 0]
+                flow_indices = list(range(len(flow_jacobians)))
+                for i, jac_dets in enumerate(flow_jacobians):
+                    ax.boxplot(jac_dets, positions=[i], widths=0.6, patch_artist=True,
+                              boxprops=dict(facecolor=colors[i % len(colors)], alpha=0.7))
+                ax.set_xlabel('Flow Index')
+                ax.set_ylabel('|det(J)|')
+                ax.set_title('Jacobian Determinants')
+                ax.set_yscale('log')
+                ax.grid(True, alpha=0.3)
                 
-                for seq_idx in range(min(batch_size, 6)):  # Limit sequences
-                    jac_trajectory = jac_array[:, seq_idx]
-                    ax.plot(range(1, len(jac_trajectory)+1), jac_trajectory, 'o-', 
-                           color=colors[seq_idx], linewidth=1.5, markersize=4, alpha=0.8)
+                # Plot 2: Volume preservation metrics
+                ax = axes[1, 1]
+                if volume_preservation:
+                    flows_vp = list(volume_preservation.keys())
+                    expansion_ratios = [volume_preservation[f]['volume_expansion_ratio'] for f in flows_vp]
+                    preservation_scores = [volume_preservation[f]['volume_preservation_score'] for f in flows_vp]
+                    
+                    ax.scatter(flows_vp, expansion_ratios, label='Expansion Ratio', s=60, alpha=0.8)
+                    ax.axhline(y=1.0, color='red', linestyle='--', alpha=0.7, label='Volume Preserving')
+                    ax.set_xlabel('Flow Index')
+                    ax.set_ylabel('Volume Expansion Ratio')
+                    ax.set_title('Volume Preservation Analysis')
+                    ax.legend()
+                    ax.grid(True, alpha=0.3)
                 
-                ax.set_xlabel('Flow Step', fontsize=9)
-                ax.set_ylabel('|J_flow|', fontsize=9)
-                ax.set_title('Flow Jacobian Evolution', fontsize=10)
-            else:
-                ax.text(0.5, 0.5, 'No Jacobian\nData Available', ha='center', va='center',
-                       transform=ax.transAxes, fontsize=10)
-                ax.set_title('Flow Jacobian Evolution', fontsize=10)
+                # Plot 3: Flow stability analysis
+                ax = axes[1, 2]
+                if flow_stability:
+                    flows_stab = list(flow_stability.keys())
+                    condition_numbers = [flow_stability[f]['mean_condition_number'] for f in flows_stab]
+                    max_eigenvals = [flow_stability[f]['max_eigenvalue_magnitude'] for f in flows_stab]
+                    
+                    ax.scatter(flows_stab, condition_numbers, label='Condition Number', s=60, alpha=0.8, color='orange')
+                    ax2 = ax.twinx()
+                    ax2.scatter(flows_stab, max_eigenvals, label='Max |λ|', s=60, alpha=0.8, color='purple', marker='^')
+                    
+                    ax.set_xlabel('Flow Index')
+                    ax.set_ylabel('Condition Number', color='orange')
+                    ax2.set_ylabel('Max |Eigenvalue|', color='purple')
+                    ax.set_title('Flow Stability Metrics')
+                    ax.grid(True, alpha=0.3)
+                    ax.legend(loc='upper left')
+                    ax2.legend(loc='upper right')
             
-            ax.grid(True, alpha=0.3)
-            ax.tick_params(labelsize=8)
-            
-            # Plot 3: Cumulative amplification
-            ax = axes[1, 2]
-            amplification = det_G_seq / det_G_seq[:, 0:1]
-            
-            mean_amp = np.mean(amplification, axis=0)
-            std_amp = np.std(amplification, axis=0)
-            
-            ax.fill_between(timesteps_full, mean_amp - std_amp, mean_amp + std_amp, 
-                           alpha=0.3, color='blue', label='±1 std')
-            ax.plot(timesteps_full, mean_amp, 'o-', color='blue', linewidth=2, 
-                   markersize=4, label='Mean amplification')
-            
-            ax.set_xlabel('Timestep', fontsize=9)
-            ax.set_ylabel('det(G) Amplification', fontsize=9)
-            ax.set_title('Cumulative Amplification', fontsize=10)
-            ax.grid(True, alpha=0.3)
-            ax.legend(fontsize=8)
+            # Row 3: Enhanced temporal evolution analysis
+            # Plot 1: det(G) evolution over time
+            ax = axes[2, 0]
+            for seq_idx in range(min(batch_size, 8)):
+                ax.plot(range(n_obs), det_G_seq[seq_idx, :], 
+                       color=colors[seq_idx], alpha=0.7, linewidth=1.5)
+            ax.set_xlabel('Timestep')
+            ax.set_ylabel('det(G)')
+            ax.set_title('Metric Determinant Evolution')
             ax.set_yscale('log')
-            ax.tick_params(labelsize=8)
+            ax.grid(True, alpha=0.3)
+            
+            # Plot 2: PCA trajectory evolution
+            ax = axes[2, 1]
+            for seq_idx in range(min(batch_size, 6)):
+                traj = z_pca_seq[seq_idx, :, :]
+                ax.plot(traj[:, 0], traj[:, 1], 'o-', color=colors[seq_idx], 
+                       alpha=0.7, linewidth=1.5, markersize=4)
+                # Mark start and end
+                ax.scatter(traj[0, 0], traj[0, 1], color=colors[seq_idx], s=80, marker='s', edgecolor='black')
+                ax.scatter(traj[-1, 0], traj[-1, 1], color=colors[seq_idx], s=80, marker='*', edgecolor='black')
+            ax.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%})')
+            ax.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%})')
+            ax.set_title('Latent Trajectories (PCA)')
+            ax.grid(True, alpha=0.3)
+            
+            # Plot 3: Cumulative volume change
+            ax = axes[2, 2]
+            if flow_jacobians:
+                cumulative_volume_change = np.zeros(len(flow_jacobians) + 1)
+                for i, jac_dets in enumerate(flow_jacobians):
+                    log_det_mean = np.mean(np.log(np.clip(jac_dets, 1e-12, None)))
+                    cumulative_volume_change[i+1] = cumulative_volume_change[i] + log_det_mean
+                
+                ax.plot(range(len(cumulative_volume_change)), cumulative_volume_change, 
+                       'o-', linewidth=2, markersize=6, color='red', alpha=0.8)
+                ax.axhline(y=0, color='gray', linestyle='--', alpha=0.7)
+                ax.set_xlabel('Flow Step')
+                ax.set_ylabel('Cumulative Log Volume Change')
+                ax.set_title('Cumulative Volume Evolution')
+                ax.grid(True, alpha=0.3)
             
             plt.tight_layout()
             
-            # Save visualization
-            filename = f'flow_based_det_evolution_epoch_{epoch}.png'
-            saved_file = self._safe_save_plt_figure(filename, dpi=150, bbox_inches='tight')
+            # Save with higher quality
+            filename = f'enhanced_flow_temporal_analysis_epoch_{epoch}.png'
+            saved_file = self._safe_save_plt_figure(filename, dpi=200, bbox_inches='tight')
             
-            # Log to WandB
             if self.should_log_to_wandb() and saved_file:
                 wandb.log({
-                    "flow_analysis/temporal_evolution": wandb.Image(saved_file, 
-                        caption=f"Epoch {epoch} - Flow-based temporal evolution"),
+                    "flow_analysis/enhanced_temporal": wandb.Image(saved_file, caption=f"Enhanced Flow Analysis - Epoch {epoch}")
                 })
+                
+                # Log numerical metrics
+                if volume_preservation:
+                    avg_preservation = np.mean([v['volume_preservation_score'] for v in volume_preservation.values()])
+                    wandb.log({"metrics/flow_volume_preservation": avg_preservation})
+                
+                if flow_stability:
+                    avg_condition = np.mean([v['mean_condition_number'] for v in flow_stability.values()])
+                    wandb.log({"metrics/flow_stability_condition": avg_condition})
             
             plt.close()
+            print(f"✅ Enhanced flow temporal analysis created")
             
         except Exception as e:
-            print(f"⚠️ Flow-based temporal plots failed: {e}")
+            print(f"⚠️ Enhanced flow temporal plotting failed: {e}")
+            import traceback
+            traceback.print_exc()
     
-    def _create_detailed_jacobian_analysis(self, det_G_seq, flow_jacobians, epoch):
-        """Create detailed analysis of flow Jacobians - SMALLER SIZE."""
+    def _create_enhanced_jacobian_analysis(self, det_G_seq, flow_jacobians, flow_stability, epoch):
+        """Create enhanced detailed Jacobian analysis visualization."""
         try:
+            fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+            fig.suptitle(f'Enhanced Flow Jacobian Analysis - Epoch {epoch}', fontsize=16)
+            
             if not flow_jacobians:
+                for ax in axes.flat:
+                    ax.text(0.5, 0.5, 'No flow Jacobian\ndata available', 
+                           ha='center', va='center', transform=ax.transAxes, fontsize=12)
+                plt.tight_layout()
+                filename = f'enhanced_jacobian_analysis_epoch_{epoch}.png'
+                saved_file = self._safe_save_plt_figure(filename, dpi=150, bbox_inches='tight')
+                if self.should_log_to_wandb() and saved_file:
+                    wandb.log({"flow_analysis/enhanced_jacobian": wandb.Image(saved_file, caption=f"Enhanced Jacobian Analysis - Epoch {epoch}")})
+                plt.close()
                 return
-                
-            jac_array = torch.stack(flow_jacobians, dim=0).cpu().numpy()
             
-            fig, axes = plt.subplots(2, 2, figsize=(12, 8))  # SMALLER
-            fig.suptitle(f'Flow Jacobian Analysis - Epoch {epoch}', fontsize=14)
-            
-            # Plot 1: Jacobian distribution at each flow step
+            # Plot 1: Jacobian determinant distributions
             ax = axes[0, 0]
-            for flow_idx in range(min(len(flow_jacobians), 4)):  # Limit flows shown
-                jac_values = jac_array[flow_idx, :]
-                ax.hist(jac_values, bins=15, alpha=0.6, label=f'Flow {flow_idx+1}', density=True)
-            
-            ax.set_xlabel('|J_flow|', fontsize=9)
-            ax.set_ylabel('Density', fontsize=9)
-            ax.set_title('Jacobian Distribution by Flow', fontsize=10)
-            ax.legend(fontsize=8)
+            for i, jac_dets in enumerate(flow_jacobians):
+                ax.hist(np.log10(np.clip(jac_dets, 1e-12, None)), bins=30, alpha=0.6, 
+                       label=f'Flow {i}', density=True)
+            ax.set_xlabel('log₁₀ |det(J)|')
+            ax.set_ylabel('Density')
+            ax.set_title('Jacobian Determinant Distributions')
+            ax.legend()
             ax.grid(True, alpha=0.3)
-            ax.tick_params(labelsize=8)
+            ax.axvline(x=0, color='red', linestyle='--', alpha=0.7, label='Volume Preserving')
             
-            # Plot 2: Jacobian vs det(G) correlation
+            # Plot 2: Flow-by-flow Jacobian comparison
             ax = axes[0, 1]
-            for flow_idx in range(min(len(flow_jacobians), 3)):  # Limit flows
-                if flow_idx + 1 < det_G_seq.shape[1]:
-                    jac_values = jac_array[flow_idx, :]
-                    det_before = det_G_seq[:, flow_idx]
-                    det_after = det_G_seq[:, flow_idx + 1]
-                    
-                    ax.scatter(jac_values, det_after / det_before, alpha=0.6, s=20,
-                             label=f'Flow {flow_idx+1}')
+            flow_indices = list(range(len(flow_jacobians)))
+            jac_means = [np.mean(jac_dets) for jac_dets in flow_jacobians]
+            jac_stds = [np.std(jac_dets) for jac_dets in flow_jacobians]
             
-            ax.set_xlabel('|J_flow|', fontsize=9)
-            ax.set_ylabel('det(G) Ratio', fontsize=9)
-            ax.set_title('Jacobian vs det(G) Amplification', fontsize=10)
-            ax.legend(fontsize=8)
-            ax.grid(True, alpha=0.3)
-            ax.tick_params(labelsize=8)
-            
-            # Plot 3: Cumulative Jacobian product
-            ax = axes[1, 0]
-            cumulative_jac = np.ones((jac_array.shape[1], len(flow_jacobians) + 1))
-            for flow_idx in range(len(flow_jacobians)):
-                cumulative_jac[:, flow_idx + 1] = cumulative_jac[:, flow_idx] * jac_array[flow_idx, :]
-            
-            mean_cum_jac = np.mean(cumulative_jac, axis=0)
-            std_cum_jac = np.std(cumulative_jac, axis=0)
-            timesteps = np.arange(len(mean_cum_jac))
-            
-            ax.fill_between(timesteps, mean_cum_jac - std_cum_jac, mean_cum_jac + std_cum_jac,
-                           alpha=0.3, color='green')
-            ax.plot(timesteps, mean_cum_jac, 'o-', color='green', linewidth=2, 
-                   markersize=4, label='Mean')
-            
-            ax.set_xlabel('Flow Step', fontsize=9)
-            ax.set_ylabel('Cumulative |J| Product', fontsize=9)
-            ax.set_title('Cumulative Jacobian Product', fontsize=10)
-            ax.legend(fontsize=8)
-            ax.grid(True, alpha=0.3)
+            ax.errorbar(flow_indices, jac_means, yerr=jac_stds, 
+                       marker='o', capsize=5, capthick=2, linewidth=2)
+            ax.set_xlabel('Flow Index')
+            ax.set_ylabel('Mean |det(J)|')
+            ax.set_title('Flow Jacobian Comparison')
             ax.set_yscale('log')
-            ax.tick_params(labelsize=8)
-            
-            # Plot 4: Flow impact analysis
-            ax = axes[1, 1]
-            impact_ratios = []
-            for flow_idx in range(len(flow_jacobians)):
-                jac_values = jac_array[flow_idx, :]
-                impact = np.std(jac_values) / (np.mean(jac_values) + 1e-10)
-                impact_ratios.append(impact)
-            
-            ax.bar(range(1, len(impact_ratios) + 1), impact_ratios, alpha=0.7, color='orange')
-            ax.set_xlabel('Flow Step', fontsize=9)
-            ax.set_ylabel('Jacobian Variability (CV)', fontsize=9)
-            ax.set_title('Flow Impact Analysis', fontsize=10)
             ax.grid(True, alpha=0.3)
-            ax.tick_params(labelsize=8)
+            
+            # Plot 3: Stability analysis
+            ax = axes[0, 2]
+            if flow_stability:
+                flows = list(flow_stability.keys())
+                condition_nums = [flow_stability[f]['mean_condition_number'] for f in flows]
+                max_eigs = [flow_stability[f]['max_eigenvalue_magnitude'] for f in flows]
+                
+                ax.scatter(condition_nums, max_eigs, s=80, alpha=0.8, c=flows, cmap='viridis')
+                ax.set_xlabel('Mean Condition Number')
+                ax.set_ylabel('Max |Eigenvalue|')
+                ax.set_title('Flow Stability Analysis')
+                ax.set_xscale('log')
+                ax.set_yscale('log')
+                ax.grid(True, alpha=0.3)
+                
+                # Add stability regions
+                ax.axhline(y=1.0, color='red', linestyle='--', alpha=0.5, label='Stable')
+                ax.axvline(x=10.0, color='orange', linestyle='--', alpha=0.5, label='Well-conditioned')
+                ax.legend()
+            
+            # Bottom row: Enhanced analysis
+            # Plot 4: Cumulative Jacobian product
+            ax = axes[1, 0]
+            if len(flow_jacobians) > 1:
+                cumulative_jac = np.ones_like(flow_jacobians[0])
+                cum_products = [cumulative_jac.copy()]
+                
+                for jac_dets in flow_jacobians:
+                    cumulative_jac *= jac_dets
+                    cum_products.append(cumulative_jac.copy())
+                
+                for i, cum_prod in enumerate(cum_products):
+                    ax.hist(np.log10(np.clip(cum_prod, 1e-12, None)), bins=20, alpha=0.6, 
+                           label=f'After {i} flows', density=True)
+                
+                ax.set_xlabel('log₁₀ Cumulative |det(J)|')
+                ax.set_ylabel('Density')
+                ax.set_title('Cumulative Jacobian Evolution')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+            
+            # Plot 5: Volume preservation score over flows
+            ax = axes[1, 1]
+            if len(flow_jacobians) > 0:
+                preservation_scores = []
+                for jac_dets in flow_jacobians:
+                    log_dets = np.log(np.clip(jac_dets, 1e-12, None))
+                    score = 1.0 - np.abs(np.mean(log_dets))
+                    preservation_scores.append(score)
+                
+                ax.plot(range(len(preservation_scores)), preservation_scores, 
+                       'o-', linewidth=2, markersize=8)
+                ax.axhline(y=1.0, color='green', linestyle='--', alpha=0.7, label='Perfect Preservation')
+                ax.set_xlabel('Flow Index')
+                ax.set_ylabel('Volume Preservation Score')
+                ax.set_title('Volume Preservation by Flow')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                ax.set_ylim(0, 1.1)
+            
+            # Plot 6: Eigenvalue distribution (if available)
+            ax = axes[1, 2]
+            if flow_stability and any(flow_stability[f]['eigenvalues'] for f in flow_stability.keys()):
+                all_eigenvals = []
+                for flow_idx in flow_stability.keys():
+                    for eigvals in flow_stability[flow_idx]['eigenvalues']:
+                        all_eigenvals.extend(np.abs(eigvals))
+                
+                if all_eigenvals:
+                    ax.hist(np.log10(np.clip(all_eigenvals, 1e-12, None)), bins=30, alpha=0.7, density=True)
+                    ax.axvline(x=0, color='red', linestyle='--', alpha=0.7, label='|λ| = 1')
+                    ax.set_xlabel('log₁₀ |Eigenvalue|')
+                    ax.set_ylabel('Density')
+                    ax.set_title('Flow Eigenvalue Distribution')
+                    ax.legend()
+                    ax.grid(True, alpha=0.3)
             
             plt.tight_layout()
             
-            # Save Jacobian analysis
-            jac_filename = f'flow_jacobian_analysis_epoch_{epoch}.png'
-            saved_file = self._safe_save_plt_figure(jac_filename, dpi=150, bbox_inches='tight')
+            filename = f'enhanced_jacobian_analysis_epoch_{epoch}.png'
+            saved_file = self._safe_save_plt_figure(filename, dpi=200, bbox_inches='tight')
             
-            # Log to WandB
             if self.should_log_to_wandb() and saved_file:
                 wandb.log({
-                    "flow_analysis/jacobian_analysis": wandb.Image(saved_file, 
-                        caption=f"Epoch {epoch} - Flow Jacobian analysis"),
+                    "flow_analysis/enhanced_jacobian": wandb.Image(saved_file, caption=f"Enhanced Jacobian Analysis - Epoch {epoch}")
                 })
             
             plt.close()
+            print(f"✅ Enhanced Jacobian analysis created")
             
         except Exception as e:
-            print(f"⚠️ Detailed Jacobian analysis failed: {e}")
+            print(f"⚠️ Enhanced Jacobian analysis plotting failed: {e}")
+            import traceback
+            traceback.print_exc()
     
-    def _create_flow_interactive_animation(self, z_pca_seq, det_G_seq, flow_jacobians, epoch):
-        """Create interactive animation of flow evolution - SMALLER SIZE."""
-        if not PLOTLY_AVAILABLE:
-            return
-            
-        try:
-            batch_size, n_obs, _ = z_pca_seq.shape
-            
-            # Create interactive animation - SMALLER SIZE
-            fig = make_subplots(
-                rows=2, cols=2,
-                subplot_titles=["🌊 Flow Spatial Evolution", "📊 det(G) Evolution",
-                               "⚡ Flow Jacobians", "🔗 Cumulative Amplification"],
-                horizontal_spacing=0.12,
-                vertical_spacing=0.15
-            )
-            
-            # Prepare data for animation frames
-            frames = []
-            colors = px.colors.qualitative.Set3[:min(batch_size, 6)]  # Limit sequences
-            
-            for t in range(n_obs):
-                frame_data = []
-                
-                # Panel 1: Spatial distribution with det(G) coloring
-                frame_data.append(
-                    go.Scatter(
-                        x=z_pca_seq[:min(batch_size, 6), t, 0],  # Limit sequences
-                        y=z_pca_seq[:min(batch_size, 6), t, 1],
-                        mode='markers',
-                        marker=dict(
-                            size=8,  # Smaller markers
-                            color=det_G_seq[:min(batch_size, 6), t],
-                            colorscale='Viridis',
-                            showscale=True,
-                            colorbar=dict(title="det(G)", x=0.45, len=0.4),
-                            line=dict(color='white', width=1)
-                        ),
-                        name="Sequences",
-                        showlegend=False,
-                        xaxis='x', yaxis='y'
-                    )
-                )
-                
-                # Add trajectory lines (limit sequences)
-                for seq_idx in range(min(batch_size, 4)):
-                    traj = z_pca_seq[seq_idx, :t+1, :]
-                    frame_data.append(
-                        go.Scatter(
-                            x=traj[:, 0],
-                            y=traj[:, 1],
-                            mode='lines',
-                            line=dict(color=colors[seq_idx], width=1.5),  # Thinner lines
-                            name=f'Traj {seq_idx}',
-                            showlegend=(t == 0 and seq_idx < 3),
-                            xaxis='x', yaxis='y'
-                        )
-                    )
-                
-                # Panel 2: det(G) evolution up to timestep t
-                for seq_idx in range(min(batch_size, 4)):  # Limit sequences
-                    det_so_far = det_G_seq[seq_idx, :t+1]
-                    timesteps_so_far = np.arange(t+1)
-                    
-                    frame_data.append(
-                        go.Scatter(
-                            x=timesteps_so_far,
-                            y=det_so_far,
-                            mode='lines+markers',
-                            line=dict(color=colors[seq_idx], width=1.5),
-                            marker=dict(size=4, color=colors[seq_idx]),
-                            name=f'det(G) {seq_idx}',
-                            showlegend=False,
-                            xaxis='x2', yaxis='y2'
-                        )
-                    )
-                
-                # Panel 3: Flow Jacobians (if available)
-                if t > 0 and t-1 < len(flow_jacobians):
-                    jac_values = flow_jacobians[t-1].cpu().numpy()[:min(batch_size, 6)]  # Limit
-                    
-                    frame_data.append(
-                        go.Bar(
-                            x=list(range(len(jac_values))),
-                            y=jac_values,
-                            name="Jacobians",
-                            showlegend=False,
-                            marker_color='rgba(255, 100, 102, 0.7)',
-                            xaxis='x3', yaxis='y3'
-                        )
-                    )
-                
-                # Panel 4: Cumulative amplification
-                amplification = det_G_seq / det_G_seq[:, 0:1]
-                mean_amp = np.mean(amplification[:min(batch_size, 6), :t+1], axis=0)  # Limit
-                
-                frame_data.append(
-                    go.Scatter(
-                        x=np.arange(t+1),
-                        y=mean_amp,
-                        mode='lines+markers',
-                        line=dict(color='red', width=2),
-                        marker=dict(size=4, color='red'),
-                        name="Mean Amplification",
-                        showlegend=False,
-                        xaxis='x4', yaxis='y4'
-                    )
-                )
-                
-                frames.append(go.Frame(data=frame_data, name=str(t)))
-            
-            # Set initial frame
-            fig.add_traces(frames[0].data)
-            fig.frames = frames
-            
-            # Update layout - SMALLER SIZE
-            fig.update_layout(
-                title=f"🌊 Flow Evolution Animation - Epoch {epoch}",
-                sliders=[{
-                    "active": 0,
-                    "currentvalue": {"prefix": "Flow Step: ", "visible": True},
-                    "pad": {"b": 10, "t": 50},
-                    "steps": [{"args": [[f], {"frame": {"duration": 400, "redraw": True}}], 
-                             "label": str(t), "method": "animate"} 
-                             for t, f in enumerate(frames)]
-                }],
-                width=1000,  # SMALLER
-                height=700,  # SMALLER
-                showlegend=True
-            )
-            
-            # Save interactive HTML
-            html_filename = f'flow_evolution_animation_epoch_{epoch}.html'
-            html_path = self._get_output_path(html_filename, "interactive")
-            fig.write_html(html_path, include_plotlyjs=True)
-            print(f"💾 Saved flow evolution animation: {html_path}")
-            
-            # Save static version
-            png_filename = f'flow_evolution_animation_epoch_{epoch}.png'
-            saved_png = self._safe_write_image(fig, png_filename, width=1000, height=700)
-            
-            # Log to WandB
-            if self.should_log_to_wandb():
-                log_dict = {"flow_analysis/interactive_animation": wandb.Html(html_path)}
-                if saved_png and saved_png.endswith('.png'):
-                    log_dict["flow_analysis/animation_static"] = wandb.Image(saved_png)
-                wandb.log(log_dict)
-            
-        except Exception as e:
-            print(f"⚠️ Flow interactive animation failed: {e}")
-
     def _get_flows(self):
         """Get flows from either legacy or modular model structure."""
         # Try legacy structure first
@@ -563,11 +599,6 @@ class FlowAnalysisVisualizations(BaseVisualization):
                 
                 # Create detailed Jacobian analysis
                 self._create_detailed_jacobian_analysis(det_G_seq, flow_jacobians, epoch)
-                
-                # Create interactive animation if Plotly available
-                if PLOTLY_AVAILABLE:
-                    z_pca_seq, _ = self._prepare_pca_data(z_seq, n_components=2)
-                    self._create_flow_interactive_animation(z_pca_seq, det_G_seq, flow_jacobians, epoch)
                 
         except Exception as e:
             print(f"⚠️ Jacobian analysis visualization failed: {e}")

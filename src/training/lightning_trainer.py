@@ -173,28 +173,46 @@ class LightningRlVAETrainer(L.LightningModule):
         """Create visualizations at end of validation epoch."""
         if not self.enable_visualizations or self.viz_manager is None:
             return
-        
         # Only create visualizations at specified frequency
         if self.current_epoch % self.config.visualization.frequency != 0:
             return
-        
         try:
-            # Get sample data
-            if hasattr(self, 'validation_batch'):
+            # Get desired number of sequences for visualization
+            seq_count = getattr(self.config.visualization, 'sequence_viz_count', 8)
+            if isinstance(seq_count, str) and seq_count == 'all':
+                seq_count = 128  # Hard cap for safety
+            # Aggregate enough sequences from val dataloader
+            if hasattr(self, 'data_module') and hasattr(self.data_module, 'val_dataloader'):
+                val_loader = self.data_module.val_dataloader()
+                batches = []
+                total = 0
+                for batch in val_loader:
+                    # Extract the input tensor (handle tuple, dict, or tensor)
+                    if isinstance(batch, (tuple, list)):
+                        x = batch[0]
+                    elif isinstance(batch, dict):
+                        x = batch.get('x', next(iter(batch.values())))
+                    else:
+                        x = batch
+                    print(f"[DEBUG] Batch shape: {getattr(batch, 'shape', 'N/A')}, x shape: {x.shape}")
+                    batches.append(x)
+                    total += x.shape[0]
+                    if total >= seq_count:
+                        break
+                x_sample = torch.cat(batches, dim=0)
+                seq_count = x_sample.shape[0]  # Use all available sequences in the batch
+                x_sample = x_sample[:seq_count].to(self.device)
+            elif hasattr(self, 'validation_batch'):
                 x_sample = self.validation_batch.to(self.device)
-            elif self.data_module and hasattr(self.data_module, 'get_sample_batch'):
-                x_sample = self.data_module.get_sample_batch('val').to(self.device)
             else:
                 print("⚠️ No sample data available for visualization")
                 return
-            
-            # Create visualizations
-            print(f"🎨 Creating visualizations for epoch {self.current_epoch}")
+            print(f"[DEBUG] x_sample shape before visualization: {x_sample.shape}")
+            print(f"🎨 Creating visualizations for epoch {self.current_epoch} (n_seq={x_sample.shape[0]})")
             self.viz_manager.create_visualizations(
                 x_sample=x_sample,
                 epoch=self.current_epoch
             )
-            
         except Exception as e:
             print(f"⚠️ Visualization error at epoch {self.current_epoch}: {e}")
     

@@ -121,7 +121,7 @@ class HybridRiemannianFlowVAE(RiemannianFlowVAE):
             encoder_path = Path(self.config.pretrained.encoder_path)
             if encoder_path.exists():
                 print(f"🔧 Loading encoder from: {encoder_path}")
-                encoder_weights = torch.load(encoder_path, map_location=self.device)
+                encoder_weights = torch.load(encoder_path, map_location=self.device, weights_only=False)
                 if hasattr(encoder_weights, 'state_dict'):
                     self.encoder.load_state_dict(encoder_weights.state_dict())
                 else:
@@ -132,7 +132,7 @@ class HybridRiemannianFlowVAE(RiemannianFlowVAE):
             decoder_path = Path(self.config.pretrained.decoder_path)
             if decoder_path.exists():
                 print(f"🔧 Loading decoder from: {decoder_path}")
-                decoder_weights = torch.load(decoder_path, map_location=self.device)
+                decoder_weights = torch.load(decoder_path, map_location=self.device, weights_only=False)
                 if hasattr(decoder_weights, 'state_dict'):
                     self.decoder.load_state_dict(decoder_weights.state_dict())
                 else:
