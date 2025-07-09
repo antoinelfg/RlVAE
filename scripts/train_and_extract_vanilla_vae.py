@@ -1,8 +1,10 @@
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from vanilla_vae import VanillaVAE
-import os
 from tqdm import tqdm
 import wandb
 import torchvision.utils as vutils
@@ -10,12 +12,12 @@ import matplotlib.pyplot as plt
 import torch.nn.functional as F
 from sklearn_extra.cluster import KMedoids
 from sklearn.preprocessing import StandardScaler
+from src.models.modular_vanilla_vae import create_cnn_vanilla_vae
 
 class SpritesDataset(torch.utils.data.Dataset):
     def __init__(self, data_path):
         self.data = torch.load(data_path)
-        # Reshape data from [batch, seq, h, w, c] to [batch*seq, c, h, w]
-        self.data = self.data.permute(0, 1, 4, 2, 3)  # [batch, seq, c, h, w]
+        # Data is already in [batch, seq, c, h, w] format - just reshape to [batch*seq, c, h, w]
         self.data = self.data.reshape(-1, 3, 64, 64)  # [batch*seq, c, h, w]
     
     def __len__(self):
@@ -48,8 +50,8 @@ def main():
     
     print("Loading data...")
     # Load data
-    train_dataset = SpritesDataset('src/datasprites/Sprites_train.pt')
-    test_dataset = SpritesDataset('src/datasprites/Sprites_test.pt')
+    train_dataset = SpritesDataset('data/processed/Sprites_train_cyclic.pt')
+    test_dataset = SpritesDataset('data/processed/Sprites_test_cyclic.pt')
     
     print(f"Training data size: {len(train_dataset)}")
     print(f"Test data size: {len(test_dataset)}")
@@ -57,10 +59,11 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
     
-    # Initialize model
-    model = VanillaVAE(
+    # Initialize CNN VAE model for better image reconstruction
+    model = create_cnn_vanilla_vae(
         input_dim=(3, 64, 64),  # Sprites are 64x64 RGB images
-        latent_dim=16
+        latent_dim=16,
+        beta=1.0
     ).to(device)
     
     # Training setup
@@ -98,11 +101,11 @@ def main():
             # Log reconstruction images every 100 batches
             if batch_counter % 100 == 0:
                 with torch.no_grad():
-                    # Get reconstructions
-                    recon_batch = output.recon_x
+                    # Get reconstructions and clamp to [0,1] for proper visualization
+                    recon_batch = output.recon_x.clamp(0, 1)
                     # Create grid of original and reconstructed images
                     comparison = torch.cat([batch[:8], recon_batch[:8]], dim=0)
-                    grid = vutils.make_grid(comparison, nrow=8, normalize=True)
+                    grid = vutils.make_grid(comparison, nrow=8, normalize=False)
                     wandb.log({
                         "reconstructions": wandb.Image(grid),
                         "batch": batch_counter
@@ -257,11 +260,11 @@ def main():
     with torch.no_grad():
         batch = next(iter(train_loader)).to(device)
         output = model(batch)
-        recon = output.recon_x.cpu()
+        recon = output.recon_x.cpu().clamp(0, 1)  # Clamp to [0,1] for display
         orig = batch.cpu()
         n = min(8, orig.size(0))
         comparison = torch.cat([orig[:n], recon[:n]], dim=0)
-        grid = vutils.make_grid(comparison, nrow=n, normalize=True)
+        grid = vutils.make_grid(comparison, nrow=n, normalize=False)  # Don't normalize since we clamped
         plt.figure(figsize=(12, 4))
         plt.axis('off')
         plt.title('Top: Original, Bottom: Reconstruction')

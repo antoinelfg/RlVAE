@@ -225,7 +225,7 @@ class CyclicSpritesDataModule(L.LightningDataModule):
     def val_dataloader(self):
         if self.val_dataset is None:
             raise RuntimeError("Setup must be called before creating dataloaders")
-        
+        print(f"[DEBUG] Validation DataLoader batch_size: {self.batch_size}")
         return DataLoader(
             self.val_dataset,
             batch_size=self.batch_size,

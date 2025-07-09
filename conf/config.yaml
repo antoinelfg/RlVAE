@@ -11,8 +11,8 @@ defaults:
 
 # Experiment metadata
 experiment_name: "rlvae_comparison"
-project_name: "riemannian-vae-study"
-description: "Systematic comparison of Riemannian geometry effects on VAE latent spaces"
+project_name: "rlvae-hyperparameter-optimization"
+description: "Systematic comparison of Riemannian geometry effects on VAE latent spaces with hyperparameter optimization"
 
 # Global settings
 seed: 42

@@ -115,29 +115,47 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         
         # Get encoder configuration
         encoder_config = self.config.get('encoder', {})
+        print(f"🔍 DEBUG: Raw encoder config: {encoder_config}")
+        
+        # Handle different config types
         if isinstance(encoder_config, str):
             # Simple string configuration
             encoder_arch = encoder_config
             encoder_config = {'architecture': encoder_arch}
-        elif not isinstance(encoder_config, dict):
+        elif hasattr(encoder_config, '__getitem__') and hasattr(encoder_config, 'get'):
+            # Dict-like object (DictConfig, dict, etc.) - use as-is
+            encoder_config = dict(encoder_config)  # Convert to regular dict
+        else:
             encoder_config = {}
         
         # Default to MLP if not specified
         if 'architecture' not in encoder_config:
             encoder_config['architecture'] = 'mlp'
         
+        print(f"🔍 DEBUG: Final encoder config: {encoder_config}")
+        print(f"🔍 DEBUG: Encoder architecture: {encoder_config['architecture']}")
+        
         # Get decoder configuration
         decoder_config = self.config.get('decoder', {})
+        print(f"🔍 DEBUG: Raw decoder config: {decoder_config}")
+        
+        # Handle different config types
         if isinstance(decoder_config, str):
             # Simple string configuration
             decoder_arch = decoder_config
             decoder_config = {'architecture': decoder_arch}
-        elif not isinstance(decoder_config, dict):
+        elif hasattr(decoder_config, '__getitem__') and hasattr(decoder_config, 'get'):
+            # Dict-like object (DictConfig, dict, etc.) - use as-is
+            decoder_config = dict(decoder_config)  # Convert to regular dict
+        else:
             decoder_config = {}
         
         # Default to MLP if not specified
         if 'architecture' not in decoder_config:
             decoder_config['architecture'] = 'mlp'
+        
+        print(f"🔍 DEBUG: Final decoder config: {decoder_config}")
+        print(f"🔍 DEBUG: Decoder architecture: {decoder_config['architecture']}")
         
         # Create encoder manager and encoder
         encoder_manager = EncoderManager(

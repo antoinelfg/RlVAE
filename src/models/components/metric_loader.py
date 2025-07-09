@@ -58,7 +58,7 @@ class MetricLoader:
         
         # Load raw data
         try:
-            raw_data = torch.load(path, map_location=self.device)
+            raw_data = torch.load(path, map_location=self.device, weights_only=False)
         except Exception as e:
             raise RuntimeError(f"Failed to load metric file: {e}")
         

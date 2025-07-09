@@ -1,0 +1,55 @@
+# @package experiment
+
+# Global Vanilla VAE + RLVAE Pipeline
+
+type: "pipeline"
+name: "global_vanilla_rlvae_pipeline"
+description: "Full pipeline: vanilla VAE with diverse metric extraction, then RLVAE with loaded components."
+
+# Stage 1: Vanilla VAE + Diverse Metric
+stage1:
+  batch_size: 64
+  model: vanilla_vae
+  training:
+    full_data:
+      batch_size: 64
+  data: cyclic_sprites
+  visualization: minimal
+  extract_diverse_metric: true
+  # Metric extraction parameters
+  architecture: mlp
+  latent_dim: 16
+  epochs: 10
+  temperature: 0.5
+  regularization: 0.01
+  preset: balanced
+  # Metric analysis parameters
+  n_heatmaps: 6  # Number of metric matrix heatmaps to show (default: 6)
+
+# Stage 2: RLVAE (MLP, CNN, etc.)
+stage2:
+  batch_size: 64
+  model: mlp_rlvae  # or cnn_rlvae, resnet_rlvae, etc.
+  training:
+    full_data:
+      batch_size: 64
+  data: cyclic_sprites
+  visualization: standard
+  # Pretrained components will be loaded from stage 1 outputs
+  load_pretrained_from_stage1: true
+
+# Logging
+log_level: "INFO"
+log_to_file: true
+
+deterministic: true
+benchmark: false
+
+visualization:
+  sequence_viz_count: 64         # Number of sequences to plot (int or "all")
+  cluster_sequences: true        # Whether to cluster sequences
+  n_clusters: 5                  # Number of clusters (if clustering enabled)
+  cluster_coloring: true         # Use cluster colors in plots
+  show_cluster_centroids: true   # Optionally plot centroids
+
+batch_size: 64 

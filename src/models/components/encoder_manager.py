@@ -72,11 +72,13 @@ class EncoderManager(nn.Module):
                 self.input_dim = input_dim
                 self.latent_dim = latent_dim
                 
-                # CNN parameters
-                hidden_dims = config.get('hidden_dims', [32, 64, 128, 256])
+                # CNN parameters - use config directly, not config.get('cnn', {})
+                hidden_dims = config.get('layers', [32, 64, 128, 256])
                 kernel_size = config.get('kernel_size', 3)
                 stride = config.get('stride', 2)
                 padding = config.get('padding', 1)
+                activation = config.get('activation', 'relu')
+                batch_norm = config.get('batch_norm', True)
                 dropout = config.get('dropout', 0.1)
                 
                 # Build CNN layers
@@ -86,8 +88,8 @@ class EncoderManager(nn.Module):
                 for h_dim in hidden_dims:
                     layers.extend([
                         nn.Conv2d(in_channels, h_dim, kernel_size, stride, padding),
-                        nn.BatchNorm2d(h_dim),
-                        nn.LeakyReLU(),
+                        nn.BatchNorm2d(h_dim) if batch_norm else nn.Identity(),
+                        nn.ReLU() if activation == 'relu' else nn.LeakyReLU(),
                         nn.Dropout2d(dropout)
                     ])
                     in_channels = h_dim
@@ -117,7 +119,7 @@ class EncoderManager(nn.Module):
             def forward(self, x):
                 # CNN feature extraction
                 features = self.cnn(x)
-                features = features.view(features.size(0), -1)
+                features = features.reshape(features.size(0), -1)
                 
                 # MLP head
                 hidden = self.mlp(features)
@@ -131,7 +133,8 @@ class EncoderManager(nn.Module):
                     'log_covariance': log_covariance
                 })
         
-        return CNNEncoder(self.input_dim, self.latent_dim, self.config.get('cnn', {}))
+        # Use self.config directly, not self.config.get('cnn', {})
+        return CNNEncoder(self.input_dim, self.latent_dim, self.config)
     
     def _create_resnet_encoder(self) -> BaseEncoder:
         """Create ResNet encoder for image data."""
@@ -208,7 +211,7 @@ class EncoderManager(nn.Module):
                 
                 # Global pooling
                 x = self.global_pool(x)
-                x = x.view(x.size(0), -1)
+                x = x.reshape(x.size(0), -1)
                 
                 # MLP head
                 hidden = self.mlp(x)
@@ -260,7 +263,7 @@ class EncoderManager(nn.Module):
     def load_pretrained(self, path: str) -> None:
         """Load pretrained encoder weights with backward compatibility."""
         try:
-            weights = torch.load(path, map_location=self.device)
+            weights = torch.load(path, map_location=self.device, weights_only=False)
             
             # Handle different weight formats
             if hasattr(weights, 'state_dict'):

@@ -211,7 +211,35 @@ class CleanCyclicLoopTrainer:
     
     def model_forward(self, x):
         """Forward pass through the model."""
-        return self.model(x)
+        # Vanilla VAE expects single images [B, C, H, W], not sequences [B, T, C, H, W]
+        # Process each timestep separately and combine results
+        batch_size, n_obs = x.shape[:2]
+        
+        # Process first timestep (vanilla VAE doesn't handle sequences)
+        x_0 = x[:, 0]  # [B, C, H, W]
+        result = self.model(x_0)
+        
+        # For vanilla VAE, we need to handle the sequence aspect manually
+        # Create a sequence of reconstructions by repeating the first timestep
+        recon_x = result.recon_x.unsqueeze(1).expand(-1, n_obs, -1, -1, -1)  # [B, T, C, H, W]
+        
+        # Create a sequence of latents by repeating the first latent
+        z = result.z.unsqueeze(1).expand(-1, n_obs, -1)  # [B, T, latent_dim]
+        
+        # For closed loop, make the last timestep equal to the first
+        if self.config.loop_mode == "closed":
+            recon_x[:, -1] = recon_x[:, 0]
+            z[:, -1] = z[:, 0]
+        
+        # Create a result object that matches the expected format
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            recon_x=recon_x,
+            z=z,
+            loss=result.loss,
+            reconstruction_loss=result.reconstruction_loss,
+            reg_loss=result.reg_loss
+        )
     
     def train_epoch(self, train_loader, epoch):
         """Train one epoch."""
@@ -236,12 +264,12 @@ class CleanCyclicLoopTrainer:
                 # Forward pass
                 result = self.model_forward(x)
                 
-                # Extract losses
+                # Extract losses (vanilla VAE returns SimpleNamespace with attributes)
                 loss = result.loss
-                recon_loss = result.recon_loss
-                kl_loss = result.kld_loss
-                flow_loss = result.flow_loss
-                reinforce_loss = result.reinforce_loss
+                recon_loss = result.reconstruction_loss
+                kl_loss = result.reg_loss  # Vanilla VAE uses reg_loss for KL
+                flow_loss = torch.tensor(0.0, device=self.device)  # No flows in vanilla VAE
+                reinforce_loss = torch.tensor(0.0, device=self.device)  # No Riemannian in vanilla VAE
                 
                 # For closed loop, calculate cycle penalty separately if needed
                 cycle_penalty = 0.0
@@ -318,7 +346,7 @@ class CleanCyclicLoopTrainer:
             for batch in val_loader:
                 batch = batch.to(self.device)
                 result = self.model_forward(batch)
-                val_losses.append(result.loss.item())
+                val_losses.append(result.loss.item())  # Vanilla VAE uses result.loss
         
         self.model.train()
         return np.mean(val_losses)
@@ -510,6 +538,10 @@ def main():
                        help='Disable saving visualization files locally')
     parser.add_argument('--wandb_offline', action='store_true', default=False,
                        help='Run WandB in offline mode')
+    parser.add_argument('--metric_path', type=str, default=None, help='Path to the metric file to use')
+    parser.add_argument('--latent_dim', type=int, default=16, help='Latent space dimension (default: 16)')
+    parser.add_argument('--wandb_run_name', type=str, default=None, help='Custom WandB run name')
+    parser.add_argument('--wandb_project', type=str, default=None, help='Custom WandB project name')
     
     args = parser.parse_args()
     
@@ -534,13 +566,23 @@ def main():
     config.wandb_only = args.wandb_only
     config.disable_local_files = args.disable_local_files
     config.wandb_offline = args.wandb_offline
+    # Set metric_path if provided (use as-is, do not prepend any directory)
+    if args.metric_path is not None:
+        config.metric_path = args.metric_path
     
     # Update Riemannian beta if provided
     if args.riemannian_beta is not None:
         config.riemannian_beta = args.riemannian_beta
     
+    # Update latent dimension if provided
+    config.latent_dim = args.latent_dim
+    
+    # Pass wandb run name and project to config
+    config.wandb_run_name = args.wandb_run_name
+    config.wandb_project = args.wandb_project
+    
     # Set experiment name
-    project_name = "cyclic-loop-modular-visualizations"
+    project_name = args.wandb_project or "cyclic-loop-mode-comparison"
     run_name = args.run_name or f"{args.loop_mode}_modular_{args.visualization_level}"
     
     # Create and run trainer

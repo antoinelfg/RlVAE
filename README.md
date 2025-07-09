@@ -1,325 +1,470 @@
-# Riemannian Flow VAE (RlVAE) 🧠
+# RlVAE: Riemannian Flow Variational Autoencoder Research Framework
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
 [![Lightning](https://img.shields.io/badge/Lightning-2.0+-purple.svg)](https://lightning.ai/)
 [![Hydra](https://img.shields.io/badge/Hydra-1.3+-green.svg)](https://hydra.cc/)
+[![WandB](https://img.shields.io/badge/WandB-Integrated-orange.svg)](https://wandb.ai/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-A **modular, high-performance** implementation of **Riemannian Flow VAE** for longitudinal data modeling. This repository provides a comprehensive experimental framework with **fully modular architecture**, extensive visualization capabilities, and systematic model comparison tools.
+A **production-ready research framework** for **Riemannian Flow Variational Autoencoders** applied to longitudinal data modeling. This framework implements advanced geometric deep learning techniques with **100% modular architecture**, comprehensive hyperparameter optimization, and systematic model comparison capabilities.
+
+## 🎯 Research Focus
+
+**RlVAE** addresses fundamental challenges in modeling temporal/sequential data by:
+- **Learning Riemannian Geometry**: Discovering data-dependent geometric structures in latent space
+- **Temporal Dynamics**: Modeling evolution along learned geometric manifolds using normalizing flows
+- **Metric Learning**: Extracting optimal Riemannian metrics from data for improved representations
+- **Systematic Comparison**: Rigorous evaluation of geometric vs. standard VAE approaches
+
+## 🏗️ Architecture: Two-Stage Training Pipeline
+
+### Stage 1: Vanilla VAE + Metric Extraction
+```bash
+# Train vanilla VAE and extract Riemannian metric
+python run_experiment.py experiment=vanilla_diverse_metric \
+    model.latent_dim=32 training.max_epochs=50
+```
+- **Purpose**: Learn data representations and extract geometric structure
+- **Output**: Pretrained encoder, decoder, and **Riemannian metric tensor**
+- **Naming**: `pipeline_stage1_vanilla_vae_{architecture}_ld{latent_dim}`
+- **Architectures**: MLP, CNN, ResNet with modular components
+
+### Stage 2: RlVAE Training with Loaded Components
+```bash
+# Train RlVAE using extracted components
+python run_experiment.py experiment=global_vanilla_rlvae_pipeline \
+    model=cnn_rlvae model.latent_dim=32 training.max_epochs=100
+```
+- **Purpose**: Train full Riemannian Flow VAE using Stage 1 outputs
+- **Features**: Geometric constraints, flow dynamics, metric-aware sampling
+- **Naming**: `pipeline_stage2_rlvae_{architecture}_ld{latent_dim}`
 
 ## 🚀 Quick Start
 
-### Installation & Basic Usage
+### Installation
 ```bash
-# Clone and install
 git clone https://github.com/antoinelfg/RlVAE.git
 cd RlVAE
-pip install -e .
+pip install -r requirements.txt
+```
 
-# Quick test (🔥 RECOMMENDED: Fully modular model)
-python run_experiment.py model=modular_rlvae training=quick visualization=minimal
+### Basic Usage Examples
 
-# Full training with modular architecture
-python run_experiment.py model=modular_rlvae training=full_data visualization=standard
+#### Single Model Training
+```bash
+# Quick development run (20 epochs, small data)
+python run_experiment.py experiment=single_run training=quick model=mlp_rlvae
 
-# Compare all models
+# Production CNN training (50 epochs, full data)
+python run_experiment.py experiment=single_run training=full_data model=cnn_rlvae
+
+# Architecture comparison study
 python run_experiment.py experiment=comparison_study
 ```
 
-### Validation & Testing
+#### Hyperparameter Optimization
 ```bash
-# Test modular components
-python tests/test_modular_components.py
+# Learning rate optimization (50 runs)
+sbatch scripts/slurm/run_hyperparameter_sweep.sbatch learning_rate_optimization 4 50
 
-# Test hybrid model integration
-python tests/test_hybrid_model.py
+# Architecture optimization (grid search)
+sbatch scripts/slurm/run_hyperparameter_sweep.sbatch architecture_optimization 2 20
 
-# Environment validation
-python tests/test_setup.py
+# Comprehensive optimization (100 runs, 4 parallel agents)
+sbatch scripts/slurm/run_hyperparameter_sweep.sbatch comprehensive_hyperparameter_sweep 4 100
 ```
 
----
+#### Advanced Configuration
+```bash
+# Custom parameter overrides
+python run_experiment.py model=cnn_rlvae \
+    model.latent_dim=64 \
+    model.riemannian_beta=10.0 \
+    model.n_flows=12 \
+    training.optimizer.lr=0.001 \
+    visualization=full
 
-## 🏗️ Architecture Overview
+# Multiple parallel sweep agents
+sbatch scripts/slurm/run_hyperparameter_sweep.sbatch comprehensive_hyperparameter_sweep 4 25
+sbatch scripts/slurm/run_hyperparameter_sweep.sbatch comprehensive_hyperparameter_sweep 4 25
+sbatch scripts/slurm/run_hyperparameter_sweep.sbatch comprehensive_hyperparameter_sweep 4 25
+sbatch scripts/slurm/run_hyperparameter_sweep.sbatch comprehensive_hyperparameter_sweep 4 25
+```
 
-### 🔥 **Modular RlVAE** (PRIMARY RECOMMENDATION)
-- **File**: `src/models/modular_rlvae.py`
-- **Features**: **100% modular** component architecture
-- **Benefits**: Hydra configuration driven, plug-and-play components
-- **Research**: Most flexible for experimentation and customization
-
-### ⚡ **Hybrid RlVAE** (PERFORMANCE FOCUSED)
-- **File**: `src/models/hybrid_rlvae.py`
-- **Performance**: **2x faster** metric computations
-- **Use Case**: When you need original compatibility with speed improvements
-
-### 🏛️ **Standard RlVAE** (LEGACY COMPATIBLE)
-- **File**: `src/models/riemannian_flow_vae.py`
-- **Use Case**: Original implementation for baseline comparisons
-
-### 🧩 **Modular Components**
-- **MetricTensor** (`src/models/components/metric_tensor.py`): Optimized Riemannian metric computations
-- **MetricLoader** (`src/models/components/metric_loader.py`): Flexible pretrained metric loading
-- **FlowManager** (`src/models/components/flow_manager.py`): Temporal flow dynamics
-- **LossManager** (`src/models/components/loss_manager.py`): Modular loss computation
-- **Samplers** (`src/models/samplers/`): Pluggable sampling strategies
-
-### 📊 **Experimental Framework**
-- **Hydra Configuration**: Systematic experiment management
-- **Multiple Models**: Modular RlVAE, Hybrid RlVAE, Standard RlVAE, Vanilla VAE
-- **Visualization Suite**: From minimal to comprehensive analysis
-- **Performance Tracking**: Automatic benchmarking and comparison
-
----
-
-## 📁 Repository Structure
+## 📁 Project Structure
 
 ```
 RlVAE/
-├── 🧠 src/                          # Core implementation
-│   ├── models/
-│   │   ├── modular_rlvae.py         # 🔥 PRIMARY: Fully modular model
-│   │   ├── hybrid_rlvae.py          # ⚡ 2x faster hybrid model
-│   │   ├── riemannian_flow_vae.py   # 🏛️ Original implementation
-│   │   ├── components/              # 🧩 Modular components
-│   │   │   ├── metric_tensor.py     #     Optimized metric computations
-│   │   │   ├── metric_loader.py     #     Flexible metric loading
-│   │   │   ├── flow_manager.py      #     Flow dynamics
-│   │   │   ├── loss_manager.py      #     Loss computation
-│   │   │   ├── encoder_manager.py   #     Pluggable encoders
-│   │   │   └── decoder_manager.py   #     Pluggable decoders
-│   │   └── samplers/                # 🎯 Sampling strategies
-│   │       ├── base_sampler.py      #     Abstract base class
-│   │       ├── riemannian_sampler.py#     Enhanced sampling
-│   │       ├── hmc_sampler.py       #     HMC sampling
-│   │       └── rhvae_sampler.py     #     RHVAE integration
-│   ├── training/
-│   │   └── lightning_trainer.py     # PyTorch Lightning integration
-│   ├── visualizations/              # 🎨 Comprehensive viz suite
-│   │   ├── basic.py                 #     Standard plots
-│   │   ├── manifold.py              #     Riemannian analysis
-│   │   ├── interactive.py           #     Interactive visualizations
-│   │   └── flow_analysis.py         #     Flow dynamics
-│   └── data/
-│       └── cyclic_dataset.py        # Optimized data loading
-├── ⚙️ conf/                         # 🔥 Hydra configurations
-│   ├── config.yaml                  # Main configuration
-│   ├── model/                       # Model configurations
-│   │   ├── modular_rlvae.yaml       #   🔥 Modular model (primary)
-│   │   ├── hybrid_rlvae.yaml        #   ⚡ Hybrid model
-│   │   ├── riemannian_flow_vae.yaml #   🏛️ Standard RlVAE
-│   │   └── vanilla_vae.yaml         #   Baseline VAE
-│   ├── training/                    # Training configurations
-│   │   ├── quick.yaml               #   Fast development (20 epochs)
-│   │   ├── full_data.yaml           #   Production training (50 epochs)
-│   │   └── default.yaml             #   Standard training (30 epochs)
-│   ├── visualization/               # Visualization levels
-│   │   ├── minimal.yaml             #   Essential plots only
-│   │   ├── standard.yaml            #   Balanced analysis
-│   │   └── full.yaml                #   Comprehensive diagnostics
-│   └── experiment/                  # Experiment types
-│       ├── single_run.yaml          #   Single model training
-│       ├── comparison_study.yaml    #   Multi-model comparison
-│       └── hyperparameter_sweep.yaml #  Parameter optimization
-├── 🧪 tests/                        # Testing & validation
-│   ├── test_modular_components.py   # Component validation
-│   ├── test_hybrid_model.py         # Integration testing
-│   └── test_setup.py                # Environment validation
-├── 📚 docs/                         # Documentation
-│   ├── TRAINING_GUIDE.md            # Complete training guide
-│   ├── MODULAR_TRAINING_GUIDE.md    # Modular system guide
-│   ├── MODULAR_VISUALIZATION_GUIDE.md # Visualization system
-│   ├── RIEMANNIAN_FLOW_VAE_ANALYSIS.md # Architecture analysis
-│   ├── MODULARIZATION_SUMMARY.md    # Executive summary
-│   ├── MODULARIZATION_ROADMAP.md    # Development roadmap
-│   └── README_EXPERIMENTAL_FRAMEWORK.md # Framework overview
-├── 🛠️ scripts/                      # Automation scripts
-│   ├── run_weekend_experiments.sh   # Automated experiment suite
-│   ├── run_quick_test.sh            # Quick validation
-│   ├── monitor_experiments.sh       # Experiment monitoring
-│   └── run_manyseq.sbatch          # SLURM batch script
-├── 🚀 run_experiment.py             # Main experiment runner
-└── Configuration files (pyproject.toml, requirements.txt, etc.)
+├── 🧠 src/                                # Core implementation
+│   ├── models/                            # Model architectures
+│   │   ├── modular_vanilla_vae.py         # Stage 1: Metric extraction VAE
+│   │   ├── modular_rlvae.py               # Stage 2: Full RlVAE (100% modular)
+│   │   ├── hybrid_rlvae.py                # Performance-optimized (2x faster)
+│   │   ├── riemannian_flow_vae.py         # Original implementation
+│   │   └── components/                    # Modular components
+│   │       ├── encoder_manager.py         # Plug-and-play encoders (MLP/CNN/ResNet)
+│   │       ├── decoder_manager.py         # Plug-and-play decoders
+│   │       ├── metric_tensor.py           # Optimized Riemannian metrics (2x faster)
+│   │       ├── flow_manager.py            # Normalizing flow management
+│   │       ├── loss_manager.py            # Modular loss computation
+│   │       └── metric_loader.py           # Pretrained component loading
+│   ├── visualizations/                    # Comprehensive visualization suite
+│   │   ├── manager.py                     # Visualization orchestration
+│   │   ├── basic.py                       # Training curves, reconstructions
+│   │   ├── manifold.py                    # Latent space analysis, geodesics
+│   │   ├── interactive.py                 # Interactive plots, animations
+│   │   ├── flow_analysis.py               # Flow dynamics analysis
+│   │   └── latent_dynamics.py             # Temporal evolution
+│   ├── training/                          # Training infrastructure
+│   └── data/                              # Data handling
+├── ⚙️ conf/                               # Hydra configuration system
+│   ├── experiment/                        # Experiment types
+│   │   ├── global_vanilla_rlvae_pipeline.yaml    # Two-stage pipeline
+│   │   ├── comparison_study.yaml                 # Model comparisons
+│   │   └── single_run.yaml                       # Single experiments
+│   ├── model/                             # Model configurations
+│   │   ├── vanilla_vae.yaml               # Vanilla VAE baseline
+│   │   ├── mlp_rlvae.yaml                 # MLP architecture
+│   │   ├── cnn_rlvae.yaml                 # CNN architecture
+│   │   └── resnet_rlvae.yaml              # ResNet architecture
+│   ├── training/                          # Training configurations
+│   │   ├── quick.yaml                     # Development (20 epochs, small data)
+│   │   ├── default.yaml                   # Standard (100 epochs)
+│   │   └── full_data.yaml                 # Production (50 epochs, full data)
+│   ├── sweep/                             # Hyperparameter optimization
+│   │   ├── learning_rate_optimization.yaml        # LR/weight decay (50 runs)
+│   │   ├── architecture_optimization.yaml         # Architecture comparison
+│   │   └── comprehensive_hyperparameter_sweep.yaml # Full optimization (100 runs)
+│   └── visualization/                     # Visualization levels
+│       ├── minimal.yaml                   # Basic plots (dev)
+│       ├── standard.yaml                  # Balanced analysis
+│       ├── full.yaml                      # Comprehensive diagnostics
+│       ├── final_only.yaml                # End-of-training only
+│       └── end_only.yaml                  # No training visuals
+├── 🛠️ scripts/                           # Automation and utilities
+│   ├── slurm/                             # SLURM cluster scripts
+│   │   ├── run_hyperparameter_sweep.sbatch        # Standard sweeps (47h)
+│   │   ├── run_hyperparameter_sweep_short.sbatch  # Test sweeps (4h)
+│   │   ├── run_extended_sweep.sh                  # Unlimited via chunking
+│   │   └── run_experiment_rlvae.sbatch            # Single experiments
+│   ├── run_sweep.py                       # Hyperparameter sweep runner
+│   ├── global_rlvae_pipeline.py           # Pipeline orchestration
+│   └── train_diverse_metric_vae.py        # Metric extraction utilities
+├── 📚 docs/                               # Comprehensive documentation
+├── 🧪 tests/                              # Test suite
+└── 📄 Configuration files (pyproject.toml, requirements.txt, etc.)
 ```
 
----
+## 🤖 Model Architectures
 
-## 🎯 Available Models
+### 1. Modular Vanilla VAE (`ModularVanillaVAE`)
+**Purpose**: Stage 1 training for metric extraction
+```python
+# Factory functions for different architectures
+vae = create_cnn_vanilla_vae(input_dim=(3, 64, 64), latent_dim=32, beta=1.0)
+vae = create_resnet_vanilla_vae(input_dim=(3, 64, 64), latent_dim=32, beta=1.0)
+vae = create_mlp_vanilla_vae(input_dim=(3, 64, 64), latent_dim=32, beta=1.0)
+```
+- **Features**: Modular encoder/decoder, Hydra configuration
+- **Architectures**: MLP, CNN, ResNet with configurable depth/width
+- **Output**: Trained VAE + extracted Riemannian metric tensor
 
-| Model | Architecture | Use Case | Command |
-|-------|-------------|----------|---------|
-| **🔥 Modular RlVAE** | **100% modular** | **Primary recommendation for research** | `model=modular_rlvae` |
-| ⚡ Hybrid RlVAE | 2x faster | Performance-focused experiments | `model=hybrid_rlvae` |
-| 🏛️ Standard RlVAE | Original | Legacy compatibility, comparisons | `model=riemannian_flow_vae` |
-| 📊 Vanilla VAE | Baseline | Baseline comparisons | `model=vanilla_vae` |
+### 2. Modular RlVAE (`ModularRiemannianFlowVAE`)
+**Purpose**: Full Riemannian Flow VAE with 100% modular architecture
+```yaml
+model:
+  _target_: models.modular_rlvae.ModularRiemannianFlowVAE
+  posterior:
+    type: "riemannian_metric"  # gaussian, iaf, riemannian_metric
+  sampling:
+    method: "geodesic"         # standard, basic, enhanced, geodesic
+  encoder:
+    architecture: "cnn"        # mlp, cnn, resnet
+```
+- **Key Features**: Configuration-driven, plug-and-play components
+- **Modular Components**: MetricTensor, FlowManager, LossManager, MetricLoader
+- **Posterior Types**: Gaussian, IAF, Riemannian metric-aware
 
----
+### 3. Hybrid RlVAE (`HybridRiemannianFlowVAE`)
+**Purpose**: Performance-optimized version (2x faster metric computations)
+- **Use Case**: Production environments requiring speed
+- **Compatibility**: Full backward compatibility with existing training
+- **Performance**: 2x faster metric tensor operations
 
-## ⚙️ Training Configurations
+### 4. Standard RlVAE (`RiemannianFlowVAE`)
+**Purpose**: Original implementation for baseline comparisons
+- **Features**: Multiple sampling methods, legacy compatibility
+- **Use Case**: Research baselines, method validation
 
-| Configuration | Epochs | Dataset Size | Time (H100) | Use Case |
-|---------------|--------|--------------|-------------|----------|
-| **Quick** | 20 | 100 sequences | ~10 min | Development, debugging |
-| **Default** | 30 | 1000 sequences | ~45 min | Standard experiments |
-| **Full Data** | 50 | 3000 sequences | ~2 hours | Production training |
+| Model | Speed | Modularity | Use Case |
+|-------|-------|------------|----------|
+| **Modular RlVAE** | Fast | 100% | **Primary recommendation for research** |
+| **Hybrid RlVAE** | 2x faster | High | Performance-focused experiments |
+| **Standard RlVAE** | Baseline | Limited | Legacy compatibility, baselines |
+| **Vanilla VAE** | Fastest | High | Stage 1, comparisons |
 
----
+## 🔧 Configuration System (Hydra)
 
-## 🎨 Visualization Levels
-
-| Level | Features | Performance | Use Case |
-|-------|----------|-------------|----------|
-| **Minimal** | Basic plots only | Fastest | Development |
-| **Standard** | Manifold analysis | Balanced | Most experiments |
-| **Full** | Complete diagnostics | Comprehensive | Paper figures |
-
----
-
-## 🧪 Experiment Types
-
-### Single Run (Modular Model)
+### Model Selection
 ```bash
-python run_experiment.py model=modular_rlvae training=quick visualization=minimal
+# Choose model architecture
+python run_experiment.py model=vanilla_vae      # Vanilla VAE baseline
+python run_experiment.py model=mlp_rlvae        # MLP Riemannian VAE
+python run_experiment.py model=cnn_rlvae        # CNN Riemannian VAE
+python run_experiment.py model=resnet_rlvae     # ResNet Riemannian VAE
 ```
 
-### Model Comparison
+### Training Configurations
 ```bash
-python run_experiment.py experiment=comparison_study
+# Development (fast iteration)
+python run_experiment.py training=quick         # 20 epochs, small data
+
+# Standard research
+python run_experiment.py training=default       # 100 epochs, balanced
+
+# Production
+python run_experiment.py training=full_data     # 50 epochs, full dataset
 ```
 
-### Hyperparameter Sweep
+### Parameter Overrides
 ```bash
-python run_experiment.py experiment=hyperparameter_sweep -m
+# Architecture parameters
+python run_experiment.py model.latent_dim=64 model.n_flows=12
+
+# Training parameters  
+python run_experiment.py training.optimizer.lr=0.001 training.data.batch_size=32
+
+# Riemannian parameters
+python run_experiment.py model.riemannian_beta=10.0 model.sampling.method=geodesic
+
+# Visualization
+python run_experiment.py visualization=full visualization.frequency=5
 ```
 
-### Custom Configuration (Modular Focus)
+## 🚀 Hyperparameter Optimization System
+
+### WandB Integration
+- **Project**: `rlvae-hyperparameter-optimization`
+- **Metrics Tracked**: `val_loss`, `reconstruction_loss`, `kl_loss`, `riemannian_kl`
+- **Features**: Real-time monitoring, automatic logging, sweep management
+
+### Sweep Configurations
+
+#### 1. Learning Rate Optimization (`learning_rate_optimization.yaml`)
 ```bash
-python run_experiment.py model=modular_rlvae model.latent_dim=32 training.optimizer.lr=0.0005
+sbatch scripts/slurm/run_hyperparameter_sweep.sbatch learning_rate_optimization 4 50
 ```
+- **Focus**: Training dynamics optimization
+- **Parameters**: Learning rate (1e-5 to 1e-2), weight decay (1e-6 to 1e-3), batch size (8,16,32,64)
+- **Additional**: Beta parameters, training epochs, data efficiency
+- **Method**: Random search with 50 runs
+- **Early Termination**: Hyperband (eta=2, max_iter=30)
 
----
-
-## 📈 Performance Benchmarks
-
-### Modular Architecture Benefits
-- **Research Flexibility**: 100% configurable components
-- **Easy Experimentation**: Plug-and-play architecture
-- **Custom Components**: Simple to extend and modify
-- **Clean Interfaces**: Well-documented APIs
-
-### Training Speed Comparison
-| Model | Architecture | Training Speed | Memory Usage | Flexibility |
-|-------|-------------|----------------|--------------|-------------|
-| **Modular RlVAE** | **100% modular** | Optimized | Efficient | **Maximum** |
-| Hybrid RlVAE | 2x faster metrics | 1.5x faster | Same | High |
-| Standard RlVAE | Original | Baseline | Baseline | Limited |
-| Vanilla VAE | Simple | Fastest | Lower | Basic |
-
----
-
-## 🛠️ Development Workflows
-
-### For Research Papers (Modular Focus)
+#### 2. Architecture Optimization (`architecture_optimization.yaml`)
 ```bash
-# 1. Development with modular architecture
-python run_experiment.py model=modular_rlvae training=quick visualization=minimal
-
-# 2. Component validation  
-python tests/test_modular_components.py
-
-# 3. Full experimentation
-python run_experiment.py model=modular_rlvae training=full_data visualization=standard
-
-# 4. Model comparison
-python run_experiment.py experiment=comparison_study
+sbatch scripts/slurm/run_hyperparameter_sweep.sbatch architecture_optimization 2 18
 ```
+- **Focus**: Model architecture comparison
+- **Parameters**: Stage1 arch (mlp,cnn,resnet), Stage2 arch (mlp,cnn,resnet), latent_dim (16,32,64)
+- **Additional**: Flow count (6,8,12), Riemannian beta (1,5,10)
+- **Method**: Grid search for systematic comparison
+- **Total Combinations**: 3×3×3×3×3 = 243 configurations
 
-### For Method Development
+#### 3. Comprehensive Optimization (`comprehensive_hyperparameter_sweep.yaml`)
 ```bash
-# Modular component development
-python run_experiment.py model=modular_rlvae training=quick
-
-# Component testing
-python tests/test_modular_components.py
-
-# Integration validation
-python tests/test_hybrid_model.py
+sbatch scripts/slurm/run_hyperparameter_sweep.sbatch comprehensive_hyperparameter_sweep 4 100
 ```
+- **Focus**: Full parameter space optimization
+- **Stage 1 Parameters**: Architecture, latent_dim, epochs, temperature, regularization
+- **Stage 2 Parameters**: n_flows, beta, riemannian_beta, sampling_method, loop_mode
+- **Training Parameters**: lr, weight_decay, batch_size, max_epochs
+- **Data Parameters**: n_train_samples, n_val_samples
+- **Method**: Random search with 100 runs
+- **Early Termination**: Hyperband (eta=3, max_iter=50)
 
-### For Performance Studies
+### SLURM Cluster Integration
+
+#### Batch Scripts (`scripts/slurm/`)
 ```bash
-# Automated experiment suite
-scripts/run_weekend_experiments.sh
+# Standard 47-hour sweeps
+run_hyperparameter_sweep.sbatch <sweep_config> <agents> <max_runs>
 
-# Quick validation
-scripts/run_quick_test.sh
+# Short 4-hour test sweeps  
+run_hyperparameter_sweep_short.sbatch <sweep_config> <agents> <max_runs>
 
-# Monitoring
-scripts/monitor_experiments.sh
+# Unlimited duration via automatic chunking
+run_extended_sweep.sh <sweep_config> <total_runs>
+
+# Single experiment execution
+run_experiment_rlvae.sbatch
 ```
 
----
+#### Usage Patterns
+```bash
+# Single sweep with multiple agents
+sbatch scripts/slurm/run_hyperparameter_sweep.sbatch learning_rate_optimization 4 50
 
-## 🔬 Research Applications
+# Parallel sweeps for faster completion
+sbatch scripts/slurm/run_hyperparameter_sweep.sbatch comprehensive_hyperparameter_sweep 4 25
+sbatch scripts/slurm/run_hyperparameter_sweep.sbatch comprehensive_hyperparameter_sweep 4 25  
+sbatch scripts/slurm/run_hyperparameter_sweep.sbatch comprehensive_hyperparameter_sweep 4 25
+sbatch scripts/slurm/run_hyperparameter_sweep.sbatch comprehensive_hyperparameter_sweep 4 25
+# Total: 16 agents working on 100 runs = ~6.25 runs per agent
 
-### Longitudinal Data Modeling
-- **Medical time series**: Patient progression tracking
-- **Financial data**: Market dynamics analysis
-- **Scientific data**: Experimental time course analysis
+# Extended sweep for very long optimizations
+./scripts/slurm/run_extended_sweep.sh comprehensive_hyperparameter_sweep 500
+```
 
-### Riemannian Geometry Research
-- **Metric learning**: Custom Riemannian structures
-- **Flow dynamics**: Temporal evolution on manifolds
-- **Sampling methods**: Advanced MCMC techniques
+#### Resource Management
+- **Time Limits**: 47 hours (GPU partition limit), 4 hours (short tests)
+- **GPU Usage**: 1 GPU per agent, automatic allocation
+- **Memory**: Optimized for batch sizes 8-64
+- **Monitoring**: Automatic log collection, WandB integration
 
-### Modular Architecture Benefits
-- **Component isolation**: Test individual parts separately
-- **Easy A/B testing**: Swap components for comparison
-- **Custom workflows**: Build your own model variants
-- **Research acceleration**: Focus on your contribution
+## 📊 Visualization System
 
----
+### Modular Architecture (`src/visualizations/`)
+- **Manager** (`manager.py`): Centralized orchestration, WandB integration
+- **Basic** (`basic.py`): Training curves, loss plots, reconstructions
+- **Manifold** (`manifold.py`): Latent space analysis, geodesics, curvature  
+- **Interactive** (`interactive.py`): Interactive plots, animations, hover details
+- **Flow Analysis** (`flow_analysis.py`): Normalizing flow diagnostics
+- **Dynamics** (`latent_dynamics.py`): Temporal evolution analysis
+
+### Visualization Levels
+```bash
+# Development: minimal overhead
+python run_experiment.py visualization=minimal    # Basic plots every 5 epochs
+
+# Research: balanced analysis
+python run_experiment.py visualization=standard   # Manifold analysis every 3 epochs
+
+# Publication: comprehensive diagnostics  
+python run_experiment.py visualization=full       # All modules every epoch
+
+# Hyperparameter sweeps: efficiency focused
+python run_experiment.py visualization=final_only # Complete analysis at end only
+
+# No training visuals: maximum performance
+python run_experiment.py visualization=end_only   # Disable during training
+```
+
+### Key Features
+- **WandB Integration**: Automatic logging of all plots and metrics
+- **Cluster Analysis**: Sequence clustering with color coding
+- **Interactive Elements**: Hover details, zoom, pan capabilities
+- **Performance Optimization**: Configurable sequence limits, smart batching
+- **Comparative Analysis**: Side-by-side model comparisons
+
+## 🔬 Sampling Methods
+
+### Standard VAE (`method: standard`)
+```python
+z = mu + eps * torch.exp(0.5 * log_var)  # Standard reparameterization
+```
+
+### Riemannian Sampling Methods
+```yaml
+sampling:
+  method: "geodesic"        # Choose method
+  use_riemannian: true      # Enable geometric features
+```
+
+#### Available Methods:
+- **`basic`**: Simple Riemannian correction with metric conditioning
+- **`enhanced`**: Advanced Riemannian sampling with geometric constraints  
+- **`geodesic`**: Geodesic sampling on learned Riemannian manifold
+- **`official`**: Official RHVAE implementation integration
+
+### Performance Comparison
+| Method | Speed | Geometric Accuracy | Use Case |
+|--------|-------|-------------------|----------|
+| `standard` | Fastest | None | Vanilla VAE baseline |
+| `basic` | Fast | Low | Simple geometric correction |
+| `enhanced` | Medium | Medium | Balanced performance/accuracy |
+| `geodesic` | Slower | High | **Best geometric fidelity** |
+| `official` | Slowest | High | Validation against RHVAE |
+
+## 📈 Performance & Scalability
+
+### Memory Management
+- **Mixed Precision**: 16-bit training for 2x memory efficiency
+- **Batch Sizes**: Adaptive sizing (4-64) based on architecture
+- **Data Loading**: Parallel workers (4-16), pin memory, persistent workers
+
+### Compute Optimization  
+- **Device Management**: Automatic GPU/CPU selection and placement
+- **Single GPU**: Optimized for single GPU training (multi-GPU ready)
+- **Metric Computation**: 2x faster with modular MetricTensor component
+- **Caching**: Intelligent metric tensor and flow caching
+
+### Scalability Features
+- **SLURM Native**: Full cluster computing support
+- **Parallel Sweeps**: Multiple agents per hyperparameter sweep
+- **Extended Runs**: Automatic chunking for unlimited duration experiments
+- **Resource Monitoring**: Automatic GPU utilization and memory tracking
+
+## 🧪 Testing & Validation
+
+### Test Structure
+```bash
+# Run all tests
+python -m pytest tests/ -v
+
+# Specific test categories
+python -m pytest tests/test_models.py          # Model architecture validation
+python -m pytest tests/test_training.py        # Training loop validation  
+python -m pytest tests/test_visualizations.py  # Visualization system
+python -m pytest tests/test_config.py          # Hydra configuration
+```
+
+### Validation Features
+- **Component Testing**: Individual module validation
+- **Integration Testing**: End-to-end pipeline validation
+- **Configuration Testing**: Hydra config validation
+- **Performance Testing**: Memory and speed benchmarks
 
 ## 📚 Documentation
 
-- **[Training Guide](docs/TRAINING_GUIDE.md)**: Complete training workflows
-- **[Modular Architecture](docs/MODULARIZATION_SUMMARY.md)**: System architecture details
-- **[Experimental Framework](docs/README_EXPERIMENTAL_FRAMEWORK.md)**: Advanced usage patterns
-- **[Installation Guide](docs/installation.md)**: Setup and troubleshooting
+### Core Documentation
+- **[📖 Installation Guide](docs/installation.md)** - Complete setup, dependencies, troubleshooting
+- **[🚀 Training Guide](docs/TRAINING_GUIDE.md)** - Comprehensive training workflows and best practices
+- **[🔄 Pipeline Guide](docs/GLOBAL_PIPELINE_GUIDE.md)** - Two-stage training architecture
+- **[📊 Visualization Guide](docs/MODULAR_VISUALIZATION_GUIDE.md)** - Complete visualization system
 
----
+### Advanced Usage  
+- **[⚡ Hyperparameter Optimization](docs/HYPERPARAMETER_OPTIMIZATION_GUIDE.md)** - WandB sweeps, SLURM clusters
+- **[🔬 Sweep Guide](docs/SWEEP_README.md)** - Large-scale hyperparameter optimization
+- **[🤝 Contributing Guide](docs/CONTRIBUTING.md)** - Development setup, coding standards
+
+### Research Documentation
+- **[🏗️ RlVAE Architecture](docs/GLOBAL_RLVAE_PIPELINE.md)** - Core pipeline architecture and design principles
 
 ## 🤝 Contributing
 
-Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details on our code of conduct and the process for submitting pull requests.
-
----
+We welcome contributions! See [CONTRIBUTING.md](docs/CONTRIBUTING.md) for:
+- Development environment setup
+- Code style and testing guidelines  
+- Pull request process
+- Research contribution guidelines
 
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
----
+## 🔗 References & Related Work
 
-## 📞 Contact
 
-For questions, issues, or collaborations, please open an issue on GitHub or contact the maintainers.
-
----
-
-## 🙏 Acknowledgments
-
-- Original RlVAE research and implementation
-- PyTorch Lightning for training infrastructure
-- Hydra for configuration management
-- The open-source research community
+### Technical References
+- **[RHVAE](https://github.com/clementchadebec/benchmark_VAE)** - Original Riemannian VAE implementation
+- **[PyTorch Lightning](https://lightning.ai/)** - Training infrastructure
+- **[Hydra](https://hydra.cc/)** - Configuration management
 
 ---
 
-**Ready to explore modular Riemannian geometry in your longitudinal data? Start with the modular model!** 🚀
+**🚀 Ready to explore Riemannian geometry in your data?** Start with our [Installation Guide](docs/installation.md) or dive into a [Quick Training Example](#quick-start)!
 
-```bash
-python run_experiment.py model=modular_rlvae training=quick visualization=minimal
-``` 
+**🔬 For comprehensive project context**, see [`.cursor_context.md`](.cursor_context.md) - essential reading for AI assistants and contributors.
+
+**Need help?** Check the [documentation](docs/) or open an issue for support. 

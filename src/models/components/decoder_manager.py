@@ -72,12 +72,14 @@ class DecoderManager(nn.Module):
                 self.input_dim = input_dim
                 self.latent_dim = latent_dim
                 
-                # CNN parameters
-                hidden_dims = config.get('hidden_dims', [256, 128, 64, 32])
+                # CNN parameters - use config directly, not config.get('cnn', {})
+                hidden_dims = config.get('layers', [256, 128, 64, 32])
                 kernel_size = config.get('kernel_size', 3)
                 stride = config.get('stride', 2)
                 padding = config.get('padding', 1)
                 output_padding = config.get('output_padding', 1)
+                activation = config.get('activation', 'relu')
+                batch_norm = config.get('batch_norm', True)
                 dropout = config.get('dropout', 0.1)
                 
                 # Calculate initial size
@@ -101,8 +103,8 @@ class DecoderManager(nn.Module):
                 for i, h_dim in enumerate(hidden_dims[1:]):
                     layers.extend([
                         nn.ConvTranspose2d(in_channels, h_dim, kernel_size, stride, padding, output_padding),
-                        nn.BatchNorm2d(h_dim),
-                        nn.ReLU(),
+                        nn.BatchNorm2d(h_dim) if batch_norm else nn.Identity(),
+                        nn.ReLU() if activation == 'relu' else nn.LeakyReLU(),
                         nn.Dropout2d(dropout)
                     ])
                     in_channels = h_dim
@@ -133,7 +135,8 @@ class DecoderManager(nn.Module):
                     'reconstruction': reconstruction
                 })
         
-        return CNNDecoder(self.input_dim, self.latent_dim, self.config.get('cnn', {}))
+        # Use self.config directly, not self.config.get('cnn', {})
+        return CNNDecoder(self.input_dim, self.latent_dim, self.config)
     
     def _create_resnet_decoder(self) -> BaseDecoder:
         """Create ResNet decoder for image data."""
@@ -177,8 +180,8 @@ class DecoderManager(nn.Module):
                     )
                     self.resnet_blocks.append(block)
                 
-                # Final output layer
-                self.final_conv = nn.ConvTranspose2d(hidden_dims[-1], input_dim[0], 4, 2, 1)
+                # Final output layer (no upsampling, just change channels)
+                self.final_conv = nn.Conv2d(hidden_dims[-1], input_dim[0], 3, 1, 1)
             
             def _calculate_initial_size(self, input_dim, num_layers):
                 """Calculate the initial feature map size."""
@@ -265,7 +268,7 @@ class DecoderManager(nn.Module):
     def load_pretrained(self, path: str) -> None:
         """Load pretrained decoder weights with backward compatibility."""
         try:
-            weights = torch.load(path, map_location=self.device)
+            weights = torch.load(path, map_location=self.device, weights_only=False)
             
             # Handle different weight formats
             if hasattr(weights, 'state_dict'):

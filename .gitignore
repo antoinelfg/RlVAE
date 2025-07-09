@@ -186,13 +186,31 @@ multirun/
 # Jupyter notebook outputs
 *.ipynb
 
-# Generated images
+# Generated images and visualizations
 *.png
 *.jpg
 *.jpeg
 *.gif
 *.svg
 html_latent_images_epoch_*/
+
+# SLURM job logs and outputs
+*.out
+*.err
+slurm-*.out
+logs/
+*.log
+
+# Sweep and monitoring files
+sweep_runner.log
+monitor_extended_sweep.sh
+
+# Data directories (keep structure but ignore content)
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/*/README.md
 
 # IDE and editor files
 .vscode/

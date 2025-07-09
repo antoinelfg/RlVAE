@@ -354,7 +354,7 @@ class StreamlitExperimentRunner:
         """Get the current experiment details."""
         return self.current_experiment
     
-    def get_experiment_history(self) -> List[Dict[str, Any]]:
+    def get_experiment_history(self):
         """Get the history of all experiments."""
         return self.experiment_history
     

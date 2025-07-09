@@ -1,0 +1,29 @@
+# @package visualization
+
+# Final epoch only visualization configuration
+# For 50-epoch training (0-49), set frequency=49 so visualizations run on epoch 0 and 49 only
+level: "full"
+frequency: 49  # Matches last epoch for 50-epoch training
+
+# Enable all modules for comprehensive final analysis
+enable_basic: true
+enable_manifold: true
+enable_interactive: true
+enable_flow_analysis: true
+enable_dynamics: true
+
+# Set all individual frequencies to 1 (they'll be gated by main frequency anyway)
+basic_frequency: 1
+manifold_frequency: 1
+interactive_frequency: 1
+flow_frequency: 1
+dynamics_frequency: 1
+
+# Enable all features for comprehensive final visualization
+disable_curvature: false
+max_sequences: 32
+enable_fancy_plots: true
+
+# Output controls
+save_local: true
+log_to_wandb: true 

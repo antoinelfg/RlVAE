@@ -74,8 +74,42 @@ class BaseVisualization:
                 return None
                 
     def model_forward(self, x):
-        """Forward pass through the model."""
-        return self.model(x)
+        """Forward pass through the model, ensuring input is on the model's device."""
+        device = next(self.model.parameters()).device
+        x = x.to(device)
+        
+        # Handle different model types
+        if hasattr(self.model, 'n_flows') and self.model.n_flows > 0:
+            # This is an RLVAE - expects 5D input [batch, timesteps, channels, height, width]
+            return self.model(x)
+        else:
+            # This is a vanilla VAE - expects 4D input [batch, channels, height, width]
+            # Take only the first timestep for vanilla VAE
+            if len(x.shape) == 5:  # [batch, timesteps, channels, height, width]
+                x_0 = x[:, 0]  # [batch, channels, height, width]
+                result = self.model(x_0)
+                
+                # For vanilla VAE, we need to create a sequence-like output
+                batch_size, n_obs = x.shape[:2]
+                
+                # Create sequence of reconstructions by repeating the first timestep
+                recon_x = result.recon_x.unsqueeze(1).expand(-1, n_obs, -1, -1, -1)  # [batch, timesteps, channels, height, width]
+                
+                # Create sequence of latents by repeating the first latent
+                z = result.z.unsqueeze(1).expand(-1, n_obs, -1)  # [batch, timesteps, latent_dim]
+                
+                # Create a result object that matches the expected format
+                from types import SimpleNamespace
+                return SimpleNamespace(
+                    recon_x=recon_x,
+                    z=z,
+                    loss=result.loss,
+                    reconstruction_loss=result.reconstruction_loss,
+                    reg_loss=result.reg_loss
+                )
+            else:
+                # Already 4D, pass directly
+                return self.model(x)
         
     def _prepare_pca_data(self, z_seq, n_components=3):
         """Prepare PCA projection of latent sequences."""
