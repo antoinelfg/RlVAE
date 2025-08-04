@@ -1,0 +1,4 @@
+---
+alwaysApply: true
+---
+No strict rule for cluster/SLURM usage: use local execution for small tests and SLURM/batch scripts for large-scale or long-running experiments. Use your judgment and ask the user if unsure. See [CURSOR_RULES.md](mdc:CURSOR_RULES.md) rule 7.

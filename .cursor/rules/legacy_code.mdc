@@ -1,0 +1,4 @@
+---
+alwaysApply: true
+---
+Do not use or modify legacy scripts unless explicitly discussed. If a legacy script seems relevant, always ask the user for permission and explain why referencing or modifying it could be beneficial. Prefer the modular pipeline and new architecture for all new work. See [CURSOR_RULES.md](mdc:CURSOR_RULES.md) rule 2.

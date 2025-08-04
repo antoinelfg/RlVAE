@@ -1,0 +1,4 @@
+---
+alwaysApply: true
+---
+Every new model, sampler, visualization, or major feature must include comprehensive tests (unit and, if relevant, integration), documentation for usage/configuration/design, and an update to a "new_things" documentation file summarizing all new features/components since the last PR. See [CURSOR_RULES.md](mdc:CURSOR_RULES.md) rule 5.

@@ -44,7 +44,32 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
     
     def __init__(self, config: DictConfig):
         """Initialize from Hydra configuration with all modular components."""
-        
+        # Debug print for metric config
+        print("[DEBUG] model.metric config at model init:", config.get('metric', {}))
+        # Check if n_flows was explicitly set by checking if it's NOT the default auto value
+        # Default auto value would be sequence_length - 1, so if it's different, user set it
+        if hasattr(config, 'sequence_length'):
+            expected_auto_value = config.sequence_length - 1
+            current_n_flows = getattr(config, 'n_flows', None)
+            
+            # If n_flows is different from auto value, user explicitly set it
+            if current_n_flows is not None and current_n_flows != expected_auto_value:
+                print(f"[USER] Keeping user-specified n_flows = {current_n_flows} (auto would be {expected_auto_value})")
+            else:
+                # Auto-set to sequence_length - 1
+                config.n_flows = expected_auto_value
+                print(f"[AUTO] Setting n_flows = sequence_length - 1 = {config.n_flows}")
+        elif hasattr(config, 'model') and hasattr(config.model, 'sequence_length'):
+            expected_auto_value = config.model.sequence_length - 1
+            current_n_flows = getattr(config.model, 'n_flows', None)
+            
+            if current_n_flows is not None and current_n_flows != expected_auto_value:
+                print(f"[USER] Keeping user-specified model.n_flows = {current_n_flows} (auto would be {expected_auto_value})")
+            else:
+                config.model.n_flows = expected_auto_value
+                print(f"[AUTO] Setting model.n_flows = model.sequence_length - 1 = {config.model.n_flows}")
+        else:
+            print(f"[USER] Keeping n_flows = {getattr(config, 'n_flows', 'unknown')} (no sequence_length found)")
         # Extract core parameters
         super().__init__(
             input_dim=tuple(config.input_dim),
@@ -61,7 +86,7 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             encoder=None,  # Will be created by manager
             decoder=None   # Will be created by manager
         )
-        
+        print(f"[MODEL INIT] input_dim: {config.input_dim}, encoder architecture: {config.get('encoder', {}).get('architecture', 'mlp')}")
         # Store config for later use
         self.config = config
         self.model_name = config.get('_target_', 'ModularRiemannianFlowVAE').split('.')[-1]
@@ -82,20 +107,39 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         self._setup_encoder_decoder()
         
         # 🚀 NEW: Initialize modular metric tensor
+        metric_cfg = getattr(self.config, 'metric', {})
+        trainable = metric_cfg.get('trainable', False)
+        architecture = metric_cfg.get('architecture', 'mlp')
+        arch_kwargs = metric_cfg.get('arch_kwargs', {})
+        init_from_fixed = metric_cfg.get('init_from_fixed', False)
+        fixed_metric_path = metric_cfg.get('fixed_metric_path', None)
         self.modular_metric = MetricTensor(
             latent_dim=self.config.latent_dim,
-            device=self.device
+            device=self.device,
+            trainable=trainable,
+            architecture=architecture,
+            arch_kwargs=arch_kwargs,
+            temperature=metric_cfg.get('temperature_override', 0.1),
+            regularization=metric_cfg.get('regularization_override', 0.01),
+            init_from_fixed=init_from_fixed,
+            fixed_metric_path=fixed_metric_path
         )
         
         # 🚀 NEW: Initialize modular metric loader
         self.metric_loader = MetricLoader(device=self.device)
         
         # 🚀 NEW: Initialize modular loss manager
+        metric_reg_weight = metric_cfg.get('metric_reg_weight', 0.0)
+        metric_reg_type = metric_cfg.get('metric_reg_type', 'none')
+        metric_reg_target = metric_cfg.get('metric_reg_target', 0.0)
         self.loss_manager = LossManager(
             beta=self.config.beta,
             riemannian_beta=self.config.get('riemannian_beta', self.config.beta),
             loop_penalty_weight=self.config.loop.penalty,
-            device=self.device
+            device=self.device,
+            metric_reg_weight=metric_reg_weight,
+            metric_reg_type=metric_reg_type,
+            metric_reg_target=metric_reg_target
         )
         
         # 🚀 NEW: Initialize modular flow manager (replace the one from parent)
@@ -317,7 +361,7 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
                 'manifold_regularity': []
             })
     
-    def forward(self, x: torch.Tensor, compute_metrics: bool = False) -> Dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, compute_metrics: bool = False) -> dict:
         """
         Enhanced forward pass with standardized output format.
         
@@ -358,6 +402,11 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             Dictionary with standardized keys for easy comparison
         """
         batch_size, n_obs = x.shape[:2]
+
+        # Debug: Check input for NaN/Inf
+        if torch.isnan(x).any() or torch.isinf(x).any():
+            print("[DEBUG] Input x contains NaN or Inf!")
+        print(f"[DEBUG] Input x stats: min={x.min().item():.4f}, max={x.max().item():.4f}, mean={x.mean().item():.4f}, std={x.std().item():.4f}")
         
         # Encode initial observation using modular encoder
         x_0 = x[:, 0]
@@ -367,36 +416,32 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         
         # Sample latents using modular sampling
         if self.posterior_type == "riemannian_metric" and hasattr(self, 'modular_metric'):
-            # Use modular metric-aware sampling
             z_0 = self.sample_metric_aware_posterior(mu, log_var)
         else:
-            # Standard reparameterization
+            print("⚠️ DEBUG: Falling back to standard Gaussian posterior sampling (no modular metric available or incorrect posterior_type)")
             eps = torch.randn_like(mu)
             z_0 = mu + eps * torch.exp(0.5 * log_var)
+        print(f"[DEBUG] z_0 stats before flows: mean={z_0.mean().item():.4f}, std={z_0.std().item():.4f}, min={z_0.min().item():.4f}, max={z_0.max().item():.4f}")
         
-        # Initialize sequence
         z_seq = [z_0]
-        
-        # Apply flows using modular flow manager
         if self.n_flows > 0:
             z_seq_out, log_det_jacobians = self.flow_manager.apply_flows(z_seq, n_obs=n_obs)
             z_seq = z_seq_out
         else:
             log_det_jacobians = []
-        
-        # Stack sequence
-        z_seq_tensor = torch.stack(z_seq, dim=1)  # [batch_size, n_obs, latent_dim]
-        
-        # Handle closed loop if needed
+        z_seq_tensor = torch.stack(z_seq, dim=1)
         if self.loop_mode == "closed":
             z_seq_tensor[:, -1] = z_seq_tensor[:, 0]
-        
-        # Decode sequence using modular decoder
         z_flat = z_seq_tensor.reshape(-1, self.latent_dim)
         decoder_out = self.decoder(z_flat)
         recon_x = decoder_out["reconstruction"]
         recon_x = recon_x.view(batch_size, n_obs, *self.input_dim)
-        
+        # Debug: Check recon_x for NaN/Inf
+        if torch.isnan(recon_x).any() or torch.isinf(recon_x).any():
+            print("[DEBUG] recon_x contains NaN or Inf!")
+        print(f"[DEBUG] recon_x stats: min={recon_x.min().item():.4f}, max={recon_x.max().item():.4f}, mean={recon_x.mean().item():.4f}, std={recon_x.std().item():.4f}")
+        # Clamp recon_x if using BCE loss (optional, here for safety)
+        recon_x = torch.clamp(recon_x, min=1e-6, max=1-1e-6)
         # Compute losses using modular loss manager
         losses = self.loss_manager.compute_total_loss(
             x=x,
@@ -410,6 +455,12 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             metric_tensor=self.modular_metric if hasattr(self, 'modular_metric') else None,
             use_riemannian_kl=self.posterior_type == "riemannian_metric"
         )
+        # Debug: Check loss values for NaN/Inf
+        for k, v in losses.items():
+            if isinstance(v, torch.Tensor) and (torch.isnan(v).any() or torch.isinf(v).any()):
+                print(f"[DEBUG] Loss {k} contains NaN or Inf! Value: {v}")
+            elif isinstance(v, torch.Tensor):
+                print(f"[DEBUG] Loss {k}: {v.item():.4f}")
         
         # Prepare result
         result = {
@@ -421,7 +472,12 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             'loop_penalty': losses['loop_penalty'],
             'total_loss': losses['total_loss']
         }
-        
+
+        # Add aliases for Lightning trainer compatibility
+        result['kl_divergence'] = result['kl_divergence_loss']
+        result['total_loss'] = result['total_loss']
+        result['reconstruction_loss'] = result['reconstruction_loss']
+
         if compute_metrics:
             result.update(self._compute_additional_metrics(x, result))
         
@@ -611,6 +667,155 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             models[variant] = cls(variant_config)
         
         return models
+
+
+    # === NEW: Generation and Evaluation Integration ===
+    
+    def create_generator(self, config=None):
+        """Create a generator interface for this model, optionally using a Hydra config."""
+        from src.generation.generator import create_generator
+        return create_generator(self, config=config)
+    
+    def create_inference_pipeline(self, config=None):
+        """Create an inference pipeline for this model, optionally using a Hydra config."""
+        from src.inference.inference_pipeline import create_inference_pipeline
+        return create_inference_pipeline(self, config=config)
+    
+    def create_evaluator(self):
+        """Create an evaluator for comprehensive model assessment."""
+        from src.evaluation.evaluator import create_evaluator
+        return create_evaluator(self)
+    
+    def generate_samples(self, num_samples: int = 64, method: str = "geodesic", 
+                        sampler_type: str = "working", **kwargs) -> Dict[str, torch.Tensor]:
+        """
+        Convenient method to generate samples from the model.
+        
+        Args:
+            num_samples: Number of samples to generate
+            method: Sampling method ("geodesic", "enhanced", "basic", "standard")
+            sampler_type: Sampler type ("working", "hmc", "official")
+            **kwargs: Additional generation parameters
+            
+        Returns:
+            Dictionary containing generated images and metadata
+        """
+        from src.generation.generator import GenerationConfig
+        
+        generator = self.create_generator()
+        config = GenerationConfig(
+            num_samples=num_samples,
+            sampling_method=method,
+            sampler_type=sampler_type,
+            **kwargs
+        )
+        
+        return generator.generate_from_prior(config)
+    
+    def compute_fid_score(self, real_images: torch.Tensor, num_generated: int = 1000,
+                         cache_key: str = "evaluation", **kwargs) -> Dict[str, float]:
+        """
+        Compute FID score against real images.
+        
+        Args:
+            real_images: Real images for comparison [N, C, H, W]
+            num_generated: Number of samples to generate for FID computation
+            cache_key: Cache key for real image statistics
+            **kwargs: Additional generation parameters
+            
+        Returns:
+            Dictionary containing FID score and related metrics
+        """
+        from src.evaluation.fid_scorer import create_fid_scorer
+        from src.generation.generator import GenerationConfig
+        
+        # Initialize FID scorer
+        fid_scorer = create_fid_scorer(device=self.device)
+        
+        # Cache real statistics
+        fid_scorer.cache_real_statistics(real_images, cache_key)
+        
+        # Generate samples
+        generator = self.create_generator()
+        config = GenerationConfig(
+            num_samples=num_generated,
+            sequence_length=1,  # Single images for FID
+            **kwargs
+        )
+        
+        generation_result = generator.generate_from_prior(config)
+        generated_images = generation_result['images']
+        
+        # Remove sequence dimension if present
+        if generated_images.dim() == 5:
+            # If shape is [B, S, C, H, W], flatten to [B*S, C, H, W]
+            if generated_images.shape[1] == 1:
+                generated_images = generated_images[:, 0]
+            else:
+                B, S, C, H, W = generated_images.shape
+                generated_images = generated_images.reshape(B * S, C, H, W)
+        
+        # Compute FID
+        fid_result = fid_scorer.evaluate_with_cached_real(generated_images, cache_key)
+        
+        return fid_result
+    
+    def evaluate_reconstruction(self, test_images: torch.Tensor,
+                              batch_size: int = 32) -> Dict[str, Any]:
+        """
+        Evaluate reconstruction quality on test images.
+        
+        Args:
+            test_images: Test images [N, C, H, W]
+            batch_size: Batch size for processing
+            
+        Returns:
+            Dictionary containing reconstruction metrics
+        """
+        from src.inference.inference_pipeline import InferenceConfig
+        
+        inference_pipeline = self.create_inference_pipeline()
+        config = InferenceConfig(batch_size=batch_size, return_uncertainties=True)
+        
+        result = inference_pipeline.encode_and_reconstruct(test_images, config)
+        
+        return {
+            'reconstruction_metrics': result['reconstruction_metrics'],
+            'latent_statistics': {
+                'mean_norm': torch.norm(result['latents'], dim=-1).mean().item(),
+                'std_norm': torch.norm(result['latents'], dim=-1).std().item(),
+            },
+            'uncertainty_analysis': result.get('uncertainties'),
+        }
+    
+    def comprehensive_evaluation(self, real_images: torch.Tensor,
+                               **kwargs) -> Dict[str, Any]:
+        """
+        Perform comprehensive evaluation of the model.
+        
+        Args:
+            real_images: Real images for evaluation [N, C, H, W]
+            **kwargs: Additional evaluation parameters
+            
+        Returns:
+            Complete evaluation results
+        """
+        from src.evaluation.evaluator import EvaluationConfig
+        
+        evaluator = self.create_evaluator()
+        config = EvaluationConfig(**kwargs)
+        
+        return evaluator.evaluate_comprehensive(real_images, config)
+
+    def decode(self, z):
+        """
+        Decode latent vectors z into images using the model's decoder.
+        Args:
+            z: Tensor of shape (N, latent_dim)
+        Returns:
+            Decoded images as a tensor
+        """
+        return self.decoder(z)
 
 
 class ModelFactory:

@@ -22,13 +22,12 @@ trainer:
 # Data parameters
 data:
   batch_size: 16
-  num_workers: 16
+  num_workers: 4
   pin_memory: true
 
 # Model parameters
 model:
   latent_dim: 32
-  n_flows: 8
   beta: 1.0
   riemannian_beta: 0.1
   posterior:

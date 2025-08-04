@@ -44,7 +44,16 @@ class FlowAnalysisVisualizations(BaseVisualization):
             self.model.eval()
             with torch.no_grad():
                 result = self.model_forward(x_sample)
-                z_seq = result['latent_samples'] if isinstance(result, dict) else result.z
+                # Handle both dict format and ModelOutput format
+                if isinstance(result, dict):
+                    z_seq = result.get('latent_samples', result.get('z', None))
+                else:
+                    # ModelOutput object
+                    z_seq = result.z if hasattr(result, 'z') else None
+                
+                if z_seq is None:
+                    print("⚠️ Could not extract latent samples from model output")
+                    return
                 
                 batch_size, n_obs, latent_dim = z_seq.shape
                 
@@ -82,7 +91,16 @@ class FlowAnalysisVisualizations(BaseVisualization):
             self.model.eval()
             with torch.no_grad():
                 result = self.model_forward(x_sample)
-                z_seq = result['latent_samples'] if isinstance(result, dict) else result.z
+                # Handle both dict format and ModelOutput format
+                if isinstance(result, dict):
+                    z_seq = result.get('latent_samples', result.get('z', None))
+                else:
+                    # ModelOutput object
+                    z_seq = result.z if hasattr(result, 'z') else None
+                
+                if z_seq is None:
+                    print("⚠️ Could not extract latent samples from model output")
+                    return
                 
                 # Compute enhanced flow metrics
                 print("🔬 Computing enhanced Jacobian metrics...")
@@ -589,7 +607,16 @@ class FlowAnalysisVisualizations(BaseVisualization):
             self.model.eval()
             with torch.no_grad():
                 result = self.model_forward(x_sample)
-                z_seq = result['latent_samples'] if isinstance(result, dict) else result.z
+                # Handle both dict format and ModelOutput format
+                if isinstance(result, dict):
+                    z_seq = result.get('latent_samples', result.get('z', None))
+                else:
+                    # ModelOutput object
+                    z_seq = result.z if hasattr(result, 'z') else None
+                
+                if z_seq is None:
+                    print("⚠️ Could not extract latent samples from model output")
+                    return
                 
                 # Compute det(G) evolution
                 det_G_seq = self._compute_flow_evolved_det_G(z_seq)

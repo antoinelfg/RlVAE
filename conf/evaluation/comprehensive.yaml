@@ -1,0 +1,67 @@
+# @package evaluation
+
+# Comprehensive Evaluation Configuration 
+# Full analysis with all features enabled for research-quality evaluation
+
+# Enable/disable evaluation components
+enabled: true
+run_during_training: true   # Run during training for monitoring
+run_during_testing: true
+run_at_end_only: false     # Run throughout training
+
+# FID Score Configuration (comprehensive)
+fid:
+  enabled: true
+  n_generated_samples: 2000   # More samples for accurate FID
+  batch_size: 50
+  inception_batch_size: 64
+  real_samples_subset: 5000   # Larger subset for better statistics
+  cache_real_stats: true
+
+# Generation Configuration (comprehensive)
+generation:
+  enabled: true
+  methods: ["geodesic", "enhanced", "basic", "standard"]  # All methods
+  n_samples_per_method: 200   # More samples per method
+  comprehensive_n_samples: 1000  # Large final evaluation
+  batch_size: 32
+  save_samples: true          # Save for analysis
+
+# Reconstruction Evaluation (comprehensive)
+reconstruction:
+  enabled: true
+  n_test_samples: 500         # More samples
+  metrics: ["mse", "psnr", "ssim", "l1"]  # All metrics
+  save_reconstructions: true  # Save for visual inspection
+
+# Inference Pipeline Evaluation (comprehensive)
+inference:
+  enabled: true
+  n_samples: 200             # More samples
+  analyze_geometry: true     # Full geometric analysis
+  compute_effective_dim: true
+
+# Performance Benchmarking (enabled)
+benchmarking:
+  enabled: true              # Enable for performance analysis
+  generation_trials: 10      # More trials for accuracy
+  inference_trials: 10
+
+# Output Configuration
+output:
+  save_detailed_results: true  # Save everything
+  log_to_wandb: true
+  create_summary_plot: true    # Create comprehensive plots
+  save_generated_grid: true
+
+# Memory Management
+memory:
+  max_batch_size: 64
+  enable_cleanup: true
+  use_cpu_offload: false
+
+# Frequency Configuration (more frequent evaluation)
+frequency:
+  every_n_epochs: 3          # More frequent evaluation
+  at_epochs: [1, 5, 10, 20, 50]  # Key epochs
+  min_epoch: 1               # Start early 

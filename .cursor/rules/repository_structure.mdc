@@ -1,0 +1,5 @@
+---
+alwaysApply: true
+---
+
+Always respect and maintain the established repository structure and file organization. Ensure that all new files, modules, scripts, and documentation are placed in the correct, intended directories (e.g., models in src/models/, configs in conf/, visualizations in src/visualizations/, tests in tests/, etc.). Do not create new top-level folders or place files in ad-hoc locations. If unsure about the correct location, ask the user for guidance before proceeding. See [CURSOR_RULES.md](mdc:CURSOR_RULES.md) rule 12.

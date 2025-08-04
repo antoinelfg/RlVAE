@@ -1,0 +1,83 @@
+# @package evaluation
+
+# Minimal Evaluation Configuration for Quick Testing
+# Reduced computational requirements for fast development
+
+# Enable/disable evaluation components
+enabled: true
+run_during_training: false
+run_during_testing: true
+run_at_end_only: true
+
+# FID Score Configuration (reduced)
+fid:
+  enabled: true
+  compute_fid: true
+  n_generated_samples: 500    # Fewer samples for speed
+  n_real_samples: 1000       # Added to fix missing key error
+  batch_size: 32
+  inception_batch_size: 32
+  real_samples_subset: 1000   # Smaller subset
+  cache_real_stats: true
+  fid_cache_dir: data/fid_cache
+  real_data_cache_key: evaluation
+  fid_batch_size: 32
+sampler_types: ["working"]
+generation_methods: ["geodesic"]
+analyze_latent_space: false
+n_reconstruction_samples: 100
+reconstruction_batch_size: 32
+interpolation_methods: ["linear"]
+n_interpolations: 5
+interpolation_steps: 10
+measure_timing: false
+memory_profiling: false
+save_results: false
+results_dir: results/evaluation
+save_visualizations: false
+
+# Generation Configuration (reduced)
+generation:
+  enabled: true
+  methods: ["geodesic"]       # Only test best method
+  n_samples_per_method: 50    # Fewer samples
+  comprehensive_n_samples: 200
+  batch_size: 32
+  save_samples: false         # Don't save to speed up
+
+# Reconstruction Evaluation (reduced)
+reconstruction:
+  enabled: true
+  n_test_samples: 100         # Fewer samples
+  metrics: ["mse", "psnr"]    # Only essential metrics
+  save_reconstructions: false
+
+# Inference Pipeline Evaluation (reduced)
+inference:
+  enabled: true
+  n_samples: 50               # Fewer samples
+  analyze_geometry: false     # Skip expensive analysis
+  compute_effective_dim: true
+
+# Performance Benchmarking (disabled)
+benchmarking:
+  enabled: false
+
+# Output Configuration
+output:
+  save_detailed_results: false  # Skip detailed saves
+  log_to_wandb: true
+  create_summary_plot: false    # Skip plots for speed
+  save_generated_grid: false
+
+# Memory Management
+memory:
+  max_batch_size: 32
+  enable_cleanup: true
+  use_cpu_offload: false
+
+# Frequency Configuration
+frequency:
+  every_n_epochs: 10
+  at_epochs: []
+  min_epoch: 20 

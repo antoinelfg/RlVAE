@@ -1,0 +1,23 @@
+# @package generation
+
+# Generation Configuration for Modular RlVAE
+# Defines how to generate samples for evaluation, visualization, and FID
+
+enabled: true
+methods: ["geodesic", "enhanced", "basic", "standard"]  # Supported sampling methods
+sampler_type: "working"  # working, hmc, official
+num_samples: 1000         # Number of samples to generate
+batch_size: 32            # Batch size for generation
+sequence_length: 1        # Sequence length for temporal generation
+use_flows: true           # Use flows for sequence generation
+flow_steps: null          # Override number of flow steps (null = model default)
+temperature: 1.0          # Temperature for prior sampling
+noise_scale: 0.1          # Noise scale for prior sampling
+output_format: "tensor"  # Output format: tensor, numpy, pil
+normalize_output: true    # Normalize output images to [0, 1]
+clamp_output: true        # Clamp output images to [0, 1]
+max_batch_size: 32        # Max batch size for memory management
+clear_cache: true         # Clear CUDA cache after each batch
+save_samples: true        # Save generated samples to disk
+save_grid: true           # Save grid of generated samples
+log_to_wandb: true        # Log generated samples and metrics to WandB 

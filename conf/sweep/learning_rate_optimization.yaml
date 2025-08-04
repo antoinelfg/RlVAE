@@ -79,4 +79,4 @@ parameters_fixed:
   seed: 42
   
   # Visualization (only at beginning and end)
-  visualization: "final_only" 
+  visualization: "end_only" 

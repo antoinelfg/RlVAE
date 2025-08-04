@@ -1,0 +1,60 @@
+# @package experiment
+
+# Colored Circles Full Pipeline (MLP, latent_dim=2, no trainable metric)
+
+skip_stage1: false
+
+type: "pipeline"
+name: "pipeline_colored_circles_mlp2d"
+description: "Full pipeline: vanilla VAE (MLP, ld=2) on colored circles, then RLVAE (MLP, ld=2), no trainable metric. Sequence length 10."
+
+# Stage 1: Vanilla VAE
+stage1:
+  batch_size: 64
+  model: vanilla_vae
+  training:
+    full_data:
+      batch_size: 64
+  data: colored_circles
+  visualization: minimal
+  extract_diverse_metric: true
+  architecture: mlp
+  latent_dim: 2
+  epochs: 100
+  temperature: 0.5
+  regularization: 0.01
+  preset: balanced
+  sequence_length: 10
+  # No trainable metric
+
+# Stage 2: RLVAE (MLP)
+stage2:
+  batch_size: 64
+  model: mlp_rlvae
+  training:
+    full_data:
+      batch_size: 64
+  data: colored_circles
+  visualization: standard
+  epochs: 100
+  latent_dim: 2
+  # Pretrained components will be loaded from stage 1 outputs
+  load_pretrained_from_stage1: true
+  sequence_length: 10
+  # No trainable metric
+
+# Logging
+log_level: "INFO"
+log_to_file: true
+
+deterministic: true
+benchmark: false
+
+visualization:
+  sequence_viz_count: 32
+  cluster_sequences: true
+  n_clusters: 5
+  cluster_coloring: true
+  show_cluster_centroids: true
+
+batch_size: 64 

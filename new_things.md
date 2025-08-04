@@ -1,0 +1,6 @@
+- Added clamping of flow outputs to [-10, 10] in `src/models/components/flow_manager.py` (`FlowManager.apply_flows`).
+  - Rationale: Prevents numerical explosions and instability in latent trajectories and flow outputs.
+  - All flow outputs are now clamped after each flow application.
+- Added latent variance regularization (diversity loss) in `src/training/lightning_trainer.py` training_step.
+  - Rationale: Encourages diversity in the latent space after flows, helps prevent collapse to a line or point.
+  - A small negative variance term is added to the loss (default weight: 0.05). 

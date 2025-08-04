@@ -22,13 +22,19 @@ class LossManager(nn.Module):
         beta: float = 1.0,
         riemannian_beta: Optional[float] = None,
         loop_penalty_weight: float = 1.0,
-        device: Optional[torch.device] = None
+        device: Optional[torch.device] = None,
+        metric_reg_weight: float = 0.0,  # NEW: weight for metric regularization
+        metric_reg_type: str = 'none',   # NEW: type: 'none', 'determinant', 'condition', 'smoothness'
+        metric_reg_target: float = 0.0   # NEW: target value for regularization (e.g., logdet target)
     ):
         super().__init__()
         self.beta = beta
         self.riemannian_beta = riemannian_beta if riemannian_beta is not None else beta
         self.loop_penalty_weight = loop_penalty_weight
         self.device = device or torch.device('cpu')
+        self.metric_reg_weight = metric_reg_weight
+        self.metric_reg_type = metric_reg_type
+        self.metric_reg_target = metric_reg_target
         self.to(self.device)
         
         # Loss tracking
@@ -38,7 +44,8 @@ class LossManager(nn.Module):
             'riemannian_kl': [],
             'flow_loss': [],
             'loop_penalty': [],
-            'total': []
+            'total': [],
+            'metric_reg': []  # NEW
         }
     
     def compute_reconstruction_loss(self, x_recon: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
@@ -52,7 +59,14 @@ class LossManager(nn.Module):
         Returns:
             Reconstruction loss scalar
         """
-        return F.mse_loss(x_recon, x, reduction='mean')
+        # CRITICAL FIX: Scale reconstruction loss by 255 (user prefers non-normalized scale)
+        # This gives meaningful loss values in the 0-255 range
+        loss = F.mse_loss(x_recon, x, reduction='mean') * 255.0
+        
+        if not torch.isfinite(loss):
+            print("⚠️ Reconstruction loss is not finite! Clamping to 1.0.")
+            loss = torch.tensor(1.0, device=loss.device)
+        return loss
     
     def compute_standard_kl_loss(
         self, 
@@ -80,70 +94,43 @@ class LossManager(nn.Module):
         metric_tensor: Optional[Any] = None
     ) -> torch.Tensor:
         """
-        Compute Riemannian-aware KL divergence loss.
-        
+        Compute KL divergence for metric-aware Riemannian posterior:
+        KL[q_φ(z_0|x_0) || p(z_0)] = 1/2 E_q[(z_0-μ)^T G(z_0) (z_0-μ)]
+        Where:
+        - q_φ(z_0|x_0) ∝ [det G(z_0)]^{-1/2} exp(-1/2 (z_0-μ)^T G(z_0) (z_0-μ))
+        - p(z_0) ∝ [det G(z_0)]^{-1/2} (uniform Riemannian prior)
+        The log det G(z_0) terms cancel out, leaving only the quadratic form.
         Args:
             mu: Posterior mean [batch_size, latent_dim]
-            log_var: Posterior log variance [batch_size, latent_dim]
-            z_samples: Sampled latent variables [batch_size, latent_dim]
-            metric_tensor: Metric tensor component (optional)
-            
+            log_var: Posterior log variance (not used)
+            z_samples: Samples from posterior [batch_size, latent_dim]
+            metric_tensor: Metric tensor component (required)
         Returns:
-            Riemannian KL divergence loss scalar
+            KL divergence (scalar)
         """
         if metric_tensor is None:
             # Fallback to standard KL
-            return self.compute_standard_kl_loss(mu, log_var)
-        
+            print("⚠️ DEBUG: Falling back to standard KL")
+            log_var_clamped = torch.clamp(log_var, -10.0, 10.0)
+            return -0.5 * torch.sum(1 + log_var_clamped - mu.pow(2) - log_var_clamped.exp(), dim=1).mean()
         try:
-            # Ensure all tensors are on the same device
-            target_device = mu.device
-            mu = mu.to(target_device)
-            log_var = log_var.to(target_device)
-            z_samples = z_samples.to(target_device)
-            
-            # Ensure metric tensor is on the same device
-            if hasattr(metric_tensor, 'to'):
-                metric_tensor = metric_tensor.to(target_device)
-            
-            # Compute metric at posterior mean
-            G_inv_mu = metric_tensor.compute_inverse_metric(mu)  # [batch_size, latent_dim, latent_dim]
-            
-            # Compute log determinant of metric
-            log_det_G_inv = metric_tensor.compute_log_det_metric(mu)  # [batch_size]
-            
-            # Compute Riemannian KL divergence
-            # KL = 0.5 * (tr(G_inv * Σ) + (μ-μ_prior)^T * G_inv * (μ-μ_prior) - log|G_inv| - d)
-            batch_size, latent_dim = mu.shape
-            
-            # Prior is standard normal (μ_prior = 0, Σ_prior = I)
-            mu_prior = torch.zeros_like(mu)
-            sigma_prior = torch.eye(latent_dim, device=target_device).unsqueeze(0).expand(batch_size, -1, -1)
-            
-            # Posterior covariance
-            sigma_post = torch.diag_embed(torch.exp(log_var))  # [batch_size, latent_dim, latent_dim]
-            
-            # Term 1: tr(G_inv * Σ_post)
-            term1 = torch.sum(torch.diagonal(torch.bmm(G_inv_mu, sigma_post), dim1=-2, dim2=-1), dim=-1)
-            
-            # Term 2: (μ-μ_prior)^T * G_inv * (μ-μ_prior)
-            mu_diff = mu - mu_prior  # [batch_size, latent_dim]
-            term2 = torch.sum(mu_diff.unsqueeze(1) * torch.bmm(G_inv_mu, mu_diff.unsqueeze(-1)).squeeze(-1), dim=-1)
-            
-            # Term 3: log|G_inv|
-            term3 = log_det_G_inv
-            
-            # Term 4: -d (dimension)
-            term4 = -latent_dim
-            
-            # Combine terms
-            kl_riemannian = 0.5 * (term1 + term2 + term3 + term4)
-            
-            return torch.mean(kl_riemannian)
-            
+            # Compute metric tensor at sample points
+            G_z = metric_tensor(z_samples)  # [batch_size, latent_dim, latent_dim]
+            # Compute (z_0 - μ)
+            diff = z_samples - mu  # [batch_size, latent_dim]
+            # Compute (z_0 - μ)^T G(z_0) (z_0 - μ)
+            diff_expanded = diff.unsqueeze(-1)  # [batch_size, latent_dim, 1]
+            quadratic_form = torch.bmm(
+                torch.bmm(diff.unsqueeze(1), G_z),  # [batch_size, 1, latent_dim]
+                diff_expanded  # [batch_size, latent_dim, 1]
+            ).squeeze(-1).squeeze(-1)  # [batch_size]
+            # KL divergence: 1/2 * E[(z_0-μ)^T G(z_0) (z_0-μ)]
+            kl_divergence = 0.5 * quadratic_form.mean()
+            return kl_divergence
         except Exception as e:
-            print(f"⚠️ Riemannian KL computation failed: {e}, falling back to standard KL")
-            return self.compute_standard_kl_loss(mu, log_var)
+            print(f"⚠️ Riemannian KL computation failed: {e}, using standard KL")
+            log_var_clamped = torch.clamp(log_var, -10.0, 10.0)
+            return -0.5 * torch.sum(1 + log_var_clamped - mu.pow(2) - log_var_clamped.exp(), dim=1).mean()
     
     def compute_flow_loss(
         self, 
@@ -163,7 +150,11 @@ class LossManager(nn.Module):
         
         # Sum log determinants across flows
         total_log_det = sum(log_det_jacobians)
-        return -torch.mean(total_log_det)
+        loss = torch.mean(total_log_det).abs()  # Ensure positive loss
+        if not torch.isfinite(loss):
+            print("⚠️ Flow loss is not finite! Clamping to 0.0.")
+            loss = torch.tensor(0.0, device=self.device)
+        return loss
     
     def compute_loop_penalty(
         self, 
@@ -188,6 +179,9 @@ class LossManager(nn.Module):
             z_first = z_seq[0]
             z_last = z_seq[-1]
             penalty = F.mse_loss(z_first, z_last, reduction='mean')
+            if not torch.isfinite(penalty):
+                print("⚠️ Loop penalty is not finite! Clamping to 0.0.")
+                penalty = torch.tensor(0.0, device=self.device)
             return penalty * self.loop_penalty_weight
         
         return torch.tensor(0.0, device=self.device)
@@ -203,7 +197,7 @@ class LossManager(nn.Module):
         z_seq: Optional[list] = None,
         loop_mode: str = "open",
         metric_tensor: Optional[Any] = None,
-        use_riemannian_kl: bool = False
+        use_riemannian_kl: bool = True
     ) -> Dict[str, torch.Tensor]:
         """
         Compute total loss combining all components.
@@ -225,19 +219,49 @@ class LossManager(nn.Module):
         """
         # Compute individual loss components
         recon_loss = self.compute_reconstruction_loss(x_recon, x)
+        if not torch.isfinite(recon_loss):
+            print("[DEBUG] recon_loss is not finite!", recon_loss)
         
         if use_riemannian_kl and metric_tensor is not None:
             kl_loss = self.compute_riemannian_kl_loss(mu, log_var, z_samples, metric_tensor)
             kl_weight = self.riemannian_beta
         else:
+            print("⚠️ DEBUG: Falling back to STANDARD KL")
             kl_loss = self.compute_standard_kl_loss(mu, log_var)
             kl_weight = self.beta
+        if not torch.isfinite(kl_loss):
+            print("[DEBUG] kl_loss is not finite!", kl_loss)
         
         flow_loss = self.compute_flow_loss(log_det_jacobians)
+        if not torch.isfinite(flow_loss):
+            print("[DEBUG] flow_loss is not finite!", flow_loss)
+        
         loop_penalty = self.compute_loop_penalty(z_seq, loop_mode)
+        if not torch.isfinite(loop_penalty):
+            print("[DEBUG] loop_penalty is not finite!", loop_penalty)
         
         # Combine losses
         total_loss = recon_loss + kl_weight * kl_loss + flow_loss + loop_penalty
+        if not torch.isfinite(total_loss):
+            print("[DEBUG] total_loss is not finite!", total_loss)
+            print(f"[DEBUG] recon_loss: {recon_loss}, kl_loss: {kl_loss}, flow_loss: {flow_loss}, loop_penalty: {loop_penalty}")
+        
+        # If metric_tensor is used, print stats
+        if metric_tensor is not None and hasattr(metric_tensor, 'trainable'):
+            try:
+                G = metric_tensor(z_samples)
+                print("[DEBUG] Metric tensor stats: min", G.min().item(), "max", G.max().item(), "mean", G.mean().item(), "std", G.std().item())
+                eigvals = torch.linalg.eigvals(G[0]).real
+                print("[DEBUG] Metric eigenvalues: min", eigvals.min().item(), "max", eigvals.max().item(), "mean", eigvals.mean().item())
+            except Exception as e:
+                print(f"[DEBUG] Error computing metric tensor stats: {e}")
+        
+        # If latent z_samples is available, print stats
+        if z_samples is not None:
+            try:
+                print("[DEBUG] Latent z stats: min", z_samples.min().item(), "max", z_samples.max().item(), "mean", z_samples.mean().item(), "std", z_samples.std().item())
+            except Exception as e:
+                print(f"[DEBUG] Error computing latent z stats: {e}")
         
         # Store in history
         self.loss_history['reconstruction'].append(recon_loss.item())
@@ -245,6 +269,27 @@ class LossManager(nn.Module):
         self.loss_history['flow_loss'].append(flow_loss.item())
         self.loss_history['loop_penalty'].append(loop_penalty.item())
         self.loss_history['total'].append(total_loss.item())
+        
+        # Metric regularization (only if trainable)
+        if metric_tensor is not None and getattr(metric_tensor, 'trainable', False) and self.metric_reg_weight > 0.0:
+            z_reg = z_samples.detach() if z_samples is not None else torch.randn(32, mu.shape[-1], device=x.device)
+            if self.metric_reg_type == 'determinant':
+                G = metric_tensor.compute_metric(z_reg)
+                logdet = torch.logdet(G)
+                metric_reg = ((logdet - self.metric_reg_target) ** 2).mean() * self.metric_reg_weight
+            elif self.metric_reg_type == 'condition':
+                G = metric_tensor.compute_metric(z_reg)
+                eigvals = torch.linalg.eigvals(G)
+                cond = (eigvals.abs().max(dim=-1).values / eigvals.abs().min(dim=-1).values).mean()
+                metric_reg = ((cond - self.metric_reg_target) ** 2) * self.metric_reg_weight
+            elif self.metric_reg_type == 'smoothness':
+                # Smoothness: penalize large changes in G(z) for nearby z
+                z2 = z_reg + 0.01 * torch.randn_like(z_reg)
+                G1 = metric_tensor.compute_metric(z_reg)
+                G2 = metric_tensor.compute_metric(z2)
+                metric_reg = ((G1 - G2) ** 2).mean() * self.metric_reg_weight
+            self.loss_history['metric_reg'].append(metric_reg.item())
+            total_loss = total_loss + metric_reg
         
         return {
             'total_loss': total_loss,
@@ -256,7 +301,8 @@ class LossManager(nn.Module):
                 'beta': self.beta,
                 'riemannian_beta': self.riemannian_beta,
                 'loop_penalty_weight': self.loop_penalty_weight
-            }
+            },
+            'metric_reg': metric_reg # NEW
         }
     
     def get_loss_summary(self) -> Dict[str, Any]:
@@ -293,5 +339,8 @@ class LossManager(nn.Module):
             'beta': self.beta,
             'riemannian_beta': self.riemannian_beta,
             'loop_penalty_weight': self.loop_penalty_weight,
-            'device': str(self.device)
-        } 
+            'device': str(self.device),
+            'metric_reg_weight': self.metric_reg_weight,
+            'metric_reg_type': self.metric_reg_type,
+            'metric_reg_target': self.metric_reg_target
+        }

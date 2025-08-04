@@ -134,8 +134,8 @@ parameters_fixed:
   training.trainer.devices: 1
   training.data.num_workers: 4
   
-  # Visualization (only at beginning and end)
-  visualization: "final_only"
+  # Visualization (minimal for speed during sweeps)
+  visualization: "end_only"
   
   # Logging
   wandb.mode: "online"

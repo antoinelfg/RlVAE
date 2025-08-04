@@ -1,0 +1,6 @@
+---
+
+alwaysApply: true
+---
+
+When a code modification or creation task is set, first explain briefly in 3-5 lines what you will do, then perform the code modification. After modifying, explain in 3-5 lines what was solved/done and what to expect. See [CURSOR_RULES.md](mdc:CURSOR_RULES.md) rule 13.

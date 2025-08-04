@@ -35,13 +35,45 @@ loop:
   penalty: 5.0
 
 metric:
-  path: "metric_T0.7_scaled.pt"
+  # path: "metric_T0.7_scaled.pt"  # Only needed for fixed metric
   temperature_override: 3.0
+  trainable: false  # Set to true to use a trainable metric
+  architecture: "mlp"  # Options: "mlp", "resnet", "transformer"
+  arch_kwargs: {}
+  # To initialize the trainable metric from a fixed metric, set:
+  init_from_fixed: false  # Set to true to pretrain from fixed metric
+  fixed_metric_path: "data/pretrained/vanilla_metric.pt"  # Path to fixed metric file
+  # Example for resnet:
+  # architecture: "resnet"
+  # arch_kwargs:
+  #   hidden_dim: 128
+  #   n_blocks: 4
+  # Example for transformer:
+  # architecture: "transformer"
+  # arch_kwargs:
+  #   hidden_dim: 128
+  #   n_heads: 4
+  #   n_layers: 3
+  # Regularization options for trainable metric
+  metric_reg_weight: 0.0  # Set >0 to enable regularization
+  metric_reg_type: 'none'  # Options: 'none', 'determinant', 'condition', 'smoothness'
+  metric_reg_target: 0.0   # Target value for regularization (e.g., logdet or condition number)
+  # Example for determinant regularization:
+  # metric_reg_weight: 1.0
+  # metric_reg_type: 'determinant'
+  # metric_reg_target: 0.0  # Target logdet (e.g., 0 for unit volume)
+  # Example for condition number regularization:
+  # metric_reg_weight: 1.0
+  # metric_reg_type: 'condition'
+  # metric_reg_target: 10.0  # Target condition number
+  # Example for smoothness regularization:
+  # metric_reg_weight: 1.0
+  # metric_reg_type: 'smoothness'
 
 pretrained:
-  encoder_path: "data/pretrained/encoder.pt"
-  decoder_path: "data/pretrained/decoder.pt"
-  metric_path: "data/pretrained/${model.metric.path}"
+  encoder_path: data/pretrained/encoder_diverse_mlp_ld16_20250717_134643.pt
+  decoder_path: data/pretrained/decoder_diverse_mlp_ld16_20250717_134643.pt
+  metric_path: data/pretrained/metric_diverse_mlp_ld16_20250717_134647.pt
 
 visualization:
   level: advanced

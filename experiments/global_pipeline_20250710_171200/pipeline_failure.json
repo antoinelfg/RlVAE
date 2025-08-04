@@ -1,0 +1,11 @@
+{
+  "status": "failed",
+  "failure_time": "2025-07-10T17:12:06.514347",
+  "error": "Command '['/scratch/alaforgu/miniconda3/bin/python', 'src/training/train_with_modular_visualizations.py', '--loop_mode', 'open', '--latent_dim', '16', '--n_epochs', '10', '--batch_size', '16', '--learning_rate', '0.0003', '--n_train_samples', '1000', '--n_val_samples', '200', '--wandb_run_name', 'vanilla_vae_mlp_ld16_20250710_1712', '--wandb_project', 'global_rlvae_pipeline', '--visualization_level', 'standard', '--wandb_only', '--visualization_level', 'standard', '--wandb_only', '--metric_path', 'data/pretrained/metric_diverse_mlp_ld16_20250710_162034.pt']' returned non-zero exit status 1.",
+  "pipeline_config": {
+    "architecture": "mlp",
+    "latent_dim": 16,
+    "vae_epochs": 10,
+    "rlvae_epochs": 20
+  }
+}

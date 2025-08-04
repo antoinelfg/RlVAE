@@ -1,0 +1,76 @@
+{
+  "timestamp": "2025-07-10T16:37:52.180458",
+  "generation_methods_tested": [
+    "geodesic",
+    "enhanced",
+    "basic",
+    "standard"
+  ],
+  "successful_methods": [
+    "geodesic",
+    "enhanced",
+    "basic",
+    "standard"
+  ],
+  "fid_scores": {
+    "geodesic": 461.05830968542597,
+    "enhanced": 459.6354498215585,
+    "basic": 465.9472217148165,
+    "standard": 460.97499882806505
+  },
+  "best_fid_method": "enhanced",
+  "generation_stats": {
+    "geodesic": {
+      "num_samples": 32,
+      "image_shape": [
+        3,
+        64,
+        64
+      ],
+      "value_range": [
+        0.04555452987551689,
+        0.9224455952644348
+      ],
+      "mean_pixel_value": 0.4891124367713928
+    },
+    "enhanced": {
+      "num_samples": 32,
+      "image_shape": [
+        3,
+        64,
+        64
+      ],
+      "value_range": [
+        0.022083915770053864,
+        0.9939337372779846
+      ],
+      "mean_pixel_value": 0.5049856901168823
+    },
+    "basic": {
+      "num_samples": 32,
+      "image_shape": [
+        3,
+        64,
+        64
+      ],
+      "value_range": [
+        0.04478822648525238,
+        0.9679033160209656
+      ],
+      "mean_pixel_value": 0.5124053359031677
+    },
+    "standard": {
+      "num_samples": 32,
+      "image_shape": [
+        3,
+        64,
+        64
+      ],
+      "value_range": [
+        0.03609428554773331,
+        0.9084042310714722
+      ],
+      "mean_pixel_value": 0.48397645354270935
+    }
+  }
+}

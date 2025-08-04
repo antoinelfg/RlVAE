@@ -2695,3 +2695,162 @@ class InteractiveVisualizations(BaseVisualization):
                 )
         
         return arrows
+
+    def create_static_metric_heatmap(self, x_sample: torch.Tensor, epoch: int):
+        """
+        Create a highly accurate static heatmap of det(G) at t=0 using matplotlib.
+        Overlays all sequence points at t=0. Saves as a high-quality PNG.
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import torch
+        import os
+
+        print(f"🖼️ Creating static det(G) heatmap for t=0, epoch {epoch}")
+        self._ensure_model_on_device()
+        self.model.eval()
+        with torch.no_grad():
+            result = self.model_forward(x_sample)
+            z_seq = result['latent_samples'] if isinstance(result, dict) else result.z  # [batch_size, n_obs, latent_dim]
+            batch_size, n_obs, latent_dim = z_seq.shape
+            if latent_dim != 2:
+                print("[ERROR] Static metric heatmap only implemented for 2D latent space.")
+                return
+            # Use PCA if latent space is not already 2D (should be 2D here)
+            z_t0 = z_seq[:, 0, :].cpu().numpy()  # All sequences at t=0
+            # Define grid over latent space
+            margin = 0.5
+            x_min, x_max = z_t0[:, 0].min() - margin, z_t0[:, 0].max() + margin
+            y_min, y_max = z_t0[:, 1].min() - margin, z_t0[:, 1].max() + margin
+            nx, ny = 200, 200  # Dense grid
+            xx, yy = np.meshgrid(np.linspace(x_min, x_max, nx), np.linspace(y_min, y_max, ny))
+            grid_points = np.column_stack([xx.ravel(), yy.ravel()])
+            grid_tensor = torch.tensor(grid_points, dtype=torch.float32, device=self.device)
+            # Compute metric tensor and det(G)
+            try:
+                G_grid = self.model.G(grid_tensor)  # [N, 2, 2]
+                det_G = torch.linalg.det(G_grid).cpu().numpy().reshape(xx.shape)
+            except Exception as e:
+                print(f"[ERROR] Failed to compute metric tensor: {e}")
+                return
+            # Plot
+            fig, ax = plt.subplots(figsize=(8, 7))
+            im = ax.imshow(
+                np.log10(np.clip(det_G, 1e-10, None)),
+                extent=[x_min, x_max, y_min, y_max],
+                origin='lower',
+                aspect='auto',
+                cmap='viridis'
+            )
+            cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            cbar.set_label(r'log$_{10}$ det(G)', fontsize=14)
+            # Overlay all sequence points at t=0
+            ax.scatter(z_t0[:, 0], z_t0[:, 1], c='red', s=18, edgecolor='white', linewidth=0.7, alpha=0.9, label='t=0 points')
+            ax.set_xlabel('Latent dim 1', fontsize=13)
+            ax.set_ylabel('Latent dim 2', fontsize=13)
+            ax.set_title(f'det(G) Heatmap at t=0 (Epoch {epoch})', fontsize=15)
+            ax.legend(loc='upper right', fontsize=11)
+            plt.tight_layout()
+            # Save
+            out_dir = self._get_output_path('', 'static_metric_heatmap')
+            os.makedirs(out_dir, exist_ok=True)
+            out_path = os.path.join(out_dir, f'static_metric_heatmap_t0_epoch_{epoch}.png')
+            plt.savefig(out_path, dpi=200)
+            plt.close(fig)
+            print(f"💾 Saved static metric heatmap: {out_path}")
+            # Optionally log to WandB
+            if self.should_log_to_wandb():
+                import wandb
+                wandb.log({"static_metric_heatmap_t0": wandb.Image(out_path)})
+
+    def create_static_metric_heatmap_timesteps(self, x_sample: torch.Tensor, epoch: int):
+        """
+        Create a grid of det(G) heatmaps for 50% of the timesteps (evenly spaced),
+        overlaying all sequence points at each timestep, with fixed axis and color scale.
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import torch
+        import os
+        print(f"🖼️ Creating static det(G) heatmaps for multiple timesteps, epoch {epoch}")
+        self._ensure_model_on_device()
+        self.model.eval()
+        with torch.no_grad():
+            result = self.model_forward(x_sample)
+            z_seq = result['latent_samples'] if isinstance(result, dict) else result.z  # [batch_size, n_obs, latent_dim]
+            batch_size, n_obs, latent_dim = z_seq.shape
+            if latent_dim != 2:
+                print("[ERROR] Static metric heatmap only implemented for 2D latent space.")
+                return
+            z_seq_np = z_seq.cpu().numpy()  # [batch, n_obs, 2]
+            # Select 50% of timesteps, evenly spaced
+            num_plots = max(2, n_obs // 2)
+            timesteps = np.linspace(0, n_obs-1, num=num_plots, dtype=int)
+            # Compute tight axis limits across all points
+            all_points = z_seq_np[:, timesteps, :].reshape(-1, 2)
+            margin = 0.5
+            x_min, x_max = all_points[:, 0].min() - margin, all_points[:, 0].max() + margin
+            y_min, y_max = all_points[:, 1].min() - margin, all_points[:, 1].max() + margin
+            nx, ny = 200, 200  # Dense grid
+            xx, yy = np.meshgrid(np.linspace(x_min, x_max, nx), np.linspace(y_min, y_max, ny))
+            grid_points = np.column_stack([xx.ravel(), yy.ravel()])
+            grid_tensor = torch.tensor(grid_points, dtype=torch.float32, device=self.device)
+            # Compute det(G) for each selected timestep
+            detG_grids = []
+            points_per_t = []
+            for t in timesteps:
+                try:
+                    G_grid = self.model.G(grid_tensor)  # [N, 2, 2]
+                    det_G = torch.linalg.det(G_grid).cpu().numpy().reshape(xx.shape)
+                except Exception as e:
+                    print(f"[ERROR] Failed to compute metric tensor at t={t}: {e}")
+                    det_G = np.ones(xx.shape)
+                detG_grids.append(det_G)
+                points_per_t.append(z_seq_np[:, t, :])
+            # Compute global color scale (log10)
+            all_log_detG = np.log10(np.clip(np.stack(detG_grids), 1e-10, None)).flatten()
+            vmin, vmax = np.percentile(all_log_detG, [1, 99])  # Nuanced, ignore outliers
+            # Plot
+            ncols = min(5, num_plots)
+            nrows = int(np.ceil(num_plots / ncols))
+            fig, axes = plt.subplots(nrows, ncols, figsize=(5*ncols, 4.5*nrows), squeeze=False)
+            for i, (t, det_G, pts) in enumerate(zip(timesteps, detG_grids, points_per_t)):
+                row, col = divmod(i, ncols)
+                ax = axes[row, col]
+                im = ax.imshow(
+                    np.log10(np.clip(det_G, 1e-10, None)),
+                    extent=[x_min, x_max, y_min, y_max],
+                    origin='lower',
+                    aspect='auto',
+                    cmap='viridis',
+                    vmin=vmin, vmax=vmax
+                )
+                ax.scatter(pts[:, 0], pts[:, 1], c='red', s=18, edgecolor='white', linewidth=0.7, alpha=0.9, label=f't={t} points')
+                ax.set_title(f't={t}', fontsize=13)
+                ax.set_xlim(x_min, x_max)
+                ax.set_ylim(y_min, y_max)
+                if row == nrows-1:
+                    ax.set_xlabel('Latent dim 1', fontsize=12)
+                if col == 0:
+                    ax.set_ylabel('Latent dim 2', fontsize=12)
+                ax.legend(loc='upper right', fontsize=9)
+            # Remove empty subplots
+            for j in range(i+1, nrows*ncols):
+                row, col = divmod(j, ncols)
+                fig.delaxes(axes[row, col])
+            # Add a single colorbar
+            cbar = fig.colorbar(im, ax=axes, orientation='vertical', fraction=0.02, pad=0.03)
+            cbar.set_label(r'log$_{10}$ det(G)', fontsize=14)
+            plt.suptitle(f'det(G) Heatmaps at Selected Timesteps (Epoch {epoch})', fontsize=16)
+            plt.tight_layout(rect=[0, 0.03, 1, 0.97])
+            # Save
+            out_dir = self._get_output_path('', 'static_metric_heatmap')
+            os.makedirs(out_dir, exist_ok=True)
+            out_path = os.path.join(out_dir, f'static_metric_heatmap_timesteps_epoch_{epoch}.png')
+            plt.savefig(out_path, dpi=200)
+            plt.close(fig)
+            print(f"💾 Saved static metric heatmap grid: {out_path}")
+            # Optionally log to WandB
+            if self.should_log_to_wandb():
+                import wandb
+                wandb.log({"static_metric_heatmap_timesteps": wandb.Image(out_path)})

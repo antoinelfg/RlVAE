@@ -1,0 +1,30 @@
+# @package experiment
+
+type: single
+name: rlvae_gaussian_single
+
+data: colored_circles
+
+# RlVAE experiment with standard Gaussian prior (no learned metric)
+
+model: mlp_rlvae
+
+pretrained:
+  encoder_path: <FILL_IN_ENCODER_PATH>
+  decoder_path: <FILL_IN_DECODER_PATH>
+  metric_path: null  # Use null or remove for Gaussian prior
+
+metric:
+  trainable: false
+
+# Set Gaussian prior/posterior
+posterior:
+  type: gaussian
+sampling:
+  use_riemannian: false
+
+training:
+  optimizer:
+    lr: 1e-3
+    weight_decay: 1e-5
+  epochs: 100 

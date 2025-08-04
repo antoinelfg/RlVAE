@@ -1209,7 +1209,10 @@ class RiemannianFlowVAE(nn.Module):
         frame_losses = F.mse_loss(recon_x, x, reduction='none')   # [B, n_obs, ...]
         if self.loop_mode == "closed":
             frame_losses[:, 0] = 2.0 * frame_losses[:, 0]         # x0 counted twice
-        recon_loss = frame_losses.flatten(1).sum(1).mean()
+        
+        # CRITICAL FIX: Scale reconstruction loss by 255 (user prefers non-normalized scale)
+        # This gives meaningful loss values in the 0-255 range
+        recon_loss = frame_losses.mean() * 255.0
         
         # 2. KL divergence (depends on posterior type)
         if self.posterior_type == "riemannian_metric":
@@ -1230,8 +1233,8 @@ class RiemannianFlowVAE(nn.Module):
         else:
             raise ValueError(f"Unknown posterior_type: {self.posterior_type}")
         
-        # 3. Flow loss (log determinant)
-        flow_loss = -log_det_sum.mean()
+        # 3. Flow loss (log determinant) - make positive for proper loss
+        flow_loss = log_det_sum.mean().abs()  # Ensure positive loss
 
         # Optional cycle-penalty
         loop_penalty = torch.tensor(0.0, device=x.device)

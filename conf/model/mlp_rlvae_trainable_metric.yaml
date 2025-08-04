@@ -1,0 +1,47 @@
+# @package model
+
+_target_: models.modular_rlvae.ModularRiemannianFlowVAE
+
+input_dim: [3, 64, 64]
+latent_dim: 16
+n_flows: 8
+flow_hidden_size: 256
+flow_n_blocks: 2
+flow_n_hidden: 1
+epsilon: 1e-6
+
+encoder:
+  architecture: "mlp"
+  hidden_dims: [1024, 512, 256]
+  dropout: 0.1
+
+decoder:
+  architecture: "mlp"
+  hidden_dims: [256, 512, 1024]
+  dropout: 0.1
+
+beta: 1.0
+riemannian_beta: 8.0
+
+posterior:
+  type: "riemannian_metric"
+
+sampling:
+  method: "geodesic"
+  use_riemannian: true
+
+loop:
+  mode: "open"
+  penalty: 5.0
+
+metric:
+  trainable: true
+  architecture: resnet
+  arch_kwargs:
+    hidden_dim: 128
+    n_blocks: 4
+  init_from_fixed: true
+  fixed_metric_path: data/pretrained/metric_diverse_mlp_ld16_20250717_134647.pt
+  metric_reg_weight: 1.0
+  metric_reg_type: condition
+  metric_reg_target: 10.0 

@@ -174,7 +174,7 @@ class SweepRunner:
         # This function will be called by the WandB agent
         # with different hyperparameter configurations
         
-        # Initialize WandB run with extended timeout
+        # Initialize WandB run with extended timeout for the sweep
         run = wandb.init(settings=wandb.Settings(init_timeout=300))
         
         # Get hyperparameters from WandB
@@ -240,7 +240,16 @@ class SweepRunner:
             # Always use pipeline experiment
             overrides.append("experiment=global_vanilla_rlvae_pipeline")
             
+            # CRITICAL FIX: Disable WandB in subprocess to avoid double initialization
+            overrides.append("wandb.mode=disabled")
+            
             logger.info(f"🔧 Hydra overrides: {overrides}")
+            
+            # Create environment for subprocess - inherit current env but add sweep info
+            env = os.environ.copy()
+            # Let the subprocess know it's running in a sweep context
+            env['WANDB_RUN_GROUP'] = f"sweep_{self.sweep_id}"
+            env['WANDB_JOB_TYPE'] = "sweep_run"
             
             # Run the experiment using subprocess to avoid Hydra conflicts
             cmd = [
@@ -252,6 +261,7 @@ class SweepRunner:
             result = subprocess.run(
                 cmd,
                 cwd=project_root,
+                env=env,  # Pass the modified environment
                 capture_output=True,
                 text=True,
                 timeout=3600  # 1 hour timeout
@@ -259,13 +269,120 @@ class SweepRunner:
             
             if result.returncode == 0:
                 logger.info("✅ Experiment completed successfully")
+                
+                # Parse metrics from subprocess output with improved patterns
+                output_lines = result.stdout.split('\n')
+                metrics = {}
+                
+                logger.info("🔍 Parsing metrics from subprocess output...")
+                
+                for line in output_lines:
+                    line = line.strip()
+                    
+                    # Lightning trainer validation metrics (these are most reliable)
+                    if 'val_loss=' in line and 'epoch=' in line:
+                        try:
+                            # Parse Lightning progress bar output like: "Epoch 49: 100%|██| 12/12 [00:XX<00:00,  X.XXit/s, train_loss=X.XXX, val_loss=X.XXX]"
+                            import re
+                            val_loss_match = re.search(r'val_loss=([0-9.]+)', line)
+                            train_loss_match = re.search(r'train_loss=([0-9.]+)', line)
+                            epoch_match = re.search(r'epoch=([0-9]+)', line)
+                            
+                            if val_loss_match:
+                                metrics['val_loss'] = float(val_loss_match.group(1))
+                            if train_loss_match:
+                                metrics['train_loss'] = float(train_loss_match.group(1))
+                            if epoch_match:
+                                metrics['epoch'] = int(epoch_match.group(1))
+                        except (ValueError, AttributeError) as e:
+                            logger.debug(f"Failed to parse Lightning progress line: {e}")
+                    
+                    # Test results (final evaluation)
+                    elif 'test_loss' in line.lower() or 'test results' in line.lower():
+                        try:
+                            import re
+                            test_loss_match = re.search(r'(?:test_loss|test/loss)[:\s=]+([0-9.]+)', line, re.IGNORECASE)
+                            if test_loss_match:
+                                metrics['test_loss'] = float(test_loss_match.group(1))
+                        except (ValueError, AttributeError) as e:
+                            logger.debug(f"Failed to parse test loss: {e}")
+                    
+                    # Pipeline stage completion messages
+                    elif '[Stage 1] Epoch' in line and 'Val Loss:' in line:
+                        try:
+                            # Parse: "[Stage 1] Epoch X/Y - Train Loss: X.XXXX | Val Loss: X.XXXX"
+                            import re
+                            val_loss_match = re.search(r'Val Loss:\s*([0-9.]+)', line)
+                            train_loss_match = re.search(r'Train Loss:\s*([0-9.]+)', line)
+                            if val_loss_match:
+                                metrics['stage1_val_loss'] = float(val_loss_match.group(1))
+                            if train_loss_match:
+                                metrics['stage1_train_loss'] = float(train_loss_match.group(1))
+                        except (ValueError, AttributeError) as e:
+                            logger.debug(f"Failed to parse stage 1 metrics: {e}")
+                    
+                    # Look for completion messages
+                    elif '✅' in line and ('completed' in line.lower() or 'finished' in line.lower()):
+                        logger.info(f"📋 Found completion message: {line}")
+                    
+                    # Log any error or warning messages for debugging
+                    elif any(marker in line for marker in ['❌', '⚠️', 'ERROR', 'WARNING', 'Failed']):
+                        logger.warning(f"⚠️ Found warning/error in output: {line}")
+                
+                # Also look for final summary metrics in a more general way
+                summary_section = False
+                for line in output_lines:
+                    line = line.strip()
+                    
+                    # Look for summary sections
+                    if 'experiment completed' in line.lower() or 'final' in line.lower():
+                        summary_section = True
+                    elif summary_section and any(keyword in line.lower() for keyword in ['loss:', 'accuracy:', 'mse:', 'mae:']):
+                        try:
+                            # Parse "metric_name: value" patterns
+                            import re
+                            metric_match = re.search(r'([a-zA-Z_]+):\s*([0-9.]+)', line)
+                            if metric_match:
+                                metric_name = metric_match.group(1).lower()
+                                metric_value = float(metric_match.group(2))
+                                if 'final' not in metric_name:
+                                    metric_name = f"final_{metric_name}"
+                                metrics[metric_name] = metric_value
+                        except (ValueError, AttributeError) as e:
+                            logger.debug(f"Failed to parse summary metric: {e}")
+                
+                # Add subprocess metadata
+                metrics['subprocess_returncode'] = 0
+                metrics['subprocess_success'] = True
+                
+                # Log metrics to the sweep run
+                if metrics:
+                    wandb.log(metrics)
+                    logger.info(f"📊 Logged {len(metrics)} metrics to sweep: {metrics}")
+                else:
+                    logger.warning("⚠️ No metrics found in subprocess output")
+                    logger.info("📝 First 20 lines of subprocess output for debugging:")
+                    for i, line in enumerate(output_lines[:20]):
+                        logger.info(f"  {i+1:2d}: {line}")
+                    
+                    # Log a basic success metric even if we can't parse specific metrics
+                    wandb.log({
+                        'subprocess_returncode': 0,
+                        'subprocess_success': True,
+                        'parsing_failed': True
+                    })
+                    
             else:
                 logger.error(f"❌ Experiment failed with return code {result.returncode}")
                 logger.error(f"STDOUT: {result.stdout}")
                 logger.error(f"STDERR: {result.stderr}")
                 
                 # Log error to WandB
-                wandb.log({"error": f"Experiment failed: {result.stderr}"})
+                wandb.log({
+                    "error": f"Experiment failed: {result.stderr}", 
+                    "returncode": result.returncode,
+                    "subprocess_success": False
+                })
                 
         except subprocess.TimeoutExpired:
             logger.error("⏰ Experiment timed out")
@@ -274,7 +391,7 @@ class SweepRunner:
         except Exception as e:
             logger.error(f"❌ Experiment error: {e}")
             wandb.log({"error": str(e)})
-        
+            
         finally:
             # Finish WandB run
             wandb.finish()
@@ -482,14 +599,17 @@ def main():
             sweep_id = runner.create_sweep()
             logger.info(f"🎯 Sweep created: {sweep_id}")
         
-        # Run sweep agents
-        if args.agent_count > 1:
-            runner.run_multiple_agents(
-                agent_count=args.agent_count,
-                runs_per_agent=args.max_runs
-            )
+        # Run sweep agents (skip for dry run)
+        if not args.dry_run:
+            if args.agent_count > 1:
+                runner.run_multiple_agents(
+                    agent_count=args.agent_count,
+                    runs_per_agent=args.max_runs
+                )
+            else:
+                runner.run_agent(count=args.max_runs)
         else:
-            runner.run_agent(count=args.max_runs)
+            logger.info("🧪 DRY RUN: Skipping agent execution")
         
         # Final status
         if not args.dry_run:

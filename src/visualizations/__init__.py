@@ -19,6 +19,7 @@ from .manifold import ManifoldVisualizations
 from .interactive import InteractiveVisualizations
 from .flow_analysis import FlowAnalysisVisualizations
 from .latent_dynamics import LatentDynamicsVisualizations
+from .manifold_evolution import ManifoldEvolutionVisualizations
 
 __all__ = [
     'VisualizationManager',
@@ -26,5 +27,6 @@ __all__ = [
     'ManifoldVisualizations', 
     'InteractiveVisualizations',
     'FlowAnalysisVisualizations',
-    'LatentDynamicsVisualizations'
+    'LatentDynamicsVisualizations',
+    'ManifoldEvolutionVisualizations'
 ] 

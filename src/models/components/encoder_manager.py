@@ -238,8 +238,24 @@ class EncoderManager(nn.Module):
         return self._create_mlp_encoder()
     
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """Forward pass through encoder."""
-        return self.encoder(x)
+        # Debug: Print input stats
+        print(f"[ENCODER DEBUG] Input shape: {x.shape}, min={x.min().item():.4f}, max={x.max().item():.4f}, mean={x.mean().item():.4f}, std={x.std().item():.4f}")
+        if torch.isnan(x).any() or torch.isinf(x).any():
+            print("[ENCODER DEBUG] Input contains NaN or Inf!")
+        # Warn if using MLP for image data
+        if self.architecture.lower() == "mlp" and (len(self.input_dim) == 3 and min(self.input_dim) > 1):
+            print("[ENCODER WARNING] Using MLP encoder for image data! This is likely suboptimal and may cause instability. Consider using 'cnn' or 'resnet'.")
+        output = self.encoder(x)
+        mu = output.embedding
+        log_var = output.log_covariance
+        # Debug: Print output stats
+        print(f"[ENCODER DEBUG] mu: min={mu.min().item():.4f}, max={mu.max().item():.4f}, mean={mu.mean().item():.4f}, std={mu.std().item():.4f}")
+        print(f"[ENCODER DEBUG] log_var: min={log_var.min().item():.4f}, max={log_var.max().item():.4f}, mean={log_var.mean().item():.4f}, std={log_var.std().item():.4f}")
+        if torch.isnan(mu).any() or torch.isinf(mu).any():
+            print("[ENCODER DEBUG] mu contains NaN or Inf!")
+        if torch.isnan(log_var).any() or torch.isinf(log_var).any():
+            print("[ENCODER DEBUG] log_var contains NaN or Inf!")
+        return output
     
     def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Encode input to latent space parameters."""

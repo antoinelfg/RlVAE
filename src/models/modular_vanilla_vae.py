@@ -157,10 +157,9 @@ class ModularVanillaVAE(nn.Module):
         # Decode
         recon_x = self.decode(z)
         
-        # Compute losses - scale to match original script loss scale
-        # Original script uses higher scale, so multiply by number of pixels per image
-        num_pixels = torch.prod(torch.tensor(x.shape[1:]))  # C * H * W
-        reconstruction_loss = F.mse_loss(recon_x, x, reduction='mean') * num_pixels
+        # Compute losses with 255 scaling (user prefers non-normalized scale)
+        # This gives meaningful loss values in the 0-255 range  
+        reconstruction_loss = F.mse_loss(recon_x, x, reduction='mean') * 255.0
         
         # KL divergence: -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
         kl_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=1).mean()

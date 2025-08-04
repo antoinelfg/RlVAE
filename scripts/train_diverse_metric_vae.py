@@ -113,24 +113,30 @@ def create_model(architecture: str, input_dim=(3, 64, 64), latent_dim=16):
     return model
 
 def extract_diverse_metric(model, architecture, latent_dim, temperature=0.5, regularization=0.01, 
-                          num_centroids=50, save_dir="data/pretrained"):
+                          num_centroids=50, save_dir="data/pretrained", input_dim=(3, 64, 64), data_path=None):
     """
     Extract metric with enhanced diversity parameters.
-    
     Args:
         temperature: Controls metric locality (higher = more diverse eigenvalues)
         regularization: Base regularization (lower = more diverse)
         latent_dim: Dimension of latent space
+        input_dim: Input dimension tuple (C, H, W)
+        data_path: Path to the dataset to use for metric extraction
     """
     print(f"Extracting DIVERSE metric with T={temperature}, λ={regularization}")
-    print(f"Architecture: {architecture}, Latent dim: {latent_dim}")
+    print(f"Architecture: {architecture}, Latent dim: {latent_dim}, Input dim: {input_dim}")
     
     device = next(model.parameters()).device
     model.eval()
     
-    # Create dataloader for metric extraction (timestep=0 only)
-    train_t0_dataset = SpritesDataset('data/processed/Sprites_train_cyclic.pt', 
-                                     normalize=False, timestep_only=0)
+    # Use the provided data_path or default to sprites
+    if data_path is None:
+        data_path = 'data/processed/Sprites_train_cyclic.pt'
+    train_t0_dataset = SpritesDataset(data_path, normalize=False, timestep_only=0)
+    # If the data shape does not match input_dim, reshape
+    if hasattr(train_t0_dataset, 'data') and train_t0_dataset.data.shape[1:] != input_dim:
+        print(f"[extract_diverse_metric] Reshaping data from {train_t0_dataset.data.shape[1:]} to {input_dim}")
+        train_t0_dataset.data = train_t0_dataset.data.reshape(-1, *input_dim)
     loader = DataLoader(train_t0_dataset, batch_size=256, shuffle=False)
     
     all_mus = []
@@ -533,7 +539,8 @@ def main():
     metric_path = extract_diverse_metric(
         model, args.architecture, args.latent_dim,
         temperature=args.temperature, 
-        regularization=args.regularization
+        regularization=args.regularization,
+        input_dim=(3, 64, 64) # Pass input_dim here
     )
     
     component_paths['metric'] = metric_path

@@ -22,7 +22,8 @@ class CyclicSpritesDataset(Dataset):
         subset_size: Optional[int] = None, 
         split: str = 'train',
         verify_cyclicity: bool = True,
-        cyclicity_threshold: float = 0.01
+        cyclicity_threshold: float = 0.01,
+        config: Optional[DictConfig] = None  # NEW: pass config optionally
     ):
         print(f"Loading cyclic sprites data from {data_path}...")
         
@@ -50,6 +51,19 @@ class CyclicSpritesDataset(Dataset):
         print(f"✅ Final data shape: {self.data.shape}")
         print(f"✅ Final data range: [{self.data.min():.3f}, {self.data.max():.3f}]")
         
+        # --- NEW: Auto-detect sequence length ---
+        self.sequence_length = self.data.shape[1] if self.data.ndim >= 2 else 1
+        print(f"[AUTO] Detected sequence length: {self.sequence_length}")
+        # Optionally update config if provided
+        if config is not None:
+            if not hasattr(config, 'sequence_length') or config.sequence_length != self.sequence_length:
+                print(f"[AUTO] Setting config.sequence_length = {self.sequence_length}")
+                config.sequence_length = self.sequence_length
+            # Also set model.sequence_length if possible
+            if hasattr(config, 'model'):
+                if not hasattr(config.model, 'sequence_length') or config.model.sequence_length != self.sequence_length:
+                    print(f"[AUTO] Setting config.model.sequence_length = {self.sequence_length}")
+                    config.model.sequence_length = self.sequence_length
         # Verify cyclicity if requested
         if verify_cyclicity:
             self._verify_cyclicity()
@@ -77,7 +91,11 @@ class CyclicSpritesDataset(Dataset):
         return len(self.data)
     
     def __getitem__(self, idx):
-        return self.data[idx]  # [T, C, H, W]
+        sample = self.data[idx]  # [T, C, H, W]
+        # Debug: Check for NaN/Inf in sample
+        if torch.isnan(sample).any() or torch.isinf(sample).any():
+            print(f"[DEBUG] Data sample at idx {idx} contains NaN or Inf! min={sample.min().item():.4f}, max={sample.max().item():.4f}")
+        return sample  # [T, C, H, W]
     
     def get_sequence_info(self, idx: int) -> dict:
         """Get information about a specific sequence."""

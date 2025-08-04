@@ -1,0 +1,33 @@
+# @package evaluation
+
+# Disabled Evaluation Configuration
+# Completely disables all evaluation for maximum training speed
+
+# Disable all evaluation components
+enabled: false
+run_during_training: false
+run_during_testing: false
+run_at_end_only: false
+
+# All components disabled
+fid:
+  enabled: false
+
+generation:
+  enabled: false
+
+reconstruction:
+  enabled: false
+
+inference:
+  enabled: false
+
+benchmarking:
+  enabled: false
+
+# Minimal output
+output:
+  save_detailed_results: false
+  log_to_wandb: false
+  create_summary_plot: false
+  save_generated_grid: false 

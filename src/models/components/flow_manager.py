@@ -35,6 +35,7 @@ class FlowManager(nn.Module):
         """
         Apply flows sequentially to a sequence of latent variables.
         If z_seq is length 1 and n_obs is provided, generate the full sequence of length n_obs.
+        CLAMPING: Output of each flow is clamped to [-10, 10] to prevent numerical explosions.
         Args:
             z_seq: List of latent tensors (one per timestep)
             n_obs: Number of timesteps (optional, for temporal evolution)
@@ -42,6 +43,7 @@ class FlowManager(nn.Module):
             z_seq_out: List of transformed latents
             log_det_jacobians: List of log|det J| for each flow
         """
+        clamp_value = 50.0  # CLAMPING VALUE (increased from 10.0)
         if n_obs is not None and len(z_seq) == 1:
             # Temporal evolution: generate sequence
             z_seq_out = [z_seq[0]]
@@ -50,6 +52,7 @@ class FlowManager(nn.Module):
                 flow = self.flows[t-1] if t-1 < len(self.flows) else self.flows[-1]
                 flow_res = flow(z_seq_out[-1])
                 z_t = flow_res.out
+                z_t = torch.clamp(z_t, min=-clamp_value, max=clamp_value)  # CLAMPING
                 log_det = flow_res.log_abs_det_jac
                 z_seq_out.append(z_t)
                 log_det_jacobians.append(log_det)
@@ -62,6 +65,7 @@ class FlowManager(nn.Module):
                 flow = self.flows[t-1]
                 flow_res = flow(z_seq_out[-1])
                 z_t = flow_res.out
+                z_t = torch.clamp(z_t, min=-clamp_value, max=clamp_value)  # CLAMPING
                 log_det = flow_res.log_abs_det_jac
                 z_seq_out.append(z_t)
                 log_det_jacobians.append(log_det)

@@ -86,42 +86,56 @@ class CleanCyclicLoopTrainer:
         self.run_name = run_name or f"{config.loop_mode}_cyclic"
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Create model
-        self.model = RiemannianFlowVAE(
-            input_dim=(3, 64, 64),
-            latent_dim=16,
-            n_flows=8,
-            flow_hidden_size=256,
-            flow_n_blocks=2,
-            flow_n_hidden=1,
-            epsilon=1e-6,
-            beta=config.beta,
-            loop_mode=config.loop_mode,  # This is the key parameter we're testing!
-            posterior_type=getattr(config, 'posterior_type', 'gaussian'),
-            riemannian_beta=getattr(config, 'riemannian_beta', None),
-        ).to(self.device)
+        # Create model - use vanilla VAE for pipeline stage 1, RLVAE for stage 2
+        if hasattr(config, 'use_vanilla_vae') and config.use_vanilla_vae:
+            # Create vanilla VAE for pipeline stage 1
+            from src.models.modular_vanilla_vae import create_mlp_vanilla_vae
+            self.model = create_mlp_vanilla_vae(
+                input_dim=(3, 64, 64),
+                latent_dim=config.latent_dim,
+                beta=config.beta
+            ).to(self.device)
+            print(f"✅ Created Vanilla VAE for pipeline stage 1")
+        else:
+            # Create RLVAE for stage 2 or standalone training
+            self.model = RiemannianFlowVAE(
+                input_dim=(3, 64, 64),
+                latent_dim=config.latent_dim,
+                n_flows=8,
+                flow_hidden_size=256,
+                flow_n_blocks=2,
+                flow_n_hidden=1,
+                epsilon=1e-6,
+                beta=config.beta,
+                loop_mode=config.loop_mode,  # This is the key parameter we're testing!
+                posterior_type=getattr(config, 'posterior_type', 'gaussian'),
+                riemannian_beta=getattr(config, 'riemannian_beta', None),
+            ).to(self.device)
+            print(f"✅ Created RLVAE for stage 2/standalone training")
         
-        # Set cycle penalty
+        # Set cycle penalty (only for RLVAE)
         if hasattr(self.model, "set_loop_mode"):
             self.model.set_loop_mode(config.loop_mode, config.cycle_penalty)
             print(f"🔁 Loop mode: {config.loop_mode}, cycle penalty: {config.cycle_penalty}")
         
-        # Load pretrained components
-        self.model.load_pretrained_components(
-            encoder_path=str(project_root / "data" / "pretrained" / "encoder.pt"),
-            decoder_path=str(project_root / "data" / "pretrained" / "decoder.pt"),
-            metric_path=str(project_root / "data" / "pretrained" / config.metric_path),
-            temperature_override=config.temperature_fix
-        )
+        # Load pretrained components (only for RLVAE)
+        if hasattr(self.model, "load_pretrained_components"):
+            self.model.load_pretrained_components(
+                encoder_path=str(project_root / "data" / "pretrained" / "encoder.pt"),
+                decoder_path=str(project_root / "data" / "pretrained" / "decoder.pt"),
+                metric_path=str(project_root / "data" / "pretrained" / config.metric_path),
+                temperature_override=config.temperature_fix
+            )
         
-        # Configure Riemannian sampling
-        if config.riemannian_method in ['geodesic', 'enhanced', 'basic']:
-            sampling_method = "custom"
-        else:
-            sampling_method = config.riemannian_method
-        
-        self.model.enable_pure_rhvae(enable=config.use_riemannian, method=sampling_method)
-        self.model._riemannian_method = config.riemannian_method
+        # Configure Riemannian sampling (only for RLVAE)
+        if hasattr(self.model, "enable_pure_rhvae"):
+            if config.riemannian_method in ['geodesic', 'enhanced', 'basic']:
+                sampling_method = "custom"
+            else:
+                sampling_method = config.riemannian_method
+            
+            self.model.enable_pure_rhvae(enable=config.use_riemannian, method=sampling_method)
+            self.model._riemannian_method = config.riemannian_method
         
         # Optimizer and scheduler
         self.optimizer = torch.optim.Adam(
@@ -211,35 +225,42 @@ class CleanCyclicLoopTrainer:
     
     def model_forward(self, x):
         """Forward pass through the model."""
-        # Vanilla VAE expects single images [B, C, H, W], not sequences [B, T, C, H, W]
-        # Process each timestep separately and combine results
-        batch_size, n_obs = x.shape[:2]
+        # Check if this is a vanilla VAE or RLVAE
+        is_vanilla_vae = not hasattr(self.model, 'n_flows') or self.model.n_flows == 0
         
-        # Process first timestep (vanilla VAE doesn't handle sequences)
-        x_0 = x[:, 0]  # [B, C, H, W]
-        result = self.model(x_0)
-        
-        # For vanilla VAE, we need to handle the sequence aspect manually
-        # Create a sequence of reconstructions by repeating the first timestep
-        recon_x = result.recon_x.unsqueeze(1).expand(-1, n_obs, -1, -1, -1)  # [B, T, C, H, W]
-        
-        # Create a sequence of latents by repeating the first latent
-        z = result.z.unsqueeze(1).expand(-1, n_obs, -1)  # [B, T, latent_dim]
-        
-        # For closed loop, make the last timestep equal to the first
-        if self.config.loop_mode == "closed":
-            recon_x[:, -1] = recon_x[:, 0]
-            z[:, -1] = z[:, 0]
-        
-        # Create a result object that matches the expected format
-        from types import SimpleNamespace
-        return SimpleNamespace(
-            recon_x=recon_x,
-            z=z,
-            loss=result.loss,
-            reconstruction_loss=result.reconstruction_loss,
-            reg_loss=result.reg_loss
-        )
+        if is_vanilla_vae:
+            # Vanilla VAE expects single images [B, C, H, W], not sequences [B, T, C, H, W]
+            # Process each timestep separately and combine results
+            batch_size, n_obs = x.shape[:2]
+            
+            # Process first timestep (vanilla VAE doesn't handle sequences)
+            x_0 = x[:, 0]  # [B, C, H, W]
+            result = self.model(x_0)
+            
+            # For vanilla VAE, we need to handle the sequence aspect manually
+            # Create a sequence of reconstructions by repeating the first timestep
+            recon_x = result.recon_x.unsqueeze(1).expand(-1, n_obs, -1, -1, -1)  # [B, T, C, H, W]
+            
+            # Create a sequence of latents by repeating the first latent
+            z = result.z.unsqueeze(1).expand(-1, n_obs, -1)  # [B, T, latent_dim]
+            
+            # For closed loop, make the last timestep equal to the first
+            if self.config.loop_mode == "closed":
+                recon_x[:, -1] = recon_x[:, 0]
+                z[:, -1] = z[:, 0]
+            
+            # Create a result object that matches the expected format
+            from types import SimpleNamespace
+            return SimpleNamespace(
+                recon_x=recon_x,
+                z=z,
+                loss=result.loss,
+                reconstruction_loss=result.reconstruction_loss,
+                reg_loss=result.reg_loss
+            )
+        else:
+            # RLVAE can handle sequences directly
+            return self.model(x)
     
     def train_epoch(self, train_loader, epoch):
         """Train one epoch."""
@@ -264,12 +285,21 @@ class CleanCyclicLoopTrainer:
                 # Forward pass
                 result = self.model_forward(x)
                 
-                # Extract losses (vanilla VAE returns SimpleNamespace with attributes)
-                loss = result.loss
-                recon_loss = result.reconstruction_loss
-                kl_loss = result.reg_loss  # Vanilla VAE uses reg_loss for KL
-                flow_loss = torch.tensor(0.0, device=self.device)  # No flows in vanilla VAE
-                reinforce_loss = torch.tensor(0.0, device=self.device)  # No Riemannian in vanilla VAE
+                # Extract losses - handle both vanilla VAE and RLVAE output formats
+                if hasattr(result, 'reconstruction_loss'):
+                    # Vanilla VAE format
+                    loss = result.loss
+                    recon_loss = result.reconstruction_loss
+                    kl_loss = result.reg_loss  # Vanilla VAE uses reg_loss for KL
+                    flow_loss = torch.tensor(0.0, device=self.device)  # No flows in vanilla VAE
+                    reinforce_loss = torch.tensor(0.0, device=self.device)  # No Riemannian in vanilla VAE
+                else:
+                    # RLVAE ModelOutput format
+                    loss = result.loss
+                    recon_loss = result.recon_loss
+                    kl_loss = result.kld_loss  # RLVAE uses kld_loss, not kl_loss
+                    flow_loss = result.flow_loss if hasattr(result, 'flow_loss') else torch.tensor(0.0, device=self.device)
+                    reinforce_loss = torch.tensor(0.0, device=self.device)  # No reinforce in this model
                 
                 # For closed loop, calculate cycle penalty separately if needed
                 cycle_penalty = 0.0
@@ -542,6 +572,8 @@ def main():
     parser.add_argument('--latent_dim', type=int, default=16, help='Latent space dimension (default: 16)')
     parser.add_argument('--wandb_run_name', type=str, default=None, help='Custom WandB run name')
     parser.add_argument('--wandb_project', type=str, default=None, help='Custom WandB project name')
+    parser.add_argument('--use_vanilla_vae', action='store_true', default=False,
+                       help='Use vanilla VAE instead of RLVAE (for pipeline stage 1)')
     
     args = parser.parse_args()
     
@@ -580,6 +612,9 @@ def main():
     # Pass wandb run name and project to config
     config.wandb_run_name = args.wandb_run_name
     config.wandb_project = args.wandb_project
+    
+    # Set vanilla VAE flag
+    config.use_vanilla_vae = args.use_vanilla_vae
     
     # Set experiment name
     project_name = args.wandb_project or "cyclic-loop-mode-comparison"

@@ -1,0 +1,31 @@
+{
+  "pipeline_type": "adaptive_global_rlvae",
+  "timestamp": "2025-07-29T17:08:29.084655",
+  "configuration": {
+    "architecture": "mlp",
+    "latent_dim": 2,
+    "vae_epochs": 5,
+    "rlvae_epochs": 6,
+    "adaptive_centroids": {
+      "enabled": true,
+      "update_frequency": 2,
+      "n_samples_for_centroids": 200
+    }
+  },
+  "results": {
+    "stage1": {
+      "encoder_path": "data/pretrained/encoder_diverse_mlp_ld2_20250729_170707.pt",
+      "decoder_path": "data/pretrained/decoder_diverse_mlp_ld2_20250729_170707.pt",
+      "metric_path": "data/pretrained/metric_diverse_mlp_ld2_20250729_170708.pt"
+    },
+    "stage2": {
+      "run_name": "adaptive_stage2_rlvae_mlp_ld2_freq2",
+      "model_path": "experiments/adaptive_pipeline_20250729_170557/stage2_adaptive_rlvae/final_model.pt",
+      "adaptive_enabled": true
+    },
+    "analysis": {
+      "skipped": true
+    }
+  },
+  "output_directory": "experiments/adaptive_pipeline_20250729_170557"
+}

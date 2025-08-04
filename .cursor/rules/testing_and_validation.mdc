@@ -1,0 +1,5 @@
+---
+alwaysApply: true
+---
+
+When modifying code or creating a new module, always create a test script and ensure that EVERYTHING works as expected (no errors, all tests pass) before considering the task complete. Test new modules locally and in isolation before integrating them into the main pipeline. See [CURSOR_RULES.md](mdc:CURSOR_RULES.md) rules 8 and 15.

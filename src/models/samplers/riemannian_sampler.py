@@ -246,43 +246,38 @@ class WorkingRiemannianSampler(BaseRiemannianSampler):
         if not self.validate_metric_availability():
             # Fallback to standard Gaussian
             return torch.randn(num_samples, self.model.latent_dim, device=self.device)
-        
         try:
             # Sample random centroids and interpolate along geodesics
-            centroids = self.model.centroids_tens  # [K, D]
+            centroids = self.model.centroids_tens
+            centroids = centroids.to(self.device)  # Ensure centroids are on the correct device
             n_centroids = centroids.shape[0]
-            
             # Sample random pairs of centroids
-            idx1 = torch.randint(0, n_centroids, (num_samples,), device=centroids.device)
-            idx2 = torch.randint(0, n_centroids, (num_samples,), device=centroids.device)
-            
-            centroid1 = centroids[idx1]  # [num_samples, D]
-            centroid2 = centroids[idx2]  # [num_samples, D]
-            
+            idx1 = torch.randint(0, n_centroids, (num_samples,), device=self.device)
+            idx2 = torch.randint(0, n_centroids, (num_samples,), device=self.device)
+            centroid1 = centroids[idx1]
+            centroid2 = centroids[idx2]
             # Sample along geodesic between centroids
-            t = torch.rand(num_samples, 1, device=centroids.device)  # [num_samples, 1]
-            z_geodesic = (1 - t) * centroid1 + t * centroid2  # [num_samples, D]
-            
+            t = torch.rand(num_samples, 1, device=self.device)
+            z_geodesic = (1 - t) * centroid1 + t * centroid2
             # Add small metric-aware noise
-            eps = torch.randn_like(z_geodesic)
-            G_inv = self.model.G_inv(z_geodesic)  # [num_samples, D, D]
-            
+            eps = torch.randn_like(z_geodesic, device=self.device)
+            G_inv = self.model.G_inv(z_geodesic)
+            # Debug: check device consistency
+            if not (z_geodesic.device == G_inv.device == eps.device):
+                print(f"[DEBUG] Device mismatch: z_geodesic {z_geodesic.device}, G_inv {G_inv.device}, eps {eps.device}")
             try:
                 L = torch.linalg.cholesky(G_inv + 1e-6 * torch.eye(G_inv.shape[-1], device=G_inv.device))
                 eps_transformed = torch.einsum('bij,bj->bi', L, eps)
-            except:
-                # Fallback to eigendecomposition
+            except Exception as e:
+                print(f"[DEBUG] Cholesky failed: {e}")
                 eigenvals, eigenvecs = torch.linalg.eigh(G_inv)
                 eigenvals = torch.clamp(eigenvals, min=1e-6)
                 sqrt_G_inv = eigenvecs @ torch.diag_embed(torch.sqrt(eigenvals)) @ eigenvecs.transpose(-2, -1)
                 eps_transformed = torch.einsum('bij,bj->bi', sqrt_G_inv, eps)
-            
             # Combine geodesic position with metric noise
             noise_scale = 0.1
             z_final = z_geodesic + noise_scale * eps_transformed
-            
             return z_final
-            
         except Exception as e:
             print(f"⚠️ Geodesic prior sampling failed: {e}, using basic method")
             return self.sample_basic_prior(num_samples)

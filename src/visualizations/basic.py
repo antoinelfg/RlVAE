@@ -33,7 +33,16 @@ class BasicVisualizations(BaseVisualization):
             else:
                 # Handle dictionary output from modular model
                 recon_x = result['reconstruction']  # [batch_size, n_obs, 3, 64, 64]
-                z_seq = result['latent_samples']   # [batch_size, n_obs, latent_dim]
+                # Handle both dict format and ModelOutput format
+                if isinstance(result, dict):
+                    z_seq = result.get('latent_samples', result.get('z', None))
+                else:
+                    # ModelOutput object
+                    z_seq = result.z if hasattr(result, 'z') else None
+                
+                if z_seq is None:
+                    print("⚠️ Could not extract latent samples from model output")
+                    return
             
             batch_size, n_obs = x_sample.shape[:2]
             
@@ -292,6 +301,7 @@ Energy-Cyclicity: {energy_cyclicity_corr if len(temporal_energies) > 1 else 'N/A
             # Save and log with enhanced metrics
             filename = f'enhanced_cyclicity_analysis_epoch_{epoch}.png'
             saved_file = self._safe_save_plt_figure(filename, dpi=200, bbox_inches='tight')
+            self.last_cyclicity_path = saved_file
             
             # Log to WandB with comprehensive metrics
             if self.should_log_to_wandb() and saved_file:
@@ -342,7 +352,16 @@ Energy-Cyclicity: {energy_cyclicity_corr if len(temporal_energies) > 1 else 'N/A
             if hasattr(result, 'z'):
                 z_seq = result.z  # [batch_size, n_obs, latent_dim]
             else:
-                z_seq = result['latent_samples']   # [batch_size, n_obs, latent_dim]
+                # Handle both dict format and ModelOutput format
+                if isinstance(result, dict):
+                    z_seq = result.get('latent_samples', result.get('z', None))
+                else:
+                    # ModelOutput object
+                    z_seq = result.z if hasattr(result, 'z') else None
+                
+                if z_seq is None:
+                    print("⚠️ Could not extract latent samples from model output")
+                    return
 
             batch_size, n_obs, latent_dim = z_seq.shape
             # --- Determine number of sequences to plot ---
@@ -360,9 +379,12 @@ Energy-Cyclicity: {energy_cyclicity_corr if len(temporal_energies) > 1 else 'N/A
                 z_flat_clean = np.nan_to_num(z_flat, nan=0.0)
             else:
                 z_flat_clean = z_flat
-            pca = PCA(n_components=3)
+            # Dynamically set n_components for PCA
+            latent_dim_pca = z_flat.shape[1]
+            n_components = min(3, latent_dim_pca)
+            pca = PCA(n_components=n_components)
             z_pca = pca.fit_transform(z_flat_clean)
-            z_pca_seq = z_pca.reshape(batch_size, n_obs, 3)
+            z_pca_seq = z_pca.reshape(batch_size, n_obs, n_components)
             # --- Clustering (optional) ---
             if cluster_sequences and num_viz > 1:
                 # Use mean of each sequence in PCA space for clustering
@@ -459,6 +481,7 @@ Energy-Cyclicity: {energy_cyclicity_corr if len(temporal_energies) > 1 else 'N/A
             # Save and log
             filename = f'sequence_trajectories_epoch_{epoch}.png'
             saved_file = self._safe_save_plt_figure(filename, dpi=300, bbox_inches='tight')
+            self.last_sequence_trajectories_path = saved_file
             # Log to WandB
             if self.should_log_to_wandb() and saved_file:
                 wandb.log({
@@ -469,6 +492,7 @@ Energy-Cyclicity: {energy_cyclicity_corr if len(temporal_energies) > 1 else 'N/A
     
     def create_reconstruction_analysis(self, x_sample: torch.Tensor, epoch: int):
         """Create enhanced comprehensive reconstruction visualization with perceptual metrics."""
+        print(f"[DEBUG] create_reconstruction_analysis called for epoch {epoch}")
         print(f"🎬 Creating enhanced comprehensive reconstruction visualization for epoch {epoch}")
         
         self.model.eval()
@@ -504,9 +528,11 @@ Energy-Cyclicity: {energy_cyclicity_corr if len(temporal_energies) > 1 else 'N/A
             feature_similarity_scores = []
             
             for i in range(max_viz):
+                # Ensure both tensors are on the same device
+                x_sample_i = x_sample[i].to(recon_x[i].device)
                 # Per-sample MSE and MAE
-                sample_mse = torch.mean((x_sample[i] - recon_x[i]) ** 2, dim=(1, 2, 3)).cpu().numpy()
-                sample_mae = torch.mean(torch.abs(x_sample[i] - recon_x[i]), dim=(1, 2, 3)).cpu().numpy()
+                sample_mse = torch.mean((x_sample_i - recon_x[i]) ** 2, dim=(1, 2, 3)).cpu().numpy()
+                sample_mae = torch.mean(torch.abs(x_sample_i - recon_x[i]), dim=(1, 2, 3)).cpu().numpy()
                 mse_per_sample.append(sample_mse)
                 mae_per_sample.append(sample_mae)
                 
@@ -750,6 +776,7 @@ Timesteps: {n_obs}"""
             # Save and log with enhanced metrics
             filename = f'enhanced_reconstruction_analysis_epoch_{epoch}.png'
             saved_file = self._safe_save_plt_figure(filename, dpi=200, bbox_inches='tight')
+            self.last_reconstruction_path = saved_file
             
             # Log to WandB with comprehensive metrics
             if self.should_log_to_wandb() and saved_file:
@@ -766,3 +793,161 @@ Timesteps: {n_obs}"""
             plt.close()
         
         self.model.train() 
+
+    def create_generation_grid(self, num_samples: int, epoch: int):
+        """
+        Generate a fancy grid of images sampled from the prior and log to wandb.
+        Args:
+            num_samples: Number of images to generate (should be a square number, e.g., 16 or 25)
+            epoch: Current epoch (for labeling)
+        """
+        self.model.eval()
+        with torch.no_grad():
+            # Sample from prior
+            z = torch.randn(num_samples, self.model.latent_dim, device=self.device)
+            device = next(self.model.decoder.parameters()).device
+            z = z.to(device)
+            generated = self.model.decode(z)
+            print(f"[DEBUG] Decoded output type: {type(generated)}; dir: {dir(generated)}")
+            if hasattr(generated, 'recon_x'):
+                print("[DEBUG] Using .recon_x from ModelOutput")
+                generated = generated.recon_x
+            elif hasattr(generated, 'output'):
+                print("[DEBUG] Using .output from ModelOutput")
+                generated = generated.output
+            elif hasattr(generated, 'reconstruction'):
+                print("[DEBUG] Using .reconstruction from ModelOutput")
+                generated = generated.reconstruction
+            else:
+                print("[DEBUG] Decoded output is not a ModelOutput or has no recon_x/output/reconstruction.")
+            generated = generated.cpu()
+            # Clamp to [0, 1]
+            generated = torch.clamp(generated, 0, 1)
+        grid_size = int(np.ceil(np.sqrt(num_samples)))
+        fig, axes = plt.subplots(grid_size, grid_size, figsize=(grid_size * 2, grid_size * 2))
+        fig.suptitle(f"Fancy Generation Grid (Epoch {epoch})", fontsize=18, fontweight='bold', color='#4ECDC4')
+        for i in range(grid_size * grid_size):
+            ax = axes[i // grid_size, i % grid_size]
+            if i < num_samples:
+                img = generated[i].permute(1, 2, 0).numpy()
+                ax.imshow(img)
+            ax.axis('off')
+        plt.tight_layout()
+        filename = f'generation_grid_epoch_{epoch}.png'
+        saved_file = self._safe_save_plt_figure(filename, dpi=200, bbox_inches='tight')
+        self.last_generation_path = saved_file
+        if self.should_log_to_wandb() and saved_file:
+            import wandb
+            wandb.log({
+                "final/generation_grid": wandb.Image(saved_file, caption=f"Fancy Generation Grid (Epoch {epoch})")
+            })
+        plt.close()
+        self.model.train()
+
+    def create_interpolation_grid(self, num_interpolations: int, steps: int, epoch: int):
+        """
+        Create a fancy grid of interpolated images between random latent pairs and log to wandb.
+        Args:
+            num_interpolations: Number of interpolation pairs (rows)
+            steps: Number of interpolation steps (columns)
+            epoch: Current epoch (for labeling)
+        """
+        self.model.eval()
+        with torch.no_grad():
+            device = next(self.model.decoder.parameters()).device
+            z_start = torch.randn(num_interpolations, self.model.latent_dim, device=self.device).to(device)
+            z_end = torch.randn(num_interpolations, self.model.latent_dim, device=self.device).to(device)
+            all_imgs = []
+            for i in range(num_interpolations):
+                row_imgs = []
+                for alpha in np.linspace(0, 1, steps):
+                    z = (1 - alpha) * z_start[i] + alpha * z_end[i]
+                    z = z.to(device)
+                    img = self.model.decode(z.unsqueeze(0))
+                    print(f"[DEBUG] Interp decode type: {type(img)}; dir: {dir(img)}")
+                    if hasattr(img, 'recon_x'):
+                        print("[DEBUG] Using .recon_x from ModelOutput (interp)")
+                        img = img.recon_x
+                    elif hasattr(img, 'output'):
+                        print("[DEBUG] Using .output from ModelOutput (interp)")
+                        img = img.output
+                    elif hasattr(img, 'reconstruction'):
+                        print("[DEBUG] Using .reconstruction from ModelOutput (interp)")
+                        img = img.reconstruction
+                    else:
+                        print("[DEBUG] Interp decode is not a ModelOutput or has no recon_x/output/reconstruction.")
+                    img = img.cpu()[0]
+                    img = torch.clamp(img, 0, 1)
+                    row_imgs.append(img)
+                all_imgs.append(row_imgs)
+        fig, axes = plt.subplots(num_interpolations, steps, figsize=(steps * 2, num_interpolations * 2))
+        fig.suptitle(f"Fancy Interpolation Grid (Epoch {epoch})", fontsize=18, fontweight='bold', color='#FF6B6B')
+        for i in range(num_interpolations):
+            for j in range(steps):
+                ax = axes[i, j]
+                img = all_imgs[i][j].permute(1, 2, 0).numpy()
+                ax.imshow(img)
+                ax.axis('off')
+                if j == 0:
+                    ax.set_ylabel(f"Pair {i+1}", fontsize=12, color='#4ECDC4')
+                if i == 0:
+                    ax.set_title(f"α={j/(steps-1):.2f}", fontsize=12, color='#FF6B6B')
+        plt.tight_layout()
+        filename = f'interpolation_grid_epoch_{epoch}.png'
+        saved_file = self._safe_save_plt_figure(filename, dpi=200, bbox_inches='tight')
+        self.last_interpolation_path = saved_file
+        if self.should_log_to_wandb() and saved_file:
+            import wandb
+            wandb.log({
+                "final/interpolation_grid": wandb.Image(saved_file, caption=f"Fancy Interpolation Grid (Epoch {epoch})")
+            })
+        plt.close()
+        self.model.train() 
+
+    def create_comprehensive_generation_visualization(self, generation_results: dict, fid_scores: dict = None, num_samples_per_method: int = 4, epoch: int = 0):
+        """
+        Create a comprehensive grid comparing generation methods, inspired by comprehensive_rlvae_analysis.py.
+        Args:
+            generation_results: dict mapping method name to images tensor (N, C, H, W) or (N, T, C, H, W)
+            fid_scores: optional dict mapping method name to FID score
+            num_samples_per_method: number of samples to show per method
+            epoch: current epoch (for labeling)
+        """
+        import seaborn as sns
+        methods = [m for m in generation_results.keys() if generation_results[m] is not None]
+        n_methods = len(methods)
+        if n_methods == 0:
+            print("[BasicVisualizations] No generation results to visualize.")
+            return
+        grid_image = torch.zeros(3, n_methods * 64, num_samples_per_method * 64)
+        for i, method in enumerate(methods):
+            images = generation_results[method]
+            if images.dim() == 5:
+                images = images[:, 0]  # Take first frame if sequence
+            for j in range(min(num_samples_per_method, len(images))):
+                img = images[j]
+                grid_image[:, i*64:(i+1)*64, j*64:(j+1)*64] = img
+        grid_np = grid_image.permute(1, 2, 0).numpy()
+        grid_np = np.clip(grid_np, 0, 1)
+        fig, ax = plt.subplots(figsize=(num_samples_per_method * 2.5, n_methods * 2.5))
+        ax.imshow(grid_np)
+        ax.set_title(f"Comprehensive Generation Comparison (Epoch {epoch})", fontsize=18, fontweight='bold', color='#4ECDC4')
+        ax.axis('off')
+        palette = sns.color_palette("husl", n_methods)
+        for i, method in enumerate(methods):
+            label = method.capitalize()
+            if fid_scores and method in fid_scores:
+                label += f"\nFID: {fid_scores[method]:.1f}"
+            ax.text(-10, i*64 + 32, label, rotation=0, ha='right', va='center',
+                    fontweight='bold', color=palette[i], fontsize=14,
+                    bbox=dict(boxstyle='round', facecolor='black', alpha=0.7, edgecolor=palette[i]))
+        plt.tight_layout()
+        filename = f'comprehensive_generation_grid_epoch_{epoch}.png'
+        saved_file = self._safe_save_plt_figure(filename, dpi=200, bbox_inches='tight')
+        self.last_comprehensive_generation_path = saved_file
+        if self.should_log_to_wandb() and saved_file:
+            import wandb
+            wandb.log({
+                "final/comprehensive_generation_grid": wandb.Image(saved_file, caption=f"Comprehensive Generation Comparison (Epoch {epoch})")
+            })
+        plt.close() 

@@ -112,6 +112,8 @@ def parse_args():
     # Advanced options
     parser.add_argument("--device", type=str, default="auto",
                        help="Device to use (auto, cuda, cpu)")
+    parser.add_argument("--skip-analysis", action="store_true",
+                       help="Skip enhanced analysis step")
     
     # Visualization options
     parser.add_argument("--visualization-level", type=str, choices=["minimal", "standard", "full"], default="standard",
@@ -160,7 +162,8 @@ def run_vae_training(args, output_dir):
         "--wandb_run_name", vanilla_run_name,
         "--wandb_project", args.wandb_project,
         "--visualization_level", args.visualization_level,
-        "--wandb_only"
+        "--wandb_only",
+        "--use_vanilla_vae"
     ]
     # Set visualization level (only once)
     viz_level = "full" if args.include_large_files else args.visualization_level
@@ -177,7 +180,9 @@ def run_vae_training(args, output_dir):
     if not metric_files:
         raise FileNotFoundError(f"No metric file found matching {metric_pattern}")
     metric_path = metric_files[0]
-    vanilla_vae_cmd.extend(["--metric_path", metric_path])
+    # Use just the filename, not the full path, to avoid path duplication
+    metric_filename = os.path.basename(metric_path)
+    vanilla_vae_cmd.extend(["--metric_path", metric_filename])
     
     print(f"[PIPELINE] Running vanilla VAE training: {' '.join(vanilla_vae_cmd)}")
     subprocess.run(vanilla_vae_cmd, check=True, env=env)
@@ -403,6 +408,69 @@ def train_rlvae(args, config, output_dir, experiment_group=None):
     return rlvae_run_name
 
 
+def run_enhanced_analysis(args, output_dir, rlvae_run_name):
+    """Run enhanced analysis on the trained RLVAE model."""
+    print(f"\n{'='*80}")
+    print(f"🔍 STEP 3: Enhanced Analysis & Visualization")
+    print(f"{'='*80}")
+    
+    # Find the latest RLVAE checkpoint
+    checkpoint_pattern = f"outputs/{rlvae_run_name}/checkpoints/*.ckpt"
+    checkpoint_files = sorted(glob.glob(checkpoint_pattern), key=os.path.getmtime, reverse=True)
+    
+    if not checkpoint_files:
+        print(f"⚠️  No checkpoint found matching pattern: {checkpoint_pattern}")
+        print("Skipping enhanced analysis...")
+        return None
+    
+    checkpoint_path = checkpoint_files[0]
+    print(f"📁 Found checkpoint: {checkpoint_path}")
+    
+    # Find the corresponding config file
+    config_pattern = f"outputs/{rlvae_run_name}/configs/*.yaml"
+    config_files = sorted(glob.glob(config_pattern), key=os.path.getmtime, reverse=True)
+    
+    if not config_files:
+        print(f"⚠️  No config found matching pattern: {config_pattern}")
+        print("Skipping enhanced analysis...")
+        return None
+    
+    config_path = config_files[0]
+    print(f"📁 Found config: {config_path}")
+    
+    # Setup analysis output directory
+    analysis_dir = output_dir / "enhanced_analysis"
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Run enhanced analysis
+    analysis_cmd = [
+        sys.executable, "scripts/run_enhanced_analysis.py",
+        "--checkpoint_path", checkpoint_path,
+        "--config_path", config_path,
+        "--output_dir", str(analysis_dir),
+        "--num_samples", "1000",
+        "--num_cycles", "50",
+        "--geodesic_steps", "20",
+        "--batch_size", "32",
+        "--device", args.device
+    ]
+    
+    if args.wandb:
+        analysis_cmd.append("--log_to_wandb")
+    
+    # Set PYTHONPATH to project root for subprocess
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).parent.parent.resolve())
+    
+    print(f"[PIPELINE] Running enhanced analysis: {' '.join(analysis_cmd)}")
+    subprocess.run(analysis_cmd, check=True, env=env)
+    
+    print(f"✅ Enhanced analysis completed!")
+    print(f"📊 Results saved to: {analysis_dir}")
+    
+    return analysis_dir
+
+
 def main():
     """Main pipeline function."""
     print(f"🎯 Starting Global RLVAE Pipeline")
@@ -439,6 +507,13 @@ def main():
         # Step 3: Train RLVAE
         rlvae_run_name = train_rlvae(args, rlvae_config, output_path)
         
+        # Step 4: Run Enhanced Analysis (unless skipped)
+        if not args.skip_analysis:
+            analysis_dir = run_enhanced_analysis(args, output_path, rlvae_run_name)
+        else:
+            print("⏭️ Skipping enhanced analysis (--skip-analysis flag)")
+            analysis_dir = None
+        
         # Success summary
         print(f"\n{'='*80}")
         print(f"🎉 GLOBAL RLVAE PIPELINE COMPLETED SUCCESSFULLY!")
@@ -448,6 +523,12 @@ def main():
         print(f"   - Encoder: {encoder_path}")
         print(f"   - Decoder: {decoder_path}")
         print(f"   - Metric: {metric_path}")
+        
+        if analysis_dir:
+            print(f"🔍 Enhanced analysis results:")
+            print(f"   - Analysis directory: {analysis_dir}")
+            print(f"   - Master visualization: {analysis_dir}/master_analysis.png")
+            print(f"   - Comprehensive report: {analysis_dir}/comprehensive_report.json")
         
         # Create summary file
         summary = {
@@ -465,7 +546,8 @@ def main():
                     "encoder": str(encoder_path),
                     "decoder": str(decoder_path),
                     "metric": str(metric_path)
-                }
+                },
+                "enhanced_analysis": str(analysis_dir) if analysis_dir else None
             }
         }
         
@@ -480,6 +562,12 @@ def main():
         print(f"  Architecture: {args.architecture}, Latent dim: {args.latent_dim}, Epochs: {args.vae_epochs}, Batch size: {args.batch_size}, LR: {args.learning_rate}, Viz: {args.visualization_level}")
         print(f"RLVAE run: {rlvae_run_name}")
         print(f"  Architecture: {args.architecture}, Latent dim: {args.latent_dim}, Epochs: {args.rlvae_epochs}, Batch size: {getattr(args, 'rlvae_batch_size', args.batch_size)}, LR: {getattr(args, 'rlvae_lr', args.learning_rate)}, Viz: {args.visualization_level}")
+        if analysis_dir:
+            print(f"Enhanced Analysis: ✅ Completed")
+            print(f"  - FID scores for multiple sampling methods")
+            print(f"  - Latent space trajectory analysis")
+            print(f"  - Geodesic interpolation visualization")
+            print(f"  - Master analysis dashboard")
         print(f"WandB project: {args.wandb_project}")
         print("==========================================================\n")
         

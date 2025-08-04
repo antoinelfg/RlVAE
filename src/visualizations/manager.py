@@ -17,6 +17,9 @@ from .manifold import ManifoldVisualizations
 from .interactive import InteractiveVisualizations
 from .flow_analysis import FlowAnalysisVisualizations
 from .latent_dynamics import LatentDynamicsVisualizations
+from .manifold_evolution import ManifoldEvolutionVisualizations
+
+from omegaconf import DictConfig
 
 
 class VisualizationLevel(Enum):
@@ -27,6 +30,7 @@ class VisualizationLevel(Enum):
     ADVANCED = "advanced"    # Includes interactive elements
     DYNAMICS = "dynamics"    # Includes advanced dynamics analysis
     FULL = "full"           # All visualizations
+    BETWEEN = "between"     # Only sequence slider and det G
 
 
 @dataclass
@@ -142,7 +146,17 @@ class VisualizationConfig:
                 interactive_frequency=3,
                 flow_frequency=1,
                 dynamics_frequency=2
-            )
+            ),
+            VisualizationLevel.BETWEEN: cls(
+                level=level,
+                enable_basic=True,  # Enable minimal visualizations
+                enable_manifold=True,  # Only for det G
+                enable_interactive=True,  # Only for sequence slider
+                enable_flow_analysis=False,
+                enable_dynamics=False,
+                interactive_frequency=1,
+                manifold_frequency=1
+            ),
         }
         return configs[level]
 
@@ -151,26 +165,35 @@ class VisualizationManager:
     """Central manager for coordinating all visualizations."""
     
     def __init__(self, model, device, config, viz_config: Optional[VisualizationConfig] = None):
+        print(f"[DEBUG] VisualizationManager __init__ called. config.visualization: {getattr(config, 'visualization', None)}")
         self.model = model
         self.device = device
         self.config = config
         
         # Use provided viz config or create standard one
-        if hasattr(config, 'visualization') and isinstance(config.visualization, dict):
+        if hasattr(config, 'visualization') and isinstance(config.visualization, (dict, DictConfig)):
             # Build from dict, using level if present
             level = config.visualization.get('level', VisualizationLevel.STANDARD)
             if isinstance(level, str):
                 level = VisualizationLevel(level)
             base_viz_config = VisualizationConfig.from_level(level)
-            # Update with any extra fields from config.visualization
+            print(f"[DEBUG] from_level({level}) returned: enable_interactive={base_viz_config.enable_interactive}, enable_basic={base_viz_config.enable_basic}, enable_manifold={base_viz_config.enable_manifold}")
+            # Update with any extra fields from config.visualization, but do NOT override module enables
             for k, v in config.visualization.items():
-                if hasattr(base_viz_config, k):
-                    setattr(base_viz_config, k, v)
-                else:
+                if k not in [
+                    'enable_basic', 'enable_manifold', 'enable_interactive', 'enable_flow_analysis', 'enable_dynamics', 'level'
+                ]:
                     setattr(base_viz_config, k, v)
             self.viz_config = base_viz_config
         else:
+            print("[DEBUG] Using viz_config or default STANDARD in VisualizationManager")
             self.viz_config = viz_config or VisualizationConfig.from_level(VisualizationLevel.STANDARD)
+        
+        # DEBUG PRINT: Show visualization config at init
+        print(f"[DEBUG] Visualization config at init: level={self.viz_config.level}, enable_interactive={self.viz_config.enable_interactive}, enable_basic={self.viz_config.enable_basic}, enable_manifold={self.viz_config.enable_manifold}")
+        
+        # DEBUG PRINT: Show FINAL visualization config before module init
+        print(f"[DEBUG] FINAL Visualization config before module init: level={self.viz_config.level}, enable_interactive={self.viz_config.enable_interactive}, enable_basic={self.viz_config.enable_basic}, enable_manifold={self.viz_config.enable_manifold}")
         
         # Initialize visualization modules
         should_log = getattr(config, 'wandb_only', False) or True
@@ -190,6 +213,10 @@ class VisualizationManager:
             
         if self.viz_config.enable_dynamics:
             self.modules['dynamics'] = LatentDynamicsVisualizations(model, device, config, should_log)
+            
+        # Always enable manifold evolution for adaptive centroid training
+        if hasattr(config, 'adaptive_centroids') and config.adaptive_centroids.get('enabled', False):
+            self.modules['manifold_evolution'] = ManifoldEvolutionVisualizations(model, device, config, should_log)
     
     def create_visualizations(self, x_sample: torch.Tensor, epoch: int, val_loader=None):
         """
@@ -203,6 +230,30 @@ class VisualizationManager:
         print(f"🎨 Creating visualizations for epoch {epoch} (level: {self.viz_config.level.value})")
         
         try:
+            # Special handling for 'between' level: only sequence slider and det G
+            if self.viz_config.level == VisualizationLevel.BETWEEN:
+                # Minimal (basic) visualizations
+                if 'basic' in self.modules and epoch % self.viz_config.basic_frequency == 0:
+                    basic = self.modules['basic']
+                    basic.create_cyclicity_analysis(x_sample, epoch)
+                    basic.create_sequence_trajectories(x_sample, epoch)
+                    basic.create_reconstruction_analysis(x_sample, epoch)  # Added: third minimal plot
+                # Sequence slider (from interactive)
+                if 'interactive' in self.modules and epoch % self.viz_config.interactive_frequency == 0:
+                    print("[DEBUG] Calling interactive sequence slider visualization...")
+                    interactive = self.modules['interactive']
+                    interactive.create_sequence_slider_visualization(x_sample, epoch)
+                    print("[DEBUG] Calling static metric heatmap visualization...")
+                    interactive.create_static_metric_heatmap(x_sample, epoch)
+                    print("[DEBUG] Calling static metric heatmap timesteps visualization...")
+                    interactive.create_static_metric_heatmap_timesteps(x_sample, epoch)
+                    print("[DEBUG] Calling interactive det G heatmap visualization...")
+                    interactive.create_time_curvature_heatmap(x_sample, epoch)
+                # det G plot (from manifold)
+                if 'manifold' in self.modules and epoch % self.viz_config.manifold_frequency == 0:
+                    manifold = self.modules['manifold']
+                    manifold.create_metric_heatmaps(x_sample, epoch)
+                return
             # Basic visualizations (always run if enabled)
             if (self.viz_config.enable_basic and 
                 epoch % self.viz_config.basic_frequency == 0):
@@ -395,3 +446,30 @@ class VisualizationManager:
                 'dynamics': self.viz_config.dynamics_frequency
             }
         } 
+
+    def log_final_visualizations_to_wandb(self, epoch: int):
+        """
+        Log the latest generation and inference visualizations to wandb at the end of the run.
+        This collects the most recent saved images from each visualization module (if available)
+        and logs them to wandb with appropriate captions.
+        """
+        import wandb
+        logged = False
+        for module_name, module in self.modules.items():
+            # Check for common visualization attributes
+            for attr, label in [
+                ("last_reconstruction_path", "final/reconstruction"),
+                ("last_sequence_trajectories_path", "final/sequence_trajectories"),
+                ("last_cyclicity_path", "final/cyclicity"),
+                ("last_generation_path", "final/generation"),
+                ("last_pca_analysis_path", "final/pca_analysis"),
+                ("last_heatmaps_path", "final/heatmaps"),
+                ("last_temporal_metric_path", "final/temporal_metric")
+            ]:
+                if hasattr(module, attr):
+                    path = getattr(module, attr)
+                    if path:
+                        wandb.log({label: wandb.Image(path, caption=f"{label.replace('final/', '').replace('_', ' ').title()} (Epoch {epoch})")})
+                        logged = True
+        if not logged:
+            print("[VisualizationManager] No final visualizations found to log to wandb.") 

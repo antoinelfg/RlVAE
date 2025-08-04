@@ -1,0 +1,20 @@
+# @package inference
+
+# Inference Configuration for Modular RlVAE
+# Defines how to encode, reconstruct, and analyze images
+
+enabled: true
+batch_size: 32
+max_batch_size: 64
+use_mean: false                # Use posterior mean vs. sampling
+sampling_method: "enhanced"   # For reparameterization sampling (enhanced, geodesic, basic, standard)
+sequence_mode: "single"       # single, sequence, first_frame
+max_sequence_length: 32
+return_uncertainties: true     # Return uncertainty estimates
+return_intermediate: false     # Return intermediate encoder outputs
+normalize_latents: false       # Normalize latent codes
+clear_cache: true              # Clear CUDA cache after each batch
+use_half_precision: false      # Use half precision for inference
+analyze_geometry: true         # Run geometric analysis of latent space
+compute_effective_dim: true    # Compute effective dimensionality
+log_to_wandb: true             # Log inference results to WandB 

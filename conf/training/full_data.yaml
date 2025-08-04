@@ -6,7 +6,7 @@ defaults:
 
 # Training parameters
 trainer:
-  max_epochs: 50
+  max_epochs: 200
   accelerator: "gpu"
   devices: 1  # Use single GPU to avoid device mismatches
   strategy: "auto"  # Use auto strategy for single GPU
@@ -22,13 +22,12 @@ trainer:
 # Data parameters
 data:
   batch_size: 64  # Balanced batch size for larger dataset
-  num_workers: 16
+  num_workers: 4
   pin_memory: true
 
 # Model parameters (keep working configuration)
 model:
   latent_dim: 16  # Keep successful latent dim
-  n_flows: 8      # Keep successful flow count
   beta: 1.0
   riemannian_beta: 8.0  # Keep successful riemannian beta
   posterior:
@@ -38,7 +37,7 @@ model:
     use_riemannian: true
   loop:
     mode: "open"    # Keep successful loop mode
-    penalty: 5.0    # Keep successful penalty
+    penalty: 0.0    # Keep successful penalty
 
 # Optimization
 optimizer:
@@ -48,7 +47,7 @@ optimizer:
 
 # Logging
 logging:
-  log_every_n_steps: 5
+  log_every_n_steps: 10
   save_top_k: 3
   monitor: "val_loss"
   mode: "min"
@@ -72,7 +71,7 @@ scheduler:
 
 # Early stopping
 early_stopping:
-  patience: 10
+  patience: 30
   monitor: "val_loss"
   mode: "min"
   min_delta: 0.001 

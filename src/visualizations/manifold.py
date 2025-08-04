@@ -35,7 +35,16 @@ class ManifoldVisualizations(BaseVisualization):
             with torch.no_grad():
                 # Get the full model forward pass first to get properly flow-evolved latents
                 result = self.model_forward(x_sample)
-                z_seq = result['latent_samples'] if isinstance(result, dict) else result.z
+                # Handle both dict format and ModelOutput format
+                if isinstance(result, dict):
+                    z_seq = result.get('latent_samples', result.get('z', None))
+                else:
+                    # ModelOutput object
+                    z_seq = result.z if hasattr(result, 'z') else None
+                
+                if z_seq is None:
+                    print("⚠️ Could not extract latent samples from model output")
+                    return
             
                 batch_size, n_obs, latent_dim = z_seq.shape
                 print(f"📊 Analyzing {batch_size} sequences with {n_obs} timesteps")

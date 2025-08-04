@@ -1,0 +1,4 @@
+---
+alwaysApply: true
+---
+Default to an "intermediate" visualization level (not minimal, not full) for most experiments and sweeps. Use minimal visualizations only for large-scale sweeps or when explicitly requested for speed. Use full visualizations only for final runs or publication-quality outputs. See [CURSOR_RULES.md](mdc:CURSOR_RULES.md) rule 4.

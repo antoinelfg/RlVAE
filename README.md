@@ -463,8 +463,17 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
+## ⚠️ Cursor Agent Rules
+
+All contributors and AI agents **must read and follow the rules in [CURSOR_RULES.md](CURSOR_RULES.md)** before making any changes, running experiments, or answering questions. These rules ensure consistency, quality, and maintainability across the project.
+
 **🚀 Ready to explore Riemannian geometry in your data?** Start with our [Installation Guide](docs/installation.md) or dive into a [Quick Training Example](#quick-start)!
 
 **🔬 For comprehensive project context**, see [`.cursor_context.md`](.cursor_context.md) - essential reading for AI assistants and contributors.
 
 **Need help?** Check the [documentation](docs/) or open an issue for support. 
+
+## What's New
+
+- [2024-06-10] **Pipeline config rule:** All important `stage1` and `stage2` parameters in `conf/experiment/global_vanilla_rlvae_pipeline.yaml` (such as `data`, `latent_dim`, `sequence_length`, `n_flows`, `beta`, etc.) now always interpolate from the top-level config. `n_flows` is always set to `sequence_length - 1` using Hydra math interpolation. This ensures that overriding any top-level parameter will propagate to all pipeline stages, guaranteeing consistency and simplifying experiment management. 
+- [2024-06-10] **Robustness improvement:** `model.input_dim` is now always set from the data config (`[channels, height, width]`) in the experiment runner. This automation ensures model/data consistency and prevents shape mismatch errors, regardless of config or CLI overrides. 

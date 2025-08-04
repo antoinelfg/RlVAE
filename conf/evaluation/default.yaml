@@ -1,0 +1,67 @@
+# @package evaluation
+
+# Evaluation Configuration for RlVAE Training Pipeline
+# Defines when and how to run FID scoring and generation evaluation
+
+# Enable/disable evaluation components
+enabled: true
+run_during_training: false  # Run during validation epochs (resource intensive)
+run_during_testing: true   # Run during final testing phase
+run_at_end_only: true      # Only run comprehensive evaluation at the end
+
+# FID Score Configuration
+fid:
+  enabled: true
+  n_generated_samples: 1000  # Number of samples to generate for FID computation
+  batch_size: 50            # Batch size for FID computation (memory management)
+  inception_batch_size: 64  # Batch size for Inception feature extraction
+  real_samples_subset: 2000 # Use subset of real images for faster computation
+  cache_real_stats: true    # Cache real image statistics for repeated runs
+
+# Generation Configuration  
+generation:
+  enabled: true
+  methods: ["geodesic", "enhanced", "basic"]  # Sampling methods to evaluate
+  n_samples_per_method: 100  # Samples per method for quick evaluation
+  comprehensive_n_samples: 500  # Samples for comprehensive end-of-training evaluation
+  batch_size: 32            # Generation batch size
+  save_samples: true        # Save generated samples to disk
+  
+# Reconstruction Evaluation
+reconstruction:
+  enabled: true
+  n_test_samples: 200       # Number of test samples to evaluate
+  metrics: ["mse", "psnr", "ssim", "l1"]  # Reconstruction metrics to compute
+  save_reconstructions: false  # Save reconstruction comparisons
+
+# Inference Pipeline Evaluation
+inference:
+  enabled: true
+  n_samples: 100           # Samples for latent space analysis
+  analyze_geometry: true   # Run geometric analysis of latent space
+  compute_effective_dim: true  # Compute effective dimensionality
+
+# Performance Benchmarking
+benchmarking:
+  enabled: false          # Disable by default (adds overhead)
+  generation_trials: 5    # Number of timing trials
+  inference_trials: 5     # Number of timing trials
+
+# Output Configuration
+output:
+  save_detailed_results: true  # Save detailed evaluation results to disk
+  log_to_wandb: true          # Log all metrics to WandB
+  create_summary_plot: true   # Create summary visualization
+  save_generated_grid: true   # Save grid of generated samples
+  
+# Memory Management
+memory:
+  max_batch_size: 64       # Maximum batch size for any operation
+  enable_cleanup: true     # Clean up intermediate results
+  use_cpu_offload: false   # Offload computations to CPU if GPU memory limited
+
+# Frequency Configuration (when run_during_training=true)
+frequency:
+  every_n_epochs: 5        # Run evaluation every N epochs
+  at_epochs: []           # Specific epochs to run evaluation (overrides every_n_epochs)
+  min_epoch: 10           # Don't run evaluation before this epoch 

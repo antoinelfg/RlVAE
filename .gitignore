@@ -192,6 +192,8 @@ multirun/
 *.jpeg
 *.gif
 *.svg
+*.html
+*.pt
 html_latent_images_epoch_*/
 
 # SLURM job logs and outputs

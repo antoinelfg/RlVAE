@@ -1,0 +1,46 @@
+# @package experiment
+
+type: single
+
+# Experiment: RLVAE with trainable metric and full correction scale
+
+name: trainable_metric_correction1
+
+defaults:
+  - /model/mlp_rlvae_trainable_metric
+
+pretrained:
+  encoder_path: data/pretrained/encoder_diverse_mlp_ld16_20250717_134643.pt
+  decoder_path: data/pretrained/decoder_diverse_mlp_ld16_20250717_134643.pt
+  metric_path: data/pretrained/metric_diverse_mlp_ld16_20250717_134647.pt
+
+metric:
+  correction_scale: 1.0
+  metric_reg_weight: 0.0
+  metric_reg_type: none
+  metric_reg_target: 0.0
+
+training:
+  optimizer:
+    lr: 1e-3
+    weight_decay: 1e-5
+  epochs: 200
+
+visualization:
+  level: standard
+  frequency: 10
+  enable_basic: true
+  enable_manifold: true
+  enable_interactive: false
+  enable_flow_analysis: false
+  basic_frequency: 10
+  manifold_frequency: 10
+  interactive_frequency: 0
+  flow_frequency: 0
+  disable_curvature: false
+  enable_fancy_plots: false
+  save_local: true
+  log_to_wandb: true
+
+data: cyclic_sprites
+batch_size: 64 

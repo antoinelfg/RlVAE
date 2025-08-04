@@ -1,0 +1,4 @@
+---
+alwaysApply: true
+---
+Prefer WandB-only mode for experiment logging and visualization. Avoid local file outputs unless explicitly requested by the user. Ensure all visualizations, metrics, and checkpoints are logged to WandB. See [CURSOR_RULES.md](mdc:CURSOR_RULES.md) rule 6.
