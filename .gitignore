@@ -210,6 +210,9 @@ monitor_extended_sweep.sh
 # Data directories (keep structure but ignore content)
 data/raw/*
 data/processed/*
+data/*.tar.gz
+data/*.zip
+data/*.pt
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/*/README.md
