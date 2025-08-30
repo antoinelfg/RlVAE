@@ -1,30 +1,51 @@
 # @package experiment
 
 type: single
-name: rlvae_gaussian_single
+name: rlvae_trainable_metric
+description: "Train RLVAE with trainable metric and optional alternating metric updates."
 
-data: colored_circles
+# Use default cyclic sprites data unless overridden
+data: cyclic_sprites
 
-# RlVAE experiment with standard Gaussian prior (no learned metric)
+model: mlp_rlvae_trainable_metric
 
-model: mlp_rlvae
-
+# Pretrained (fill or override via CLI)
 pretrained:
-  encoder_path: <FILL_IN_ENCODER_PATH>
-  decoder_path: <FILL_IN_DECODER_PATH>
-  metric_path: null  # Use null or remove for Gaussian prior
+  encoder_path: data/pretrained/encoder_diverse_mlp_ld16_20250717_134643.pt
+  decoder_path: data/pretrained/decoder_diverse_mlp_ld16_20250717_134643.pt
+  metric_path: data/pretrained/metric_diverse_mlp_ld16_20250717_134647.pt
 
+# Metric is trainable with init from fixed
 metric:
-  trainable: false
+  trainable: true
+  architecture: resnet
+  arch_kwargs:
+    hidden_dim: 128
+    n_blocks: 4
+  init_from_fixed: true
+  fixed_metric_path: data/pretrained/metric_diverse_mlp_ld16_20250717_134647.pt
+  metric_reg_weight: 1.0
+  metric_reg_type: condition
+  metric_reg_target: 10.0
 
-# Set Gaussian prior/posterior
+# Riemannian posterior/prior
 posterior:
-  type: gaussian
+  type: riemannian_metric
 sampling:
-  use_riemannian: false
+  use_riemannian: true
+  method: geodesic
 
 training:
   optimizer:
     lr: 1e-3
     weight_decay: 1e-5
-  epochs: 100 
+  # epochs delegated to default; can override here if needed
+  metric_alternation:
+    enabled: true
+    warmup_epochs: 5
+    k_rlvae_epochs: 3
+    metric_step_epochs: 1
+    anchor_size: 20000
+    anchor_refresh_frac: 0.1
+    logdet_clip: 50.0
+    consistency_weight: 0.0

@@ -109,7 +109,7 @@ env/
 venv/
 ENV/
 env.bak/
-venv.bak/
+venb.bak/
 
 # Spyder project settings
 .spyderproject
@@ -157,43 +157,43 @@ cython_debug/
 ehthumbs.db
 Thumbs.db
 
-# Training outputs
+# ===== RlVAE SPECIFIC IGNORES =====
+
+# Training outputs and experiments (LARGE FILES)
 outputs/
 wandb/
-checkpoints/
-logs/
-results/
+lightning_logs/
+experiments/
+backups/
+metric_snapshots/
+
+# Model checkpoints and training artifacts
+*.ckpt
+*.pth
+*.pt
+*.pkl
+final_model.pt
+encoder.pt
+decoder.pt
 
 # Temporary files
 tmp/
 temp/
 *.tmp
 *.bak
-
-# Large data files (keep structure but not content)
-data/raw/*.pt
-data/processed/*.pt
-
-# Model checkpoints and training artifacts
-*.ckpt
-*.pth
-lightning_logs/
+*.log
 
 # Hydra outputs
 .hydra/
 multirun/
 
-# Jupyter notebook outputs
-*.ipynb
-
-# Generated images and visualizations
+# Generated images and visualizations (LARGE FILES)
 *.png
 *.jpg
 *.jpeg
 *.gif
 *.svg
 *.html
-*.pt
 html_latent_images_epoch_*/
 
 # SLURM job logs and outputs
@@ -201,11 +201,6 @@ html_latent_images_epoch_*/
 *.err
 slurm-*.out
 logs/
-*.log
-
-# Sweep and monitoring files
-sweep_runner.log
-monitor_extended_sweep.sh
 
 # Data directories (keep structure but ignore content)
 data/raw/*
@@ -213,6 +208,9 @@ data/processed/*
 data/*.tar.gz
 data/*.zip
 data/*.pt
+data/*.pkl
+data/MNIST/
+data/fid_cache/
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/*/README.md
@@ -225,26 +223,29 @@ data/*.pt
 # System files
 .nfs*
 
-# Generated visualization artifacts
-html_latent_images_epoch_*/
-*.png
-*.jpg
-*.jpeg
-*.gif
-*.svg
+# Legacy and backup directories
+original_rlvae/
+benchmark_VAE/
+debug_outputs/
+debug_rhvae_*/
+
+# Development test files
+test_*.py
+debug_*.py
+*_test.py
+*_debug.py
 
 # Temporary experiment files
-WEEKEND_EXPERIMENT_PLAN.md
 *_EXPERIMENT_PLAN.md
+WEEKEND_EXPERIMENT_PLAN.md
+temp_*.yaml
 
-# Legacy training scripts (if recreated)
-run_training.py
-run_clean_training*.py
+# Large documentation files (keep structure)
+docs/archive/
+docs/guides/archive/
 
-# Development test files (if recreated)
-test_100_percent_modular.py
-test_integration.py
-test_modular_architectures.py
-test_loss_manager_simple.py
-test_modular_samplers.py
-test_modular_visualizations.py 
+# Keep essential structure files
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/*/README.md
+!conf/*/README.md 

@@ -1,0 +1,1 @@
+{"name": "RHVAEConfig", "input_dim": [1, 28, 28], "latent_dim": 4, "uses_default_encoder": false, "uses_default_decoder": false, "reconstruction_loss": "mse", "n_lf": 1, "eps_lf": 0.0001, "beta_zero": 1.0, "temperature": 0.5, "regularization": 0.1, "uses_default_metric": true}

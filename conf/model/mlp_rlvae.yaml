@@ -1,6 +1,6 @@
 # @package model
 
-_target_: models.modular_rlvae.ModularRiemannianFlowVAE
+_target_: rlvae.models.modular_rlvae.ModularRiemannianFlowVAE
 
 input_dim: [3, 64, 64]
 latent_dim: 16
@@ -22,6 +22,7 @@ decoder:
 
 beta: 1.0
 riemannian_beta: 8.0
+riemannian_kl_mode: sample_logq_logp
 
 posterior:
   type: "riemannian_metric"

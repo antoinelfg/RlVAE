@@ -1,0 +1,26 @@
+# Standalone RHMC test config
+
+checkpoint: "outputs/phaseB_sprites_ld10_pca2_rawpanel_rhmc_fix/final_model.pt"
+device: auto
+
+# RHMC parameters
+n_samples: 3000
+mcmc_steps: 120
+n_lf: 25
+eps_lf: 0.02
+beta_zero: 1.0
+
+# Metric overrides (optional)
+temperature: null
+regularization: 0.01
+
+out_dir: "outputs/rhmc_from_ckpt"
+
+
+
+
+
+
+
+
+

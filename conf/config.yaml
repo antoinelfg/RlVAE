@@ -7,6 +7,9 @@ defaults:
   - data: cyclic_sprites
   - visualization: minimal
   - evaluation: default
+  - metric: rhvae
+  - sampling: rhmc_default
+  - checkpoint: default
   - experiment: single_run
   - _self_
 
@@ -17,13 +20,24 @@ description: "Systematic comparison of Riemannian geometry effects on VAE latent
 
 # Global settings
 seed: 42
+experiment_type: "research"  # research (full determinism) or production (performance)
 device: "auto"  # auto, cpu, cuda
 output_dir: "outputs"
 wandb:
-  project: "${project_name}"
+  project: "rlvae-three-stage-visuals"
   entity: null  # your wandb entity
   mode: "online"  # online, offline, disabled
   tags: []
+  group: null
+  pipeline_mode: per_stage  # per_stage|single|both
+  artifacts:
+    enabled: true
+    namespace: rlvae
+    # default aliases used when logging artifacts per stage
+    aliases:
+      stage_a_latest: stageA_latest
+      stage_b_latest: stageB_latest
+      stage_c_latest: stageC_latest
 
 # Hydra settings
 hydra:

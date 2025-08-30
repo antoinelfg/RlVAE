@@ -1,0 +1,17 @@
+# @package checkpoint
+
+save: true
+load: false
+
+# Paths
+dir: outputs/checkpoints
+metric_dir: ${output_dir}/metrics
+stageA_dir: ${output_dir}/stageA
+stageB_dir: ${output_dir}/stageB
+stageC_dir: ${output_dir}/stageC
+
+# Filenames
+stageA_model: stageA_vae.pt
+metric_file: metric_t${metric.temperature}.pt
+rhmc_samples: rhmc_samples_t0.pt
+

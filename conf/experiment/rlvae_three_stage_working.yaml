@@ -1,0 +1,79 @@
+# @package experiment
+
+type: three_stage
+name: rlvae_three_stage_working
+description: "Working three-stage pipeline following global pattern: Stage A (RHVAE + diverse metric), Stage B (metric at t=0), Stage C (RLVAE with original implementation)."
+
+# Control flags
+run_stage_a: true
+run_stage_b: true
+run_sampling: false  # Disable RHMC for now
+run_stage_c: true
+
+# Stage A: RHVAE + Diverse Metric Extraction (like global pipeline Stage 1)
+stage_a:
+  model: rhvae  # Use RHVAE to learn diverse metric
+  epochs: 7  # Quick test
+  batch_size: 64
+  lr: 1e-4
+  beta: 1.0
+  architecture: mlp
+  latent_dim: ${model.latent_dim}
+  # RHVAE specific parameters
+  riemannian_beta: 1.0
+  temperature: 0.7
+  regularization: 0.01
+  n_centroids: 50
+  # Extract diverse metric after training
+  extract_diverse_metric: true
+  diverse_metric_temperature: 0.5
+  diverse_metric_regularization: 0.01
+  diverse_metric_preset: balanced
+  diverse_metric_n_heatmaps: 6
+
+# Stage B: Extract metric at t=0 from diverse metric
+stage_b:
+  implementation: ${metric.implementation}
+  n_centroids: ${metric.n_centroids}
+  temperature: ${metric.temperature}
+  regularization: ${metric.regularization}
+  centroid_method: ${metric.centroid_method}
+  neighbor_mode: ${oc.select:metric.neighbor_mode,global}
+  knn_k: ${oc.select:metric.knn_k,300}
+  use_timestep: ${oc.select:metric.use_timestep,0}
+  standardize_latents: ${oc.select:metric.standardize_latents,false}
+  # Use diverse metric from Stage A
+  input_metric_path: ${checkpoint.stageA_dir}/diverse_metric.pt
+
+# Stage C: RLVAE with original implementation using diverse metric
+stage_c:
+  model: rhvae_original_working  # Use original working implementation
+  epochs: 50
+  batch_size: 64
+  riemannian_beta: 8.0  # Match global pipeline
+  allow_metric_updates: true
+  force_rhvae_components: false
+  update_metric_during_training: true
+  load_pretrained_from_stage1: true
+  sampling:
+    use_riemannian: true
+  posterior:
+    type: riemannian_metric
+  architecture: mlp
+  latent_dim: ${model.latent_dim}
+  sequence_length: ${data.sequence_length}
+  n_flows: ${oc.decode:${data.sequence_length} - 1}
+  beta: 1.0
+  flow_hidden_size: 256
+  flow_n_blocks: 2
+  flow_n_hidden: 1
+  epsilon: 1.0e-06
+  # Use diverse metric from Stage A
+  pretrained:
+    encoder_path: ${checkpoint.stageA_dir}/encoder.pt
+    decoder_path: ${checkpoint.stageA_dir}/decoder.pt
+    metric_path: ${checkpoint.stageA_dir}/diverse_metric.pt
+  metric:
+    metric_reg_weight: 0.0
+    init_from_fixed: true
+    fixed_metric_path: ${checkpoint.stageA_dir}/diverse_metric.pt

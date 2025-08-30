@@ -12,11 +12,17 @@ run_at_end_only: true      # Only run comprehensive evaluation at the end
 # FID Score Configuration
 fid:
   enabled: true
+  compute_fid: true
   n_generated_samples: 1000  # Number of samples to generate for FID computation
   batch_size: 50            # Batch size for FID computation (memory management)
   inception_batch_size: 64  # Batch size for Inception feature extraction
   real_samples_subset: 2000 # Use subset of real images for faster computation
   cache_real_stats: true    # Cache real image statistics for repeated runs
+  # Additional keys expected by evaluator
+  fid_cache_dir: "data/fid_cache"
+  fid_batch_size: 32
+  real_data_cache_key: "test_dataset"
+  n_real_samples: 1000
 
 # Generation Configuration  
 generation:
@@ -26,6 +32,10 @@ generation:
   comprehensive_n_samples: 500  # Samples for comprehensive end-of-training evaluation
   batch_size: 32            # Generation batch size
   save_samples: true        # Save generated samples to disk
+
+# Top-level lists expected by evaluator (mirrors dataclass defaults)
+generation_methods: ["geodesic", "enhanced", "basic"]
+sampler_types: ["working"]
   
 # Reconstruction Evaluation
 reconstruction:

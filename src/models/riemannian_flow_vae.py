@@ -860,6 +860,28 @@ class RiemannianFlowVAE(nn.Module):
         print(f"✅ Created RiemannianFlowVAE with {n_flows} IAF flows (via FlowManager)")
         print(f"🧠 Posterior type: {posterior_type}")
 
+        # Section 4 requirements: β ramping (KL weight) and LR warmup
+        self.beta_ramp_enabled = True
+        self.beta_start = 0.0
+        self.beta_end = 1.0  # Target β value
+        self.beta_ramp_epochs = 5  # 3-10 epochs as per requirement
+        self.beta_ramp_schedule = 'linear'  # linear, cosine, exponential
+        
+        # Learning rate warmup for flows/decoder
+        self.lr_warmup_enabled = False
+        self.lr_warmup_epochs = 3
+        self.lr_warmup_factor = 0.1  # Start with 10% of base LR
+        
+        # Section 5 requirements: Phase 1 training parameters
+        self.phase1_training = False  # Enable Phase 1 mode
+        self.centroid_regularizer_enabled = False
+        self.centroid_regularizer_weight = 0.01  # λ_cent
+        self.centroid_regularizer_t0_only = True  # Apply only at t=0
+        
+        # Section 6 requirements: Phase 2 training parameters
+        self.phase2_training = False  # Enable Phase 2 mode
+        self.metric_learning_rate = 1e-4  # Small LR for metric
+
         def set_loop_mode(self, mode: str = "open", penalty_weight: float = 1.0):
             assert mode in ("open", "closed"), "loop_mode must be 'open' or 'closed'"
             self.loop_mode = mode

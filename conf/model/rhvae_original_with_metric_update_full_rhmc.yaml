@@ -1,0 +1,68 @@
+# @package model
+
+_target_: src.models.riemannian_flow_vae.RiemannianFlowVAE
+
+# Model architecture
+latent_dim: 16
+input_dim: [64, 64, 3]
+
+# Encoder/decoder architecture
+encoder:
+  _target_: src.models.components.mlp_encoder.MLPEncoder
+  architecture: mlp
+  hidden_dims: [512, 256, 128]
+  input_dim: [64, 64, 3]
+  latent_dim: 16
+
+decoder:
+  _target_: src.models.components.mlp_decoder.MLPDecoder
+  architecture: mlp
+  hidden_dims: [128, 256, 512]
+  input_dim: [64, 64, 3]
+  latent_dim: 16
+
+# Flow configuration
+n_flows: 4
+flow_type: "planar"
+flow_hidden_dims: [64, 64]
+
+# Loss weights
+beta: 1.0
+riemannian_beta: 1.0  # Base value for adaptive KL
+loop_lambda: 0.1
+
+# 🚀 FULL RHMC POSTERIOR SAMPLING DURING TRAINING
+posterior_type: "riem_hmc"  # Use full RHMC instead of fast posterior
+riemannian_kl_mode: "sample_logq_logp"
+
+# RHMC parameters optimized for training (balanced speed/accuracy)
+# These will be set via set_posterior_hmc_params() method
+mcmc_steps_nbr: 50    # Reduced from 200 for training efficiency
+n_lf: 15             # Reduced from 30 for training efficiency  
+eps_lf: 0.03         # Slightly larger step size for faster convergence
+beta_zero: 1.0       # No tempering for stability
+
+# Metric configuration
+metric:
+  start_with_identity: false
+  n_centroids: 10
+  temperature: 0.1
+  regularization: 0.01
+
+# NEW: Metric update configuration
+update_metric_during_training: true
+metric_update_frequency: 30
+metric_update_alpha: 0.01
+metric_update_temperature: 0.1
+metric_update_regularization: 0.01
+
+# NEW: Adaptive KL configuration
+adaptive_kl_enabled: true
+adaptive_kl_ramp_up_steps: 10
+adaptive_kl_alignment_weight: 0.1
+
+# Pretrained components (will be loaded from Stage 1)
+pretrained:
+  encoder_path: null
+  decoder_path: null
+  metric_path: null

@@ -1,6 +1,6 @@
 # @package model
 
-_target_: models.modular_rlvae.ModularRiemannianFlowVAE
+_target_: rlvae.models.modular_rlvae.ModularRiemannianFlowVAE
 
 # Architecture
 input_dim: [3, 64, 64]

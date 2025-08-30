@@ -1,0 +1,70 @@
+# @package model
+defaults:
+  - rhvae_phase1_training # Extends Phase 1 configuration
+
+model_name: "rhvae_phase2_training"
+
+# Section 6: Phase 2 Training (Metric → Posterior, metric unfreeze) parameters
+
+# Phase 2 training mode
+phase2_training: true              # Enable Phase 2 training mode
+phase1_training: false             # Disable Phase 1 mode
+metric_learning_rate: 1e-4         # Small LR for metric (Section 6.1)
+
+# Geomean det normalization (Section 6.2) - already implemented in base
+kl_use_metric_normalization: true
+kl_metric_norm_mode: "geomean"     # Use geomean det normalization in KL path
+
+# Spectral bounds on eigenvalues (Section 6.3)
+spectral_penalty_enabled: true
+spectral_penalty_weight: 0.1       # Weight for spectral penalty
+eigenval_min_bound: 1e-2           # Minimum eigenvalue bound (e.g., 1e-2)
+eigenval_max_bound: 1e2            # Maximum eigenvalue bound (e.g., 1e2)
+
+# Smoothness penalty (Section 6.4)
+smoothness_penalty_enabled: true
+smoothness_penalty_weight: 0.01    # Weight for ||∇_z G(z)||_F² penalty
+
+# Anisotropy alignment (Section 6.5)
+anisotropy_alignment_enabled: true
+anisotropy_alignment_weight: 0.05  # Weight for ||G(μ) - (1/α)Σ̂||_F² penalty
+
+# Centroid EMA updates (Section 6.6)
+centroid_ema_enabled: true
+centroid_ema_rate: 0.01            # Small EMA rate for stable updates
+centroid_ema_update_frequency: 10  # Update every K steps/epochs
+
+# Disable Phase 1 specific features
+centroid_regularizer_enabled: false # Disable Phase 1 centroid regularizer
+
+# Enhanced ramping for Phase 2 stability
+beta_ramp_enabled: true
+beta_start: 0.5                    # Start higher since Phase 1 is complete
+beta_end: 1.5                      # Can go higher for Phase 2
+beta_ramp_epochs: 5                # Shorter ramp since foundation is stable
+
+posterior_alpha_ramp_enabled: true
+posterior_alpha_start: 0.6         # Start higher than Phase 1
+posterior_alpha_end: 1.0           # Full target value
+posterior_alpha_ramp_epochs: 8
+
+# Architecture settings (same as Phase 1)
+input_dim: [3, 64, 64]
+latent_dim: 16
+encoder:
+  architecture: "cnn"
+decoder:
+  architecture: "cnn"
+
+# Training parameters optimized for Phase 2
+posterior_type: "riemannian_metric"
+eps_chol: 1e-6
+identity_metric_mode: false
+metric_validation_enabled: true
+
+# Flow configuration
+n_flows: 4
+flow_type: "planar"
+flow_hidden_dims: [64, 64]
+
+

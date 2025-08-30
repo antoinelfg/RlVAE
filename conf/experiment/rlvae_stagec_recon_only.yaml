@@ -1,0 +1,18 @@
+# @package experiment
+
+type: single
+name: rlvae_stagec_recon_only
+
+description: "Run only Stage C for 1 epoch focusing on reconstruction (flows off, gaussian posterior)"
+
+run_stage_a: false
+run_stage_b: false
+run_sampling: false
+run_stage_c: true
+
+stage_c:
+  model: riemannian_flow_vae
+  epochs: 1
+  batch_size: 16
+  riemannian_beta: ${model.riemannian_beta}
+  allow_metric_updates: false

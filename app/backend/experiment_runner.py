@@ -31,9 +31,12 @@ if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
 try:
-    from models.modular_rlvae import ModularRiemannianFlowVAE, ModelFactory, MetricsCollector
+    from rlvae.models.modular_rlvae import ModularRiemannianFlowVAE, ModelFactory, MetricsCollector
     from data.cyclic_dataset import CyclicSpritesDataModule
-    from training.lightning_trainer import LightningRlVAETrainer
+    try:
+        from rlvae.training.lightning_trainer import LightningRlVAETrainer
+    except Exception:
+        from training.lightning_trainer import LightningRlVAETrainer
     from visualizations.manager import VisualizationManager
     BACKEND_AVAILABLE = True
 except ImportError as e:

@@ -1,0 +1,66 @@
+# Simple experiment for testing identity metric from scratch
+type: "pipeline"
+name: "identity_metric_test"
+description: "Test identity metric initialization and evolution from scratch"
+
+# Stage 1: Simple Vanilla VAE
+stage1:
+  batch_size: 64
+  model: vanilla_vae
+  data: ${data}
+  visualization: minimal
+  extract_diverse_metric: true
+  architecture: mlp
+  latent_dim: ${model.latent_dim}
+  sequence_length: ${data.sequence_length}
+  n_flows: ${oc.decode:${data.sequence_length} - 1}
+  beta: 1.0
+  flow_hidden_size: 256
+  flow_n_blocks: 2
+  flow_n_hidden: 1
+  epsilon: 1e-06
+  epochs: 1
+  temperature: 0.5
+  regularization: 0.01
+  preset: balanced
+  n_heatmaps: 6
+
+# Stage 2: RLVAE with Identity Metric
+stage2:
+  batch_size: 64
+  model: ${model._target_}
+  data: ${data}
+  visualization: minimal
+  epochs: 3
+  load_pretrained_from_stage1: true
+  sampling:
+    use_riemannian: true
+  posterior:
+    type: riemannian_metric
+  architecture: mlp
+  latent_dim: ${model.latent_dim}
+  sequence_length: ${data.sequence_length}
+  n_flows: ${oc.decode:${data.sequence_length} - 1}
+  beta: 1.0
+  flow_hidden_size: 256
+  flow_n_blocks: 2
+  flow_n_hidden: 1
+  epsilon: 1e-06
+  riemannian_beta: 1.0
+  metric:
+    metric_reg_weight: 0.0
+
+# Logging
+log_level: "INFO"
+log_to_file: true
+deterministic: true
+benchmark: false
+
+visualization:
+  sequence_viz_count: 64
+  cluster_sequences: true
+  n_clusters: 5
+  cluster_coloring: true
+  show_cluster_centroids: true
+
+batch_size: 64

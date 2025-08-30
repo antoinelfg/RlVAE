@@ -1,0 +1,31 @@
+# @package model
+defaults:
+  - rhvae_with_validation
+
+# Configuration for RiemannianFlowVAE with Section 2 posterior sampling enhancements
+model_name: "rhvae_with_section2_posterior"
+
+# Section 2: Posterior Sampling (Local, Reparam) parameters
+posterior_type: "riemannian_metric"        # Use local metric-aligned Gaussian posterior
+posterior_local_alpha: 0.5                 # α scaling for Σ = α G(μ)
+eps_chol: 1e-6                             # Cholesky regularization parameter
+
+# α ramping configuration (GOAL.md Section 2 requirement)
+posterior_alpha_ramp_enabled: false        # Enable/disable α ramping
+posterior_alpha_start: 0.25                # Starting α value (smaller for initial stability)
+posterior_alpha_end: 1.0                   # Target α value
+posterior_alpha_ramp_epochs: 10             # Epochs over which to ramp α
+
+# Curvature correction (already implemented - evaluates metric at z, not μ)
+use_curvature_correction: true              # Use G_inv(z) instead of G_inv(μ) in KL
+
+# Enhanced metric validation and diagnostics
+identity_metric_mode: false                 # Set to true for sanity testing
+metric_validation_enabled: true             # Enable runtime metric validation
+
+# KL computation with metric normalization
+kl_use_metric_normalization: true
+kl_metric_norm_mode: "geomean"              # "geomean", "trace", or "none"  
+kl_amp_safe: true                          # Use float32 for numerical stability
+
+

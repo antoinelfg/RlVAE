@@ -32,6 +32,7 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 from sklearn_extra.cluster import KMedoids
+from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 import warnings
 import seaborn as sns
@@ -112,8 +113,25 @@ def create_model(architecture: str, input_dim=(3, 64, 64), latent_dim=16):
     
     return model
 
-def extract_diverse_metric(model, architecture, latent_dim, temperature=0.5, regularization=0.01, 
-                          num_centroids=50, save_dir="data/pretrained", input_dim=(3, 64, 64), data_path=None):
+def extract_diverse_metric(
+    model,
+    architecture,
+    latent_dim,
+    temperature=0.5,
+    regularization=0.01,
+    num_centroids=50,
+    save_dir="data/pretrained",
+    input_dim=(3, 64, 64),
+    data_path=None,
+    timestep_only: int = 0,
+    standardize_latents: bool = False,
+    centroid_method: str = "kmedoids",  # kmedoids|kmeans|fps|balanced
+    neighbor_mode: str = "global",      # global|knn
+    knn_k: int = 300,
+    coarse_k: int = 8,
+    normalize_M: str = "none",          # none|trace|det
+    target_mean_eig: float = 1.0,
+):
     """
     Extract metric with enhanced diversity parameters.
     Args:
@@ -132,7 +150,8 @@ def extract_diverse_metric(model, architecture, latent_dim, temperature=0.5, reg
     # Use the provided data_path or default to sprites
     if data_path is None:
         data_path = 'data/processed/Sprites_train_cyclic.pt'
-    train_t0_dataset = SpritesDataset(data_path, normalize=False, timestep_only=0)
+    # allow caller to select timestep; default is 0 for Stage B
+    train_t0_dataset = SpritesDataset(data_path, normalize=False, timestep_only=timestep_only)
     # If the data shape does not match input_dim, reshape
     if hasattr(train_t0_dataset, 'data') and train_t0_dataset.data.shape[1:] != input_dim:
         print(f"[extract_diverse_metric] Reshaping data from {train_t0_dataset.data.shape[1:]} to {input_dim}")
@@ -168,17 +187,89 @@ def extract_diverse_metric(model, architecture, latent_dim, temperature=0.5, reg
     print(f"Collected {len(all_mus)} latent representations from timestep=0")
     print(f"Latent representation shape: {all_mus.shape}")
     
-    # Use k-medoids clustering
-    print(f"Running k-medoids clustering to find {num_centroids} centroids...")
+    # Optional standardization (improves metric locality and conditioning)
+    scaler_mean = None
+    scaler_scale = None
+    if standardize_latents:
+        print("[extract_diverse_metric] Standardizing latent means before clustering and covariance computation")
+        scaler = StandardScaler()
+        all_mus_np = scaler.fit_transform(all_mus.detach().cpu().numpy())
+        all_mus = torch.tensor(all_mus_np, device=device, dtype=all_mus.dtype)
+        scaler_mean = torch.tensor(scaler.mean_, device=device, dtype=all_mus.dtype)
+        scaler_scale = torch.tensor(scaler.scale_, device=device, dtype=all_mus.dtype)
+
+    # Choose centroid selection method
     warnings.filterwarnings("ignore", category=UserWarning)
-    
-    kmedoids = KMedoids(n_clusters=num_centroids, random_state=42).fit(all_mus.detach().cpu().numpy())
-    medoids = torch.tensor(kmedoids.cluster_centers_).to(device)
-    centroids_idx = kmedoids.medoid_indices_
-    
-    # Extract centroids
-    centroids_mu = all_mus[centroids_idx]  # [num_centroids, latent_dim]
-    centroids_logvar = all_logvars[centroids_idx]  # [num_centroids, latent_dim]
+    if centroid_method == "balanced":
+        print(f"Running balanced centroid selection: k-means({coarse_k}) -> FPS per cluster to {num_centroids} total...")
+        all_np = all_mus.detach().cpu().numpy()
+        km = KMeans(n_clusters=coarse_k, init="k-means++", n_init=10, random_state=42)
+        labels = km.fit_predict(all_np)
+        # allocate counts proportionally to cluster sizes
+        counts = []
+        for c in range(coarse_k):
+            size = (labels == c).sum()
+            counts.append(size)
+        counts = np.array(counts)
+        props = counts / counts.sum()
+        alloc = np.maximum(1, np.floor(props * num_centroids).astype(int))
+        # fix rounding
+        while alloc.sum() < num_centroids:
+            alloc[np.argmax(props - alloc / num_centroids)] += 1
+        # select per-cluster FPS
+        chosen_indices = []
+        for c in range(coarse_k):
+            idx_c = np.where(labels == c)[0]
+            if len(idx_c) == 0:
+                continue
+            need = int(alloc[c])
+            # FPS within the cluster
+            indices_tensor = torch.tensor(idx_c, device=all_mus.device)
+            subset = all_mus[indices_tensor]
+            # seed with random
+            start = torch.randint(0, subset.shape[0], (1,), device=all_mus.device).item()
+            sel = [start]
+            d = torch.cdist(subset[start:start+1], subset).squeeze(0)
+            for _ in range(1, min(need, subset.shape[0])):
+                far = torch.argmax(d).item()
+                sel.append(far)
+                d = torch.minimum(d, torch.cdist(subset[far:far+1], subset).squeeze(0))
+            chosen_indices.extend(indices_tensor[torch.tensor(sel, device=all_mus.device)].tolist())
+        centroids_idx = torch.tensor(chosen_indices, device='cpu')
+        centroids_mu = all_mus[centroids_idx.to(all_mus.device)]
+    elif centroid_method == "kmeans":
+        print(f"Running k-means++ to find {num_centroids} centers...")
+        km = KMeans(n_clusters=num_centroids, init="k-means++", n_init=10, random_state=42)
+        km.fit(all_mus.detach().cpu().numpy())
+        centers = torch.tensor(km.cluster_centers_, device=device, dtype=all_mus.dtype)
+        centroids_mu = centers
+        centroids_idx = None
+    elif centroid_method == "fps":
+        print(f"Running farthest-point sampling to select {num_centroids} centroids...")
+        with torch.no_grad():
+            N = all_mus.shape[0]
+            chosen = []
+            # start from a random point
+            start_idx = torch.randint(0, N, (1,), device=device).item()
+            chosen.append(start_idx)
+            # maintain min distances to chosen set
+            dists = torch.cdist(all_mus[start_idx:start_idx+1].to(device), all_mus.to(device)).squeeze(0)  # [N]
+            for _ in range(1, num_centroids):
+                far_idx = torch.argmax(dists).item()
+                chosen.append(far_idx)
+                new_d = torch.cdist(all_mus[far_idx:far_idx+1].to(device), all_mus.to(device)).squeeze(0)
+                dists = torch.minimum(dists, new_d)
+        centroids_idx = torch.tensor(chosen, device='cpu')
+        centroids_mu = all_mus[centroids_idx.to(all_mus.device)]
+    else:
+        print(f"Running k-medoids to find {num_centroids} centroids...")
+        kmedoids = KMedoids(n_clusters=num_centroids, random_state=42).fit(all_mus.detach().cpu().numpy())
+        medoids = torch.tensor(kmedoids.cluster_centers_, device=device, dtype=all_mus.dtype)
+        centroids_idx = torch.tensor(kmedoids.medoid_indices_, device='cpu')
+        # Index on matching device to avoid device mismatch
+        centroids_mu = all_mus[centroids_idx.to(all_mus.device)]
+    # centroids_logvar kept for API compatibility (unused here)
+    centroids_logvar = all_logvars[:centroids_mu.shape[0]]
     
     print(f"✅ Selected {len(centroids_mu)} centroids via k-medoids")
     print(f"✅ Using DIVERSE parameters: T={temperature}, λ={regularization}")
@@ -186,27 +277,52 @@ def extract_diverse_metric(model, architecture, latent_dim, temperature=0.5, reg
     M_matrices = []
     
     print("Computing diverse local metric matrices...")
+    # Ensure all tensors involved in distance computations share the same device
+    # Move centroid vectors to the device of all_mus for consistent arithmetic
+    centroids_mu = centroids_mu.to(all_mus.device)
     for i, c in enumerate(tqdm(centroids_mu)):
-        # Compute distances to all points
-        dists = torch.norm(all_mus - c, dim=1)
-        # Gaussian weights with DIVERSE temperature
-        weights = torch.exp(-dists ** 2 / (temperature ** 2))
-        weights = weights / (weights.sum() + 1e-8)
-        
-        # Weighted mean
-        mean = (weights.unsqueeze(1) * all_mus).sum(dim=0)
-        # Weighted covariance
-        diffs = all_mus - mean.unsqueeze(0)
-        weighted_cov = torch.einsum('n,ni,nj->ij', weights, diffs, diffs)
-        
-        # Add DIVERSE regularization
-        metric = weighted_cov + regularization * torch.eye(latent_dim)
+        if neighbor_mode == "knn":
+            # Use k nearest neighbors for local covariance
+            # All on same device
+            dists = torch.norm(all_mus - c, dim=1)
+            k = min(knn_k, all_mus.shape[0])
+            knn_vals, knn_idx = torch.topk(-dists, k=k)  # negative distances -> largest are closest? wrong
+            # Correct: topk with smallest distances
+            knn_idx = torch.topk(dists, k=k, largest=False).indices
+            local = all_mus[knn_idx]
+            mean = local.mean(dim=0)
+            diffs = local - mean.unsqueeze(0)
+            weighted_cov = torch.einsum('ni,nj->ij', diffs, diffs) / max(1, local.shape[0]-1)
+        else:
+            # Global weighted covariance
+            # All on same device
+            dists = torch.norm(all_mus - c, dim=1)
+            weights = torch.exp(-dists ** 2 / (temperature ** 2))
+            weights = weights / (weights.sum() + 1e-8)
+            mean = (weights.unsqueeze(1) * all_mus).sum(dim=0)
+            diffs = all_mus - mean.unsqueeze(0)
+            weighted_cov = torch.einsum('n,ni,nj->ij', weights, diffs, diffs)
+
+        # Regularize
+        metric = weighted_cov + regularization * torch.eye(latent_dim, device=all_mus.device, dtype=all_mus.dtype)
         
         # Ensure positive definiteness
         eigenvals = torch.linalg.eigvals(metric).real
         min_eigenval = eigenvals.min().item()
         if min_eigenval < 1e-6:
             metric = metric + (1e-6 - min_eigenval) * torch.eye(latent_dim)
+
+        # Optional normalization of scale so average eigenvalue is controlled
+        if normalize_M and normalize_M.lower() != "none":
+            if normalize_M.lower() == "trace":
+                mean_eig = torch.trace(metric) / float(latent_dim)
+                metric = metric / (mean_eig + 1e-8) * float(target_mean_eig)
+            elif normalize_M.lower() == "det":
+                det_val = torch.linalg.det(metric)
+                # scale so det ≈ target_mean_eig^latent_dim
+                desired_det = float(target_mean_eig) ** float(latent_dim)
+                scale = (det_val.abs() + 1e-12) ** (1.0 / float(latent_dim))
+                metric = metric / (scale + 1e-8) * (desired_det ** (1.0 / float(latent_dim)))
         
         M_matrices.append(metric)
         
@@ -233,11 +349,19 @@ def extract_diverse_metric(model, architecture, latent_dim, temperature=0.5, reg
     print(f"Mean condition number: {cond_nums.mean().item():.2f}")
     print(f"Determinant range: [{dets.min().item():.3e}, {dets.max().item():.3e}]")
     
-    # Save metric data
+    # Save metric data (include 2D projections for stage summary viz if latent_dim==2)
     save_path = Path(save_dir)
     save_path.mkdir(exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
+    # Aggregate scale statistics
+    with torch.no_grad():
+        traces = torch.stack([torch.trace(M) for M in M_matrices])
+        mean_trace = traces.mean().item()
+        mean_eig_overall = (traces / float(latent_dim)).mean().item()
+        dets_all = torch.stack([torch.linalg.det(M) for M in M_matrices])
+        mean_det = dets_all.mean().item()
+
     metric_data = {
         'centroids': centroids_mu,
         'M_matrices': M_matrices,
@@ -253,8 +377,25 @@ def extract_diverse_metric(model, architecture, latent_dim, temperature=0.5, reg
             'eigenvalue_ratio': eigenval_ratio.item(),
             'eigenvalue_std': eigenval_std.item(),
             'condition_number_mean': cond_nums.mean().item(),
-        }
+        },
+        'standardize_latents': bool(standardize_latents),
+        'scale_stats': {
+            'mean_trace': mean_trace,
+            'mean_mean_eig': mean_eig_overall,
+            'mean_det': mean_det,
+            'normalize_M': normalize_M,
+            'target_mean_eig': float(target_mean_eig),
+        },
     }
+    # Cache a light-weight subsample of z for visualization overlays
+    try:
+        sample_idx = torch.linspace(0, all_mus.shape[0]-1, steps=min(4000, all_mus.shape[0])).long()
+        metric_data['z_sample'] = all_mus[sample_idx].cpu()
+    except Exception:
+        pass
+    if standardize_latents:
+        metric_data['scaler_mean'] = scaler_mean
+        metric_data['scaler_scale'] = scaler_scale
     
     metric_path = save_path / f"metric_diverse_{architecture}_ld{latent_dim}_{timestamp}.pt"
     torch.save(metric_data, metric_path)

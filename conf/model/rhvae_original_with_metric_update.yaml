@@ -1,0 +1,85 @@
+# @package model
+
+_target_: rlvae.models.riemannian_flow_vae.RiemannianFlowVAE
+
+# Model architecture
+latent_dim: 16
+input_dim: [64, 64, 3]
+architecture: mlp  # For experiment config interpolation
+
+# Encoder/decoder architecture (handled internally by the original model)
+# The original model creates its own encoder/decoder using pythae components
+# Adding minimal encoder section for experiment config interpolation
+encoder:
+  architecture: mlp
+
+# Flow configuration
+n_flows: 4
+flow_type: "planar"
+flow_hidden_dims: [64, 64]
+# Add src-style flow parameters for Hydra interpolation compatibility
+flow_hidden_size: 256
+flow_n_blocks: 2
+flow_n_hidden: 1
+
+# Loss weights
+beta: 1.0
+riemannian_beta: 1.0  # Base value for adaptive KL
+loop_lambda: 0.05  # Reduced loop penalty for stability
+
+# Posterior type
+posterior_type: "riemannian_metric"
+riemannian_kl_mode: "centered"  # Use centered prior KL instead of sample_logq_logp
+learn_mu_prior: false  # Disable learnable centered prior
+
+# KL / posterior sampling controls (forwarded to original model)
+kl_use_metric_normalization: true
+kl_metric_norm_mode: geomean   # geomean | trace | none
+kl_amp_safe: true              # compute KL in float32 for stability
+posterior_local_alpha: 0.5     # Σ = α G(μ) scale (controls KL magnitude)
+
+# Ramps for stability
+posterior_alpha_ramp_enabled: true
+posterior_alpha_start: 0.25
+posterior_alpha_end: 0.5
+posterior_alpha_ramp_epochs: 10
+beta_ramp_enabled: true
+beta_start: 0.0
+beta_end: 1.0
+beta_ramp_epochs: 5
+beta_ramp_schedule: linear
+
+# Numerical / validation
+eps_chol: 1e-6
+identity_metric_mode: false
+metric_validation_enabled: true
+
+# Metric configuration
+metric:
+  start_with_identity: false
+  n_centroids: 10
+  temperature: 0.5  # FIX: Increased from 0.1 for more stable metric
+  regularization: 0.01  # FIX: Increased from 0.01 for better numerical stability
+
+# NEW: Metric update parameters (for metric adaptation during training)
+update_metric_during_training: false  # Set to true to enable metric updates
+metric_update_frequency: 100
+metric_update_alpha: 0.01
+metric_update_temperature: 0.1
+metric_update_regularization: 0.01
+
+# NEW: Adaptive KL parameters
+adaptive_kl_enabled: true
+adaptive_kl_ramp_up_steps: 10
+adaptive_kl_alignment_weight: 0.1
+
+
+
+
+
+
+# Pretrained components (will be loaded from Stage 1)
+pretrained:
+  encoder_path: null
+  decoder_path: null
+  metric_path: null

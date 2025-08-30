@@ -24,10 +24,10 @@ stage1:
   sequence_length: ${data.sequence_length}
   n_flows: ${oc.decode:${data.sequence_length} - 1}  # n_flows always sequence_length - 1
   beta: ${model.beta}
+  # Fixed: Use correct parameter names from model config
   flow_hidden_size: ${model.flow_hidden_size}
   flow_n_blocks: ${model.flow_n_blocks}
   flow_n_hidden: ${model.flow_n_hidden}
-  epsilon: ${model.epsilon}
   epochs: 200
   temperature: 0.5
   regularization: 0.01
@@ -55,13 +55,14 @@ stage2:
   architecture: ${model.encoder.architecture}
   latent_dim: ${model.latent_dim}
   sequence_length: ${data.sequence_length}
-  n_flows: 5
+  # By rule, n_flows should default to sequence_length - 1 unless explicitly overridden
+  n_flows: ${oc.decode:${data.sequence_length} - 1}
   beta: ${model.beta}
+  # Fixed: Use correct parameter names from model config
   flow_hidden_size: ${model.flow_hidden_size}
   flow_n_blocks: ${model.flow_n_blocks}
   flow_n_hidden: ${model.flow_n_hidden}
-  epsilon: ${model.epsilon}
-  riemannian_beta: 200
+  riemannian_beta: ${model.riemannian_beta}
   metric:
     metric_reg_weight: 0.0
 

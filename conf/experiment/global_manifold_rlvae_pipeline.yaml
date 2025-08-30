@@ -1,0 +1,141 @@
+# @package experiment
+
+# Global Manifold RlVAE Pipeline with Native G⁻¹ 
+# =============================================
+# Enhanced pipeline with manifold sampling visualization and native G⁻¹ implementation
+
+skip_stage1: false
+
+type: "manifold_pipeline"
+name: "global_manifold_rlvae_pipeline"
+description: "Full pipeline: vanilla VAE with diverse metric extraction, then RlVAE with native G⁻¹ and manifold sampling."
+
+# Stage 1: Vanilla VAE + Diverse Metric (with manifold sampling visualization)
+stage1:
+  batch_size: 64
+  model: vanilla_vae
+  training:
+    full_data:
+      batch_size: 64
+  # All important parameters follow the top-level config
+  data: ${data}
+  visualization: standard  # Enhanced visualization for manifold analysis
+  extract_diverse_metric: true
+  # Metric extraction parameters
+  architecture: ${model.encoder.architecture}
+  latent_dim: ${model.latent_dim}
+  sequence_length: ${data.sequence_length}
+  n_flows: ${oc.decode:${data.sequence_length} - 1}
+  beta: ${model.beta}
+  flow_hidden_size: ${model.flow_hidden_size}
+  flow_n_blocks: ${model.flow_n_blocks}
+  flow_n_hidden: ${model.flow_n_hidden}
+  epsilon: ${model.epsilon}
+  epochs: 200
+  temperature: 0.5
+  regularization: 0.01
+  preset: balanced
+  n_heatmaps: 6
+  
+  # Manifold sampling visualization at end of Stage 1
+  manifold_analysis:
+    enabled: true
+    create_at_end: true
+    log_to_wandb: true
+
+# Stage 2: RlVAE with Native G⁻¹ and Manifold Sampling
+stage2:
+  batch_size: 64
+  model: mlp_rlvae_manifold  # Enhanced model with manifold sampling
+  training:
+    full_data:
+      batch_size: 64
+  # All important parameters follow the top-level config
+  data: ${data}
+  visualization: full  # Full visualization for evolution tracking
+  epochs: 200
+  load_pretrained_from_stage1: true
+  
+  # Riemannian sampling configuration
+  sampling:
+    use_riemannian: true
+  posterior:
+    type: riemannian_metric
+    
+  # Core parameters
+  architecture: ${model.encoder.architecture}
+  latent_dim: ${model.latent_dim}
+  sequence_length: ${data.sequence_length}
+  n_flows: 5
+  beta: ${model.beta}
+  flow_hidden_size: ${model.flow_hidden_size}
+  flow_n_blocks: ${model.flow_n_blocks}
+  flow_n_hidden: ${model.flow_n_hidden}
+  epsilon: ${model.epsilon}
+  riemannian_beta: 200
+  
+  # Metric configuration
+  metric:
+    metric_reg_weight: 0.0
+  
+  # **NEW: Manifold Sampling Configuration**
+  manifold_sampling:
+    enabled: true
+    method: "combined"
+    
+    # Step size parameters
+    step_size_base: 0.25
+    exploration_ratio: 0.6
+    direction_change_frequency: 3
+    random_component_scale: 0.1
+    
+    # Sampling bounds
+    bounds:
+      min: -5.0
+      max: 5.0
+    
+    # Combined method parameters
+    combined:
+      n_guided_paths: 20
+      guided_path_length: 30
+      n_explorations: 30
+      exploration_length: 35
+      n_connections: 15
+      connection_steps: 25
+    
+    # Visualization parameters
+    visualization:
+      enabled: true
+      determinant_grid_resolution: 100
+      include_level_lines: true
+      include_density_plot: true
+      save_plots: true
+    
+    # WandB logging for evolution tracking
+    wandb:
+      log_samples: true
+      log_visualizations: true
+      log_frequency: 10  # Every 10 epochs
+    
+    # **Native G⁻¹ Configuration**
+    native_g_inverse:
+      use_native: true
+      temperature: 2.0
+      regularization: 1e-4
+
+# Enhanced logging for manifold pipeline
+log_level: "INFO"
+log_to_file: true
+
+deterministic: true
+benchmark: false
+
+# Enhanced visualization for manifold analysis
+visualization:
+  sequence_viz_count: 64
+  cluster_sequences: true
+  n_clusters: 5
+  cluster_coloring: true
+  show_cluster_centroids: true
+
+batch_size: 64

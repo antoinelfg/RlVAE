@@ -1,0 +1,110 @@
+# Enhanced KL Experiment Configuration
+# This experiment uses the enhanced Riemannian KL mechanism with:
+# - Proper metric loading from pretrained paths
+# - Adaptive beta ramping for stability
+# - Metric alignment penalties
+# - Gradient clipping and loss stabilization
+
+defaults:
+  - _self_
+  - model: rhvae_enhanced_kl
+  - data: cyclic_sprites
+  - training: stable_training
+  - wandb: default
+
+hydra:
+  run:
+    dir: outputs/enhanced_kl_experiment/${now:%Y%m%d_%H%M%S}
+  sweep:
+    dir: outputs/enhanced_kl_sweep/${now:%Y%m%d_%H%M%S}
+    subdir: ${hydra.job.num}
+
+# Experiment settings
+experiment:
+  name: enhanced_kl_experiment
+  description: "Enhanced Riemannian KL with metric loading and posterior alignment"
+  
+  # Training parameters
+  epochs: 50
+  batch_size: 32
+  
+  # Enhanced KL specific settings
+  enhanced_kl:
+    enabled: true
+    adaptive_beta: true
+    ramp_up_steps: 20
+    alignment_weight: 0.15  # Increased for better posterior alignment
+    gradient_clipping: 1.0
+    loss_smoothing: true
+    
+  # Metric loading settings
+  metric_loading:
+    use_pretrained: true
+    temperature_override: 0.1
+    regularization_override: 0.01
+    
+  # Visualization settings
+  visualization:
+    level: intermediate  # Not minimal, not full
+    posterior_analysis: true
+    metric_coverage: true
+    alignment_metrics: true
+    
+  # Logging settings
+  logging:
+    frequency: 10  # Log every 10 steps
+    save_checkpoints: true
+    save_visualizations: true
+
+# Model configuration
+model:
+  latent_dim: 16
+  riemannian_beta: 1.0
+  adaptive_kl_enabled: true
+  adaptive_kl_ramp_up_steps: 20
+  adaptive_kl_alignment_weight: 0.15
+  
+  # Metric update settings (disabled for stability)
+  update_metric_during_training: false
+  metric_update_frequency: 100
+  metric_update_alpha: 0.01
+  
+  # Pretrained components (from recent successful RHVAE runs)
+  pretrained:
+    encoder_path: data/pretrained/encoder_diverse_mlp_ld16_20250822_143848.pt
+    decoder_path: data/pretrained/decoder_diverse_mlp_ld16_20250822_143848.pt
+    metric_path: outputs/stages/B_PRECISION_MLP_16_SPRITES/metric_diverse_mlp_ld16_20250819_152221.pt
+
+# Training configuration
+training:
+  trainer:
+    max_epochs: 50
+    gradient_clip_val: 1.0  # Gradient clipping for stability
+    accumulate_grad_batches: 1
+    
+  # Optimizer settings for stability
+  optimizer:
+    _target_: torch.optim.AdamW
+    lr: 1e-3
+    weight_decay: 1e-4
+    
+  # Learning rate scheduler for stability
+  scheduler:
+    _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+    mode: min
+    factor: 0.5
+    patience: 5
+    min_lr: 1e-6
+
+# Data configuration
+data:
+  batch_size: 32
+  num_workers: 4
+  pin_memory: true
+
+# WandB configuration
+wandb:
+  project: rlvae-enhanced-kl
+  tags: ["enhanced_kl", "metric_loading", "posterior_alignment", "stability"]
+  group: enhanced_kl_experiment
+  notes: "Enhanced Riemannian KL with proper metric loading and improved posterior alignment"

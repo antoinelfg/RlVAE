@@ -1,0 +1,18 @@
+# @package metric
+
+name: rhvae
+implementation: rhvae
+
+# RHVAE-style metric: Gaussian-weighted sum of LL^T around centroids with ridge
+temperature: 0.7
+regularization: 0.01
+
+# Centroid extraction
+n_centroids: 50
+centroid_method: kmedoids   # kmedoids|kmeans|fps|balanced
+neighbor_mode: global       # global|knn
+knn_k: 300
+
+# Logging
+log_heatmaps: 6
+

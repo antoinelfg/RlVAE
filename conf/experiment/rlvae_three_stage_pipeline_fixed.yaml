@@ -1,0 +1,94 @@
+# @package experiment
+
+type: three_stage
+name: rlvae_three_stage_pipeline_fixed
+description: "Fixed three-stage pipeline: Stage A (Vanilla VAE + Diverse Metric), Stage B (Metric at t=0), Stage C (RLVAE with original implementation)."
+
+# Control flags
+run_stage_a: true
+run_stage_b: true
+run_sampling: false  # Disable RHMC for now
+run_stage_c: true
+
+# Stage A: Vanilla VAE + Diverse Metric (like global pipeline Stage 1)
+stage_a:
+  model: vanilla_vae
+  epochs: 50  # Match the working run
+  batch_size: 64
+  lr: 1e-4
+  beta: 1.0
+  architecture: mlp
+  latent_dim: ${model.latent_dim}
+  # Add missing parameters from global pipeline
+  extract_diverse_metric: true
+  temperature: 0.5
+  regularization: 0.01
+  preset: balanced
+  n_heatmaps: 6
+  # Add flow parameters
+  n_flows: ${oc.decode:${data.sequence_length} - 1}
+  flow_hidden_size: 256
+  flow_n_blocks: 2
+  flow_n_hidden: 1
+  epsilon: 1e-6
+
+# Stage B: Metric learning at t=0
+stage_b:
+  implementation: ${metric.implementation}  # rhvae|precision
+  n_centroids: ${metric.n_centroids}
+  temperature: ${metric.temperature}
+  regularization: ${metric.regularization}
+  centroid_method: ${metric.centroid_method}
+  neighbor_mode: ${oc.select:metric.neighbor_mode,global}
+  knn_k: ${oc.select:metric.knn_k,300}
+  use_timestep: ${oc.select:metric.use_timestep,0}
+  standardize_latents: ${oc.select:metric.standardize_latents,false}
+
+# RHMC sampling after Stage B (disabled for now)
+sampling:
+  enabled: false
+  n_steps: ${sampling.n_steps}
+  n_leapfrog: ${sampling.n_leapfrog}
+  step_size: ${sampling.step_size}
+
+# Stage C: RLVAE training with Riemannian prior/posterior (like global pipeline Stage 2)
+stage_c:
+  model: rhvae_original  # Use original working implementation
+  epochs: 50  # Match the working run
+  batch_size: 64
+  riemannian_beta: 8.0  # Use proper value from global pipeline
+  allow_metric_updates: true
+  force_rhvae_components: false
+  update_metric_during_training: true
+  # Add missing parameters from global pipeline
+  load_pretrained_from_stage1: true
+  sampling:
+    use_riemannian: true
+  posterior:
+    type: riemannian_metric
+  architecture: mlp
+  latent_dim: ${model.latent_dim}
+  sequence_length: ${data.sequence_length}
+  n_flows: ${oc.decode:${data.sequence_length} - 1}
+  beta: 1.0
+  flow_hidden_size: 256
+  flow_n_blocks: 2
+  flow_n_hidden: 1
+  epsilon: 1e-6
+  metric:
+    metric_reg_weight: 0.0
+
+# Checkpointing
+checkpoint:
+  save: ${checkpoint.save}
+  load: ${checkpoint.load}
+  dir: ${checkpoint.dir}
+  metric_dir: ${checkpoint.metric_dir}
+  stageA_dir: ${checkpoint.stageA_dir}
+  stageB_dir: ${checkpoint.stageB_dir}
+  stageC_dir: ${checkpoint.stageC_dir}
+  stageA_model: ${checkpoint.stageA_model}
+  metric_file: ${checkpoint.metric_file}
+  rhmc_samples: ${checkpoint.rhmc_samples}
+
+

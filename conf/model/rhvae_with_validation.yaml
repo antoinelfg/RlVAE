@@ -1,0 +1,54 @@
+# @package model
+
+# Enhanced RHVAE model with metric validation and identity mode support
+_target_: models.riemannian_flow_vae.RiemannianFlowVAE
+
+# Model architecture
+input_dim: [3, 64, 64]  # Will be auto-set from data config
+latent_dim: 16
+n_flows: 4
+flow_type: "planar"
+flow_hidden_dims: [64, 64]
+
+# VAE parameters
+beta: 1.0
+riemannian_beta: 1.0
+loop_lambda: 0.1
+loop_mode: "open"
+
+# Posterior and KL configuration  
+posterior_type: "riemannian_metric"
+riemannian_kl_mode: "sample_logq_logp"
+
+# Local metric-aligned Gaussian posterior parameters
+kl_use_metric_normalization: true
+kl_metric_norm_mode: "geomean"  # geomean, trace, none
+posterior_local_alpha: 0.5
+kl_amp_safe: true
+
+# NEW: Metric validation and stability parameters
+eps_chol: 1e-6  # Cholesky regularization strength
+identity_metric_mode: false  # Set to true for identity metric G=I
+metric_validation_enabled: true  # Enable SPD validation
+
+# Metric tensor parameters
+temperature: 0.1
+lbd: 0.01
+n_centroids: 50
+
+# Metric update parameters
+update_metric_during_training: false
+metric_update_frequency: 100
+metric_update_alpha: 0.01
+metric_update_temperature: 0.1
+metric_update_regularization: 0.01
+
+# Adaptive KL parameters
+adaptive_kl_enabled: true
+adaptive_kl_ramp_up_steps: 10
+adaptive_kl_alignment_weight: 0.1
+
+# Device
+device: "auto"
+
+

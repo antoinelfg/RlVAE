@@ -1,0 +1,37 @@
+# Vanilla VAE training for metric analysis with Sprites data
+defaults:
+  - training: base_training
+  - model: vanilla_vae
+  - data: cyclic_sprites
+  - _self_
+
+# Training configuration
+max_epochs: 50
+batch_size: 64
+learning_rate: 1e-4
+num_workers: 8
+
+# Model configuration
+latent_dim: 16
+beta: 1.0
+
+# Data configuration
+max_train_samples: 24000  # Use more data for better training
+
+# Logging
+wandb:
+  project: "rlvae_metric_analysis"
+  name: "vanilla_vae_sprites_metric_analysis"
+  tags: ["vanilla_vae", "sprites", "metric_analysis", "retrieveG"]
+
+# Output configuration
+output_dir: "outputs/vanilla_vae_metric_analysis"
+
+# Metric analysis specific
+metric_analysis:
+  enabled: true
+  num_centroids: 50
+  temperature_multiplier: 1.0
+  regularization: 0.01
+  n_samples: 500
+  grid_points: 100 

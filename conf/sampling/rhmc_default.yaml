@@ -1,0 +1,14 @@
+# @package sampling
+
+enabled: true
+method: rhmc
+
+# RHMC parameters
+n_steps: 100
+n_leapfrog: 50
+step_size: 1e-3
+
+# Diagnostics logging
+log_acceptance_rate: true
+log_energy: true
+

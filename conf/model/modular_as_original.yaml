@@ -1,0 +1,86 @@
+# @package model
+
+_target_: rlvae.models.modular_rlvae.ModularRiemannianFlowVAE
+
+# Core dims
+latent_dim: 16
+input_dim: [64, 64, 3]
+
+# Loop config (modular expects nested)
+loop:
+  mode: open
+  penalty: 0.05
+
+# Encoder/decoder selection for modular managers
+encoder:
+  architecture: mlp
+decoder:
+  architecture: mlp
+
+# Flows (mapped to base API internally)
+n_flows: 4
+flow_hidden_size: 256
+flow_n_blocks: 2
+flow_n_hidden: 1
+
+# Loss weights
+beta: 1.0
+riemannian_beta: 1.0
+
+# Posterior type
+posterior:
+  type: riemannian_metric
+
+# KL / posterior sampling controls
+kl_use_metric_normalization: true
+kl_metric_norm_mode: geomean
+kl_amp_safe: true
+posterior_local_alpha: 0.5
+
+# Ramps
+posterior_alpha_ramp_enabled: true
+posterior_alpha_start: 0.25
+posterior_alpha_end: 0.5
+posterior_alpha_ramp_epochs: 10
+beta_ramp_enabled: true
+beta_start: 0.0
+beta_end: 1.0
+beta_ramp_epochs: 5
+beta_ramp_schedule: linear
+
+# Numerical / validation
+eps_chol: 1e-6
+identity_metric_mode: false
+metric_validation_enabled: true
+
+# Modular metric settings
+metric:
+  trainable: false
+  architecture: fixed
+  # When loading fixed metric files, use these overrides
+  temperature_override: 0.5
+  regularization_override: 0.01
+
+# Metric update (handled by modular MetricUpdateManager)
+update_metric_during_training: false
+metric_update_frequency: 100
+metric_update_alpha: 0.01
+metric_update_temperature: 0.1
+metric_update_regularization: 0.01
+
+# Adaptive KL
+adaptive_kl_enabled: true
+adaptive_kl_ramp_up_steps: 10
+adaptive_kl_alignment_weight: 0.1
+
+# Optional sampling block (guarded in code)
+sampling:
+  use_riemannian: false
+  method: custom
+
+# Pretrained paths
+pretrained:
+  encoder_path: null
+  decoder_path: null
+  metric_path: null
+

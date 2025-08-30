@@ -1,0 +1,54 @@
+# @package model
+
+_target_: src.models.composite.rlvae.RLVAE
+
+input_dim: [3, 64, 64]
+latent_dim: 16
+
+encoder:
+  _target_: src.models.components.encoders.mlp_encoder.MLPEncoder
+  input_dim: ${model.input_dim}
+  latent_dim: ${model.latent_dim}
+  hidden_dims: [1024, 512, 256]
+  dropout: 0.1
+  activation: "relu"
+
+decoder:
+  _target_: src.models.components.decoders.mlp_decoder.MLPDecoder
+  input_dim: ${model.input_dim}
+  latent_dim: ${model.latent_dim}
+  hidden_dims: [256, 512, 1024]
+  dropout: 0.1
+  activation: "relu"
+  output_activation: "sigmoid"
+
+metric:
+  _target_: src.models.components.metric.learned_metric.LearnedMetric
+  latent_dim: ${model.latent_dim}
+  hidden_dims: [256, 256]
+  temperature: 0.1
+  regularization: 0.01
+  normalize_for_kl: "geomean"
+  eps_chol: 1e-6
+  activation: "relu"
+
+posterior:
+  _target_: src.models.components.posteriors.local_riemannian.LocalRiemannianPosterior
+  latent_dim: ${model.latent_dim}
+  alpha: 0.5
+  eps_chol: 1e-6
+
+reconstruction_loss:
+  _target_: src.models.components.losses.reconstruction.GaussianReconstructionLoss
+  sigma: 0.1
+
+kl_loss:
+  _target_: src.models.components.losses.kl.KLVolumePriorLoss
+  latent_dim: ${model.latent_dim}
+  beta: 1.0
+  amp_safe: true
+
+elbo_loss:
+  _target_: src.models.components.losses.elbo.ELBOLoss
+  flow_loss_weight: 1.0
+  loop_penalty_weight: 0.0

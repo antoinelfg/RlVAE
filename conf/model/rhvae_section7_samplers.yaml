@@ -1,0 +1,55 @@
+# Section 7: Samplers & Consistency parameters
+# This configuration enforces proper separation between RHMC samplers (for visualization)
+# and local reparameterization sampling (for training)
+
+samplers:
+  # Training sampler (local reparametrization)
+  training_sampler: "local_reparam"
+  use_metric_aware_posterior: true
+  
+  # Visualization sampler (RHMC prior)
+  visualization_sampler: "rhmc_prior"
+  rhmc_prior_samples: 200
+  rhmc_prior_mcmc_steps: 200
+  rhmc_prior_leapfrog_steps: 30
+  rhmc_prior_step_size: 0.001
+  
+  # Analysis sampler (RHMC posterior)
+  analysis_sampler: "rhmc_posterior"
+  rhmc_posterior_samples_per_batch: 50
+  rhmc_posterior_mcmc_steps: 100
+  rhmc_posterior_leapfrog_steps: 20
+  rhmc_posterior_step_size: 0.002
+  
+  # Safety flags
+  enforce_sampler_separation: true
+  prevent_rhmc_in_training: true
+  require_no_grad_for_analysis: true
+  
+  # Logging and monitoring
+  log_sampler_usage: true
+  track_sampler_context: true
+  monitor_gradient_leakage: true
+
+# Integration with existing model parameters
+model:
+  # Use metric-aware posterior from Section 2
+  posterior_type: "riemannian_metric"
+  posterior_local_alpha: 0.5
+  eps_chol: 1e-6
+  
+  # KL computation from Section 3
+  kl_use_metric_normalization: true
+  kl_metric_norm_mode: "geomean"
+  kl_amp_safe: true
+
+# Training configuration
+training:
+  # Ensure only local reparametrization is used for training
+  use_local_reparam_for_training: true
+  disable_rhmc_in_training: true
+  
+  # Logging
+  log_sampler_separation: true
+  log_gradient_flow: true
+

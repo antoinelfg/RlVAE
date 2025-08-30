@@ -1,0 +1,54 @@
+# Enhanced KL with Metric Update Model Configuration
+# This model uses both enhanced KL mechanism and metric updates during training
+
+_target_: src.models.riemannian_flow_vae.RiemannianFlowVAE
+
+# Basic model parameters
+input_dim: [64, 64, 3]
+latent_dim: 16
+n_flows: 4
+flow_type: "planar"
+flow_hidden_dims: [64, 64]
+
+# KL divergence parameters
+beta: 1.0
+riemannian_beta: 1.0
+
+# Posterior configuration
+posterior_type: "riemannian_metric"
+riemannian_kl_mode: "sample_logq_logp"
+
+# Metric parameters
+temperature: 0.1
+lbd: 0.01
+n_centroids: 50
+
+# Enhanced KL parameters
+adaptive_kl_enabled: true
+adaptive_kl_ramp_up_steps: 20
+adaptive_kl_alignment_weight: 0.15
+
+# Metric update parameters (ENABLED for posterior adaptation)
+update_metric_during_training: true
+metric_update_frequency: 30
+metric_update_alpha: 0.01
+metric_update_temperature: 0.1
+metric_update_regularization: 0.01
+
+# Loop configuration
+loop_lambda: 0.1
+
+# Device configuration
+device: auto
+
+# Pretrained components (from working command)
+pretrained:
+  encoder_path: data/pretrained/encoder_diverse_mlp_ld16_20250820_112008.pt
+  decoder_path: data/pretrained/decoder_diverse_mlp_ld16_20250820_112008.pt
+  metric_path: data/pretrained/metric_diverse_mlp_ld16_20250820_112010.pt
+
+# Metric configuration
+metric:
+  temperature_override: 0.1
+  regularization_override: 0.01
+  start_with_identity: false  # Use pretrained metric instead

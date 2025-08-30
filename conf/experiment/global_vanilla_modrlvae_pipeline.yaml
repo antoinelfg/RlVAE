@@ -1,0 +1,113 @@
+# @package experiment
+
+# Global Vanilla/RHVAE -> Metric(t0) -> ModRLVAE Pipeline
+# ======================================================
+# Stage A: Vanilla VAE (default) or RHVAE on full data
+# Stage B: Metric extraction with t=0 only
+# Stage C: ModRLVAE with loaded metric + pretrained components
+
+type: three_stage
+name: global_vanilla_modrlvae_pipeline
+description: "Vanilla or RHVAE on full data, metric at t=0, then ModRLVAE with pretrained metric + components."
+
+# Control flags
+run_stage_a: true
+run_stage_b: true
+run_sampling: false
+run_stage_c: true
+
+# Stage A: choose 'vanilla_vae' (default) or 'rhvae'
+stage_a:
+  model: vanilla_vae   # options: vanilla_vae | rhvae
+  epochs: 100
+  batch_size: 64
+  lr: 1e-3
+  beta: 1.0
+  architecture: mlp
+  latent_dim: ${model.latent_dim}
+  # RHVAE params used only if model=rhvae
+  riemannian_beta: 1.0
+  temperature: 0.7
+  regularization: 0.01
+  n_centroids: 50
+
+# Stage B: Metric extraction at t=0 (from Stage A outputs)
+stage_b:
+  # implementation: rhvae uses RHVAE’s metric; precision uses empirical precision estimate
+  implementation: ${oc.select:metric.implementation,rhvae}
+  n_centroids: ${oc.select:metric.n_centroids,50}
+  temperature: ${oc.select:metric.temperature,0.7}
+  regularization: ${oc.select:metric.regularization,0.01}
+  centroid_method: ${oc.select:metric.centroid_method,nearest}
+  neighbor_mode: ${oc.select:metric.neighbor_mode,global}
+  knn_k: ${oc.select:metric.knn_k,300}
+  use_timestep: 0
+  standardize_latents: ${oc.select:metric.standardize_latents,false}
+
+# Stage C: ModRLVAE with pretrained metric + components
+stage_c:
+  model: modrlvae
+  epochs: 100
+  batch_size: 64
+  allow_metric_updates: false
+  load_pretrained_from_stage1: true
+  sampling:
+    method: enhanced     # options: official | hmc | posterior_hmc | enhanced | geodesic | basic
+  posterior:
+    type: riemannian_metric
+  architecture: mlp
+  latent_dim: ${model.latent_dim}
+  sequence_length: ${data.sequence_length}
+  n_flows: ${oc.decode:${data.sequence_length} - 1}
+  beta: 1.0
+  flow_hidden_size: ${model.flow_hidden_size}
+  flow_n_blocks: ${model.flow_n_blocks}
+  flow_n_hidden: ${model.flow_n_hidden}
+  epsilon: ${model.epsilon}
+  riemannian_beta: ${oc.select:model.riemannian_beta, 0.3}
+  metric:
+    metric_reg_weight: 0.0
+
+  # Posterior/KL overrides for Stage C to match the metric‑aware
+  # reparameterized posterior and volume‑element KL used in practice.
+  # These keys are applied to model at runtime by the experiment runner.
+  overrides:
+    # Geometry‑aligned posterior sampling: Σ = α · G(μ)
+    posterior_local_alpha: 0.001
+    posterior_alpha_ramp_enabled: false
+    eps_chol: 1e-5
+    # KL curvature correction and scale‑invariance
+    use_curvature_correction: true         # evaluate G at z in KL
+    kl_use_metric_normalization: true
+    kl_metric_norm_mode: geomean
+    # Keep anisotropy in sampling; clamp tails by Mahalanobis radius
+    posterior_cov_norm_mode: none          # preserve metric anisotropy in Σ
+    posterior_step_clip_scale: 3.0
+    posterior_maha_clip: 9.0              # ≈ 3σ in Mahalanobis units
+    # Stage‑C specific KL weight
+    riemannian_beta: 0.3
+
+# Optional: Stage C metric alternation (plugin-based)
+training:
+  metric_alternation:
+    enabled: true
+    warmup_epochs: 5
+    k_rlvae_epochs: 3
+    metric_step_epochs: 1
+    logdet_clip: 50.0
+    anchor_size: 20000
+    anchor_refresh_frac: 0.1
+    consistency_weight: 0.0
+
+# Checkpoint slots reused across pipeline
+checkpoint:
+  save: ${checkpoint.save}
+  load: ${checkpoint.load}
+  dir: ${checkpoint.dir}
+  metric_dir: ${checkpoint.metric_dir}
+  stageA_dir: ${checkpoint.stageA_dir}
+  stageB_dir: ${checkpoint.stageB_dir}
+  stageC_dir: ${checkpoint.stageC_dir}
+  stageA_model: ${checkpoint.stageA_model}
+  metric_file: ${checkpoint.metric_file}
+  rhmc_samples: ${checkpoint.rhmc_samples}

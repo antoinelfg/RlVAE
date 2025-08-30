@@ -1,0 +1,67 @@
+# @package model
+
+_target_: models.riemannian_flow_vae.RiemannianFlowVAE
+
+input_dim: [3, 64, 64]
+latent_dim: 2
+n_flows: 8
+flow_hidden_size: 256
+flow_n_blocks: 2
+flow_n_hidden: 1
+epsilon: 1e-6
+
+encoder:
+  architecture: "mlp"
+  hidden_dims: [1024, 512, 256]
+  dropout: 0.1
+
+decoder:
+  architecture: "mlp"
+  hidden_dims: [256, 512, 1024]
+  dropout: 0.1
+
+beta: 1.0
+riemannian_beta: 8.0
+
+# RHMC-specific configuration
+posterior_type: "riem_hmc"
+
+# HMC parameters
+hmc_config:
+  mcmc_steps_nbr: 20
+  n_lf: 10
+  eps_lf: 0.02
+  beta_zero: 1.0
+
+sampling:
+  method: "geodesic"
+  use_riemannian: true
+
+loop:
+  mode: "open"
+  penalty: 5.0
+
+metric:
+  temperature_override: 3.0
+  trainable: false
+  architecture: "mlp"
+  arch_kwargs: {}
+  init_from_fixed: false
+  fixed_metric_path: "data/pretrained/vanilla_metric.pt"
+  metric_reg_weight: 0.0
+  metric_reg_type: 'none'
+  metric_reg_target: 0.0
+
+pretrained:
+  encoder_path: data/pretrained/encoder_diverse_mlp_ld2_20250730_105419.pt
+  decoder_path: data/pretrained/decoder_diverse_mlp_ld2_20250730_105419.pt
+  metric_path: data/pretrained/metric_diverse_mlp_ld2_20250730_105420.pt
+
+visualization:
+  level: advanced
+  enable_interactive: true
+  max_sequences: 100
+  interactive_frequency: 1
+  basic_frequency: 1
+  manifold_frequency: 1
+  flow_frequency: 1 

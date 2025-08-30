@@ -1,0 +1,35 @@
+_target_: rlvae.models.modrlvae.ModRLVAE
+
+input_dim: [3, 64, 64]
+latent_dim: 8
+sequence_length: 8   # auto n_flows = sequence_length - 1
+
+posterior_type: riemannian_metric
+beta: 1.0
+riemannian_beta: 1.0
+
+loop:
+  mode: open
+  penalty: 0.0
+
+encoder:
+  architecture: mlp
+decoder:
+  architecture: mlp
+
+flow_hidden_size: 64
+flow_n_blocks: 2
+flow_n_hidden: 1
+
+metric:
+  trainable: false
+  temperature_override: 0.1
+  regularization_override: 0.01
+
+kl_use_metric_normalization: true
+kl_metric_norm_mode: geomean
+use_curvature_correction: true   # or set kl_metric_eval_point: 'z' | 'mu'
+
+phase1_training: false
+phase2_training: false
+

@@ -1,0 +1,47 @@
+# @package model
+
+_target_: rlvae.models.modular_rlvae.ModularRiemannianFlowVAE
+
+# Architecture
+input_dim: [3, 64, 64]
+latent_dim: 16
+n_flows: 0
+flow_hidden_size: 256
+flow_n_blocks: 2
+flow_n_hidden: 1
+epsilon: 1e-6
+
+encoder:
+  architecture: mlp
+
+decoder:
+  architecture: mlp
+
+# Loss / posterior
+beta: 1.0
+riemannian_beta: 0.0
+riemannian_kl_mode: sample_logq_logp
+
+posterior:
+  type: gaussian
+
+# Recon settings
+reconstruction_mode: t0_only
+
+# Loop configuration (required by ModularRiemannianFlowVAE)
+loop:
+  mode: open
+  penalty: 0.0
+
+sampling:
+  method: geodesic
+  use_riemannian: false
+
+metric:
+  temperature_override: null
+  regularization_override: 0.1
+
+pretrained:
+  encoder_path: /home/alaforgu/scratch/longitudinal_experiments/RlVAE/data/pretrained/encoder_diverse_mlp_ld16_20250813_143256.pt
+  decoder_path: /home/alaforgu/scratch/longitudinal_experiments/RlVAE/data/pretrained/decoder_diverse_mlp_ld16_20250813_143256.pt
+  metric_path: /home/alaforgu/scratch/longitudinal_experiments/RlVAE/data/pretrained/metric_diverse_mlp_ld16_20250813_143259.pt

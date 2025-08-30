@@ -1,30 +1,49 @@
 """
-RiemannianFlowVAE Components Package
+Model components module.
 
-This package contains modular components extracted from the monolithic
-riemannian_flow_vae.py implementation.
-
-Components:
-- metric_tensor: Riemannian metric tensor computations
-- metric_loader: Pretrained metric loading utilities  
-- flow_manager: Normalizing flow sequence management
-- loss_manager: Loss computation coordination
-- encoder_manager: Modular encoder architectures
-- decoder_manager: Modular decoder architectures
+This module contains all the concrete implementations of model components
+(encoders, decoders, metrics, flows, priors, posteriors, samplers, losses).
 """
 
-from .metric_tensor import MetricTensor
-from .metric_loader import MetricLoader
-from .flow_manager import FlowManager
-from .loss_manager import LossManager
-from .encoder_manager import EncoderManager
-from .decoder_manager import DecoderManager
+# Import all component types
+from .encoders import *
+from .decoders import *
+from .metric import *
+from .flows import *
+from .priors import *
+from .posteriors import *
+from .samplers import *
+from .losses import *
 
 __all__ = [
-    'MetricTensor',
-    'MetricLoader',
-    'FlowManager',
-    'LossManager',
-    'EncoderManager',
-    'DecoderManager',
+    # Encoders
+    "MLPEncoder",
+    "CNNEncoder",
+    # Decoders  
+    "MLPDecoder",
+    "CNNDecoder",
+    # Metrics
+    "LearnedMetric",
+    "IdentityMetric",
+    "FixedMetric",
+    # Flows
+    "AffineFlow",
+    "PlanarFlow",
+    "RadialFlow",
+    # Priors
+    "VolumePrior",
+    "RiemannianGaussianPrior",
+    "StandardGaussianPrior",
+    # Posteriors
+    "LocalRiemannianPosterior",
+    "EuclideanGaussianPosterior",
+    # Samplers
+    "ReparameterizationSampler",
+    "RHMCSampler",
+    # Losses
+    "GaussianReconstructionLoss",
+    "BernoulliReconstructionLoss",
+    "KLVolumePriorLoss",
+    "KLEuclideanLoss",
+    "ELBOLoss",
 ] 

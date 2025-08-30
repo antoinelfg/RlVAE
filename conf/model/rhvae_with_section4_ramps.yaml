@@ -1,0 +1,28 @@
+# @package model
+defaults:
+  - rhvae_with_section2_posterior # Extends previous sections
+
+model_name: "rhvae_with_section4_ramps"
+
+# Section 4: Ramps (Stability) parameters
+
+# β-ramp (KL weight): 0 → target over 3–10 epochs
+beta_ramp_enabled: true          # Enable β ramping
+beta_start: 0.0                  # Starting β value (0 as per requirement)
+beta_end: 1.0                    # Target β value (1.0 or 2.0)
+beta_ramp_epochs: 5              # 3-10 epochs as per requirement
+beta_ramp_schedule: "linear"     # linear, cosine, exponential
+
+# α-ramp (posterior covariance): already implemented in section 2
+# Enhanced settings for section 4
+posterior_alpha_ramp_enabled: true
+posterior_alpha_start: 0.25      # Start small as per requirement
+posterior_alpha_end: 0.8         # Target (0.5–1.0 range)
+posterior_alpha_ramp_epochs: 8   # 5–10 epochs as per requirement
+
+# Learning rate warmup for flows/decoder (optional)
+lr_warmup_enabled: false        # Optional - enable to avoid exploding Jacobians
+lr_warmup_epochs: 3             # Number of epochs for LR warmup
+lr_warmup_factor: 0.1           # Start with 10% of base LR
+
+

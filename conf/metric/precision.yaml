@@ -1,0 +1,17 @@
+# @package metric
+
+name: precision
+implementation: precision
+
+# Precision-derived metric from posterior near centroids
+temperature: 0.7
+regularization: 0.01
+n_centroids: 50
+centroid_method: kmeans
+neighbor_mode: knn
+knn_k: 300
+
+# Extraction options
+use_timestep: 0     # t=0 by default
+standardize_latents: false
+

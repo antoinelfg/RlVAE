@@ -1,0 +1,88 @@
+# @package model
+
+_target_: rlvae.models.modular_rlvae.ModularRiemannianFlowVAE
+
+# Architecture
+input_dim: [3, 64, 64]
+latent_dim: 16
+
+# RHVAE specific parameters
+n_lf: 6
+eps_lf: 2e-5
+beta_zero: 1.0
+temperature: 0.7
+regularization: 1e-3
+
+# Reconstruction loss configuration
+reconstruction_loss_type: mse
+
+# Encoder/Decoder architecture
+encoder: null  # Will be created automatically with MLP architecture
+decoder: null  # Will be created automatically with MLP architecture
+
+# Metric parameters
+align_with_knn_cov: false
+knn_k: 300
+alpha_align: 0.5
+metric_normalization: none
+weight_kernel: isotropic
+weight_metric_normalization: trace
+normalize_weight_sum: false
+topk_weights: null
+reestimate_metric_from_decoder_jacobian: false
+jacobian_alpha: 0.5
+jacobian_h: 1e-3
+jacobian_stride: 4
+metric_scale: 1.0
+realign_centroids: false
+centroid_realign_method: kmeans
+max_centroids: null
+centroid_subsample_method: fps
+
+# Pretrained components (for pipeline stages)
+pretrained:
+  encoder_path: null
+  decoder_path: null
+  metric_path: null
+
+# Metric configuration (for pipeline stages)
+metric:
+  fixed_metric_path: null
+  init_from_fixed: false
+
+# Posterior configuration (for pipeline stages)
+posterior:
+  type: "riemannian_metric"
+
+# Flow configuration (for pipeline stages)
+n_flows: 7
+
+# Riemannian KL configuration (for pipeline stages)
+riemannian_kl_mode: "sample_logq_logp"
+
+# Riemannian beta configuration (for pipeline stages)
+riemannian_beta: 1.0
+
+# Flow configuration (for pipeline stages)
+flow_hidden_size: 256
+flow_n_blocks: 2
+flow_n_hidden: 1
+epsilon: 1e-6
+
+# Beta configuration (for pipeline stages)
+beta: 1.0
+
+# Loop configuration (for pipeline stages)
+loop:
+  mode: "open"
+  penalty: 0.0
+
+# Sampling configuration (for pipeline stages)
+sampling:
+  method: "geodesic"
+  use_riemannian: true
+
+# Temporal dynamics configuration
+reconstruction_mode: "all"  # "all" | "t0_only" | "t0_weighted"
+encode_all_timesteps_if_no_flows: true
+kl_over_all_timesteps_if_flows: false  # KL only on z₀ (t=0), not all timesteps

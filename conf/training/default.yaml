@@ -18,6 +18,7 @@ trainer:
   enable_model_summary: true
   deterministic: false
   use_distributed_sampler: false  # Disable for single GPU
+  gradient_clip_val: 1.0  # FIX: Add gradient clipping for stability
 
 # Data parameters
 data:
@@ -33,7 +34,7 @@ model:
   posterior:
     type: "riemannian_metric"
   sampling:
-    method: "enhanced_riemannian"
+    method: "enhanced"
     use_riemannian: true
   loop:
     mode: "closed"
@@ -42,7 +43,7 @@ model:
 # Optimization
 optimizer:
   name: "adam"
-  lr: 0.001
+  lr: 0.0005  # Reduced learning rate for stability
   weight_decay: 0.0001
 
 # Logging
@@ -51,6 +52,9 @@ logging:
   save_top_k: 3
   monitor: "val_loss"
   mode: "min"
+  # Stage C throttles
+  stage_c_metric_viz_every_n_epochs: 5
+  metric_snapshot_every_n_epochs: 5
 
 # Visualization
 visualization:
@@ -75,3 +79,14 @@ early_stopping:
   patience: 20
   monitor: "val_loss"
   mode: "min" 
+
+# Alternating metric update schedule (disabled by default)
+metric_alternation:
+  enabled: false         # set true to enable alternating schedule
+  warmup_epochs: 5       # freeze metric for first N epochs
+  k_rlvae_epochs: 3      # epochs updating theta, phi, flows with metric frozen
+  metric_step_epochs: 1  # epochs updating metric only (others frozen)
+  anchor_size: 20000     # number of anchor points A in S
+  anchor_refresh_frac: 0.1  # refresh 10% of anchors per metric epoch
+  logdet_clip: 50.0      # clamp for numerical stability
+  consistency_weight: 0.0  # optional pushforward consistency penalty weight

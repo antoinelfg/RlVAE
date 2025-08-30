@@ -1,0 +1,45 @@
+# @package evaluation
+
+# Evaluation Configuration that uses RHMC for generation sampling
+
+# Base toggles
+enabled: true
+run_during_training: false
+run_during_testing: true
+run_at_end_only: true
+
+# Generation evaluation
+# Use RHMC sampler by default
+sampler_types: ["hmc"]
+generation_methods: ["geodesic", "enhanced", "basic"]
+
+generation:
+  enabled: true
+  methods: ["geodesic", "enhanced", "basic"]
+  n_samples_per_method: 100
+  comprehensive_n_samples: 500
+  batch_size: 32
+  save_samples: true
+
+# FID evaluation (unchanged)
+fid:
+  enabled: true
+  compute_fid: true
+  n_generated_samples: 1000
+  batch_size: 50
+  inception_batch_size: 64
+  real_samples_subset: 2000
+  cache_real_stats: true
+  fid_cache_dir: data/fid_cache
+  fid_batch_size: 32
+  real_data_cache_key: test_dataset
+  n_real_samples: 1000
+
+# Other evaluation parts (defaults inherited by evaluator)
+reconstruction:
+  enabled: true
+inference:
+  enabled: true
+benchmarking:
+  enabled: false
+

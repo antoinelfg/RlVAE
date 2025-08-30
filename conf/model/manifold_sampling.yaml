@@ -1,0 +1,60 @@
+# @package _global_
+
+# Manifold Sampling Configuration
+# ===============================
+# Configuration for relaxed manifold-guided sampling methods
+
+defaults:
+  - base_config
+
+manifold_sampling:
+  # Enable manifold sampling
+  enabled: true
+  
+  # Sampling method: relaxed_guided, relaxed_exploration, relaxed_connections, combined
+  method: "combined"
+  
+  # Step size parameters
+  step_size_base: 0.25
+  step_size_guided: 0.25
+  step_size_exploration: 0.2
+  step_size_connections: 0.18
+  
+  # Exploration parameters
+  exploration_ratio: 0.6  # Ratio of metric-guided vs random steps (0.0-1.0)
+  direction_change_frequency: 3  # How often to change directions (in steps)
+  random_component_scale: 0.1  # Scale of random component in steps
+  
+  # Sampling bounds
+  bounds:
+    min: -5.0
+    max: 5.0
+  
+  # Sampling counts for combined method
+  combined:
+    n_guided_paths: 20
+    guided_path_length: 30
+    n_explorations: 30
+    exploration_length: 35
+    n_connections: 15
+    connection_steps: 25
+  
+  # Visualization parameters
+  visualization:
+    enabled: true
+    determinant_grid_resolution: 100
+    include_level_lines: true
+    include_density_plot: true
+    save_plots: true
+    
+  # WandB logging
+  wandb:
+    log_samples: true
+    log_visualizations: true
+    log_frequency: 5  # Every N epochs
+    
+  # Native G⁻¹ parameters (when using native inverse metric)
+  native_g_inverse:
+    use_native: true  # Use native G⁻¹ implementation
+    temperature: 2.0
+    regularization: 1e-4

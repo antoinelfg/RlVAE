@@ -1,0 +1,50 @@
+# @package model
+defaults:
+  - rhvae_with_section4_ramps # Extends all previous sections
+
+model_name: "rhvae_phase1_training"
+
+# Section 5: Phase 1 Training (Posterior → Metric, metric frozen) parameters
+
+# Phase 1 training mode
+phase1_training: true           # Enable Phase 1 training mode
+
+# Centroid regularizer (optional) - λ_cent min_k ||μ(x_0) - c_k||_{G(c_k)}^2
+centroid_regularizer_enabled: true      # Enable centroid regularization
+centroid_regularizer_weight: 0.01       # λ_cent (small weight as per requirement)
+centroid_regularizer_t0_only: true      # Apply only at t=0 (first frame)
+
+# Enhanced ramping for Phase 1
+beta_ramp_enabled: true         # Gradual KL weight introduction
+beta_start: 0.0
+beta_end: 1.0
+beta_ramp_epochs: 8             # Longer ramp for Phase 1 stability
+
+posterior_alpha_ramp_enabled: true  # Gradual posterior covariance scaling
+posterior_alpha_start: 0.25
+posterior_alpha_end: 0.6        # Conservative target for Phase 1
+posterior_alpha_ramp_epochs: 10
+
+# Architecture and training settings optimized for Phase 1
+input_dim: [3, 64, 64]          # RGB 64x64 images (Sprites)
+latent_dim: 16                  # Reasonable latent dimension for Sprites
+encoder:
+  architecture: "cnn"           # CNN encoder for image data
+decoder:
+  architecture: "cnn"           # CNN decoder for image reconstruction
+
+# Training parameters
+posterior_type: "riemannian_metric"  # Use metric-aware posterior
+kl_use_metric_normalization: true
+kl_metric_norm_mode: "geomean"
+kl_amp_safe: true
+
+# Flow configuration (will be trained)
+n_flows: 4
+flow_type: "planar"
+flow_hidden_dims: [64, 64]
+
+# Metric configuration (will be frozen)
+eps_chol: 1e-6
+identity_metric_mode: false    # Use real metric
+metric_validation_enabled: true

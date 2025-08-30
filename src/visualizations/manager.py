@@ -109,8 +109,11 @@ class VisualizationConfig:
                 enable_manifold=True,
                 enable_interactive=False,
                 enable_flow_analysis=True,
-                enable_dynamics=False,
-                flow_frequency=5
+                enable_dynamics=True,
+                basic_frequency=1,
+                manifold_frequency=2,
+                flow_frequency=4,
+                dynamics_frequency=4
             ),
             VisualizationLevel.ADVANCED: cls(
                 level=level,
@@ -257,7 +260,11 @@ class VisualizationManager:
             # Basic visualizations (always run if enabled)
             if (self.viz_config.enable_basic and 
                 epoch % self.viz_config.basic_frequency == 0):
-                self._run_basic_visualizations(x_sample, epoch)
+                try:
+                    self._run_basic_visualizations(x_sample, epoch)
+                except Exception as e:
+                    print(f"⚠️ Visualization error at epoch {epoch}: {e}")
+                    return
             
             # Manifold visualizations
             if (self.viz_config.enable_manifold and 
@@ -293,6 +300,12 @@ class VisualizationManager:
         basic.create_cyclicity_analysis(x_sample, epoch)
         basic.create_sequence_trajectories(x_sample, epoch)
         
+        # Enhanced KL visualization (every basic frequency)
+        try:
+            basic.create_enhanced_kl_visualization(x_sample, epoch)
+        except Exception as e:
+            print(f"⚠️ Enhanced KL visualization failed: {e}")
+        
         # Reconstruction analysis less frequently
         if epoch % (self.viz_config.basic_frequency * 2) == 0:
             basic.create_reconstruction_analysis(x_sample, epoch)
@@ -305,6 +318,15 @@ class VisualizationManager:
         manifold = self.modules['manifold']
         manifold.create_metric_heatmaps(x_sample, epoch)
         manifold.create_pca_analysis(x_sample, epoch)
+        # RHMC sampling overlays and geodesics every manifold tick
+        try:
+            manifold.create_rhmc_sampling_overlay(x_sample, epoch)
+        except Exception as e:
+            print(f"[viz] RHMC overlay failed: {e}")
+        try:
+            manifold.create_random_pair_geodesics(x_sample, epoch)
+        except Exception as e:
+            print(f"[viz] Geodesics failed: {e}")
         
         # Enhanced analysis less frequently
         if epoch % (self.viz_config.manifold_frequency * 2) == 0:

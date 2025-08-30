@@ -34,7 +34,7 @@ model:
   posterior:
     type: "riemannian_metric"
   sampling:
-    method: "enhanced_riemannian"
+    method: "enhanced"
     use_riemannian: true
   loop:
     mode: "open"

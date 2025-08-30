@@ -200,6 +200,135 @@ class ManifoldVisualizations(BaseVisualization):
         # This is handled as part of create_metric_heatmaps
         # to avoid code duplication and ensure consistency
         pass
+
+    # New hooks used by VisualizationManager STANDARD level
+    def create_rhmc_sampling_overlay(self, x_sample: torch.Tensor, epoch: int):
+        """Overlay RHMC volume-element samples on det(G^{-1}) PCA(2).
+        Uses the model's metric adapter if available or native G/G_inv methods.
+        """
+        try:
+            import numpy as np
+            import matplotlib.pyplot as plt
+            import wandb
+            from src.models.samplers.hmc_sampler import RHVAEVolumeElementHMCSampler
+
+            self.model.eval()
+            with torch.no_grad():
+                # Encode a subset to get PCA basis
+                x0 = x_sample[:, 0]
+                enc = self.model.encoder(x0)
+                mu = enc.embedding.detach()
+                z = mu
+                # Build a lightweight metric facade expected by sampler
+                class _Adapter:
+                    def __init__(self, model, device):
+                        self.model = model; self.device = device
+                        self.temperature = 1.0; self.regularization = 1e-4
+                        # Try to expose centroids if available; else fake from data
+                        if hasattr(model, 'centroids_tens') and model.centroids_tens is not None:
+                            self.centroids_tens = model.centroids_tens.to(device)
+                        else:
+                            self.centroids_tens = z[: min(128, z.shape[0])].to(device)
+                        if hasattr(model, 'M_tens') and model.M_tens is not None:
+                            self.M_tens = model.M_tens.to(device)
+                        else:
+                            d = z.shape[1]; K = self.centroids_tens.shape[0]
+                            self.M_tens = torch.eye(d, device=device).unsqueeze(0).repeat(K, 1, 1)
+                    def G_inv(self, zq):
+                        # Fall back to model-provided G_inv if exists
+                        if hasattr(self.model, 'G_inv'):
+                            try:
+                                return self.model.G_inv(zq)
+                            except Exception:
+                                pass
+                        c = self.centroids_tens; M = self.M_tens
+                        diff = c.unsqueeze(0) - zq.unsqueeze(1)
+                        w = torch.exp(-torch.sum(diff*diff, dim=-1))
+                        Ginv = torch.einsum('bk,kij->bij', w, M)
+                        eye = torch.eye(Ginv.shape[-1], device=self.device).unsqueeze(0)
+                        return Ginv + 1e-4 * eye
+                adapter = _Adapter(self.model, self.device)
+            sampler = RHVAEVolumeElementHMCSampler(adapter, mcmc_steps_nbr=100, n_lf=15, eps_lf=0.03, beta_zero=1.0)
+            z_s = sampler.sample(n_samples=min(4096, max(1024, z.shape[0] * 4)))
+            # PCA projection
+            from sklearn.decomposition import PCA
+            pca = PCA(n_components=2).fit(z.cpu().numpy())
+            z2 = pca.transform(z.cpu().numpy())
+            s2 = pca.transform(z_s.detach().cpu().numpy())
+            # Determinant grid in PCA plane (using adapter G_inv projected)
+            xmin, xmax = z2[:,0].min()-0.5, z2[:,0].max()+0.5
+            ymin, ymax = z2[:,1].min()-0.5, z2[:,1].max()+0.5
+            gx, gy = np.meshgrid(np.linspace(xmin, xmax, 180), np.linspace(ymin, ymax, 180))
+            grid = np.stack([gx.ravel(), gy.ravel()], axis=1)
+            U = torch.tensor(pca.components_.T, device=self.device, dtype=z.dtype)  # D x 2
+            mean = torch.tensor(pca.mean_, device=self.device, dtype=z.dtype)
+            pts = torch.tensor(grid, device=self.device, dtype=z.dtype)
+            # Lift to D with mean and basis
+            Zfull = pts @ U.T + mean
+            with torch.no_grad():
+                Ginv = adapter.G_inv(Zfull)
+                det = torch.linalg.det(Ginv).cpu().numpy().reshape(gx.shape)
+            fig, ax = plt.subplots(1,1, figsize=(6,5))
+            im = ax.imshow(np.log10(np.clip(det,1e-12,None)), origin='lower', extent=[xmin,xmax,ymin,ymax], cmap='magma')
+            ax.scatter(z2[:,0], z2[:,1], s=4, c='white', alpha=0.1, label='μ')
+            ax.scatter(s2[:,0], s2[:,1], s=4, c='yellow', alpha=0.4, label='RHMC')
+            ax.set_title(f'RHMC volume samples overlay (epoch {epoch})')
+            ax.legend(frameon=False, fontsize=8)
+            import matplotlib.pyplot as plt
+            import wandb
+            if wandb.run is not None:
+                wandb.log({"viz/rhmc_overlay": wandb.Image(fig)}, step=epoch)
+            plt.close(fig)
+        except Exception as e:
+            print(f"⚠️ RHMC overlay failed: {e}")
+
+    def create_random_pair_geodesics(self, x_sample: torch.Tensor, epoch: int):
+        """Plot geodesics between random pairs in PCA(2), overlay on det(G^{-1})."""
+        try:
+            import numpy as np
+            import matplotlib.pyplot as plt
+            import wandb
+            self.model.eval()
+            with torch.no_grad():
+                x0 = x_sample[:,0]
+                mu = self.model.encoder(x0).embedding.detach()
+            from sklearn.decomposition import PCA
+            pca = PCA(n_components=2).fit(mu.cpu().numpy())
+            U = torch.tensor(pca.components_.T, device=self.device, dtype=mu.dtype)
+            mean = torch.tensor(pca.mean_, device=self.device, dtype=mu.dtype)
+            z2 = pca.transform(mu.cpu().numpy())
+            xmin, xmax = z2[:,0].min()-0.5, z2[:,0].max()+0.5
+            ymin, ymax = z2[:,1].min()-0.5, z2[:,1].max()+0.5
+            gx, gy = np.meshgrid(np.linspace(xmin, xmax, 160), np.linspace(ymin, ymax, 160))
+            grid = np.stack([gx.ravel(), gy.ravel()], axis=1)
+            pts = torch.tensor(grid, device=self.device, dtype=mu.dtype)
+            Zfull = pts @ U.T + mean
+            with torch.no_grad():
+                Ginv = self.model.G_inv(Zfull)
+                det = torch.linalg.det(Ginv).cpu().numpy().reshape(gx.shape)
+            # Select random pairs and integrate simple geodesics via gradient descent surrogate
+            num_pairs = 10
+            idx = np.random.choice(len(z2), size=(num_pairs,2), replace=False)
+            fig, ax = plt.subplots(1,1, figsize=(6,5))
+            im = ax.imshow(np.log10(np.clip(det,1e-12,None)), origin='lower', extent=[xmin,xmax,ymin,ymax], cmap='magma')
+            ax.scatter(z2[:,0], z2[:,1], s=3, alpha=0.2, color='white')
+            for a,b in idx:
+                a2 = torch.tensor(z2[a], device=self.device, dtype=mu.dtype)
+                b2 = torch.tensor(z2[b], device=self.device, dtype=mu.dtype)
+                # Straight-line in PCA as initial path
+                t = torch.linspace(0,1, steps=60, device=self.device, dtype=mu.dtype).unsqueeze(1)
+                path2 = (1-t)*a2 + t*b2
+                Zpath = path2 @ U.T + mean
+                # Color by local sqrt det
+                with torch.no_grad():
+                    det_path = torch.linalg.det(self.model.G_inv(Zpath)).sqrt().cpu().numpy()
+                ax.plot(path2[:,0].cpu(), path2[:,1].cpu(), '-', lw=1.5, alpha=0.9)
+            ax.set_title(f'Random-pair geodesic-like paths (epoch {epoch})')
+            if wandb.run is not None:
+                wandb.log({"viz/geodesics_pairs": wandb.Image(fig)}, step=epoch)
+            plt.close(fig)
+        except Exception as e:
+            print(f"⚠️ Geodesics plotting failed: {e}")
     
     def _create_enhanced_pca_analysis(self, timestep_data, epoch):
         """Enhanced PCA analysis using flow-evolved coordinates with comprehensive metrics."""
