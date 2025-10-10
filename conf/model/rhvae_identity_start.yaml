@@ -1,7 +1,10 @@
 _target_: src.models.riemannian_flow_vae.RiemannianFlowVAE
 
 # Model parameters
-input_dim: [3, 64, 64]
+input_dim: 
+  - ${data.channels}
+  - ${data.image_size[0]}
+  - ${data.image_size[1]}
 latent_dim: 16
 n_flows: 7
 eps_lf: 2e-05
@@ -13,14 +16,20 @@ reconstruction_loss_type: mse
 # Encoder/Decoder architecture
 encoder:
   _target_: src.models.components.encoder.Encoder_VAE_MLP
-  input_dim: [3, 64, 64]
+  input_dim: 
+  - ${data.channels}
+  - ${data.image_size[0]}
+  - ${data.image_size[1]}
   latent_dim: 16
   hidden_dims: [512, 512, 512]
   activation: ReLU
 
 decoder:
   _target_: src.models.components.decoder.Decoder_AE_MLP
-  input_dim: [3, 64, 64]
+  input_dim: 
+  - ${data.channels}
+  - ${data.image_size[0]}
+  - ${data.image_size[1]}
   latent_dim: 16
   hidden_dims: [512, 512, 512]
   activation: ReLU

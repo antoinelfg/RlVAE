@@ -1,0 +1,27 @@
+# @package experiment
+
+defaults:
+  - rlvae_three_stage_long_rhmc_modular
+
+# Aggressive RHMC stepping profile to reproduce divergence
+model:
+  posterior:
+    type: riemannian_rhmc
+    rhmc_steps: 8
+    rhmc_step_size: 0.02
+    rhmc_alpha: 0.5
+    rhmc_eps_reg: 1e-4
+  rhmc_steps: 8
+  rhmc_step_size: 0.02
+  rhmc_alpha: 0.5
+  rhmc_eps_reg: 1e-4
+
+training:
+  model:
+    posterior:
+      type: riemannian_rhmc
+      rhmc_steps: 8
+      rhmc_step_size: 0.02
+      rhmc_alpha: 0.5
+      rhmc_eps_reg: 1e-4
+

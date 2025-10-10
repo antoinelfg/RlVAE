@@ -4,7 +4,10 @@ _target_: rlvae.models.modular_rlvae.ModularRiemannianFlowVAE
 
 # Core dims
 latent_dim: 16
-input_dim: [64, 64, 3]
+input_dim:
+  - ${data.channels}
+  - ${data.image_size[0]}
+  - ${data.image_size[1]}
 
 # Loop config (modular expects nested)
 loop:
@@ -83,4 +86,3 @@ pretrained:
   encoder_path: null
   decoder_path: null
   metric_path: null
-

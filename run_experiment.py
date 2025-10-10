@@ -59,7 +59,7 @@ try:
     from rlvae.models.modular_rlvae import ModularRiemannianFlowVAE, ModelFactory, MetricsCollector
 except Exception:
     from models.modular_rlvae import ModularRiemannianFlowVAE, ModelFactory, MetricsCollector
-from data.cyclic_dataset import CyclicSpritesDataModule
+from data.datamodule_factory import build_data_module
 try:
     from rlvae.training.lightning_trainer import LightningRlVAETrainer
 except Exception:
@@ -83,11 +83,54 @@ class ExperimentRunner:
             isinstance(self.config.data.image_size, (list, tuple)) and
             len(self.config.data.image_size) == 2
         ):
-            self.config.model.input_dim = [
-                self.config.data.channels,
-                self.config.data.image_size[0],
-                self.config.data.image_size[1]
-            ]
+            # Handle struct mode for input_dim assignment
+            try:
+                from omegaconf import OmegaConf
+                original_struct = OmegaConf.is_struct(self.config.model)
+                OmegaConf.set_struct(self.config.model, False)
+                self.config.model.input_dim = [
+                    self.config.data.channels,
+                    self.config.data.image_size[0],
+                    self.config.data.image_size[1]
+                ]
+                OmegaConf.set_struct(self.config.model, original_struct)
+                print(f"[INIT] ✅ Set model.input_dim = {self.config.model.input_dim}")
+            except Exception as e:
+                print(f"[INIT] ⚠️ Failed to set model.input_dim: {e}")
+                # Fallback: try to resolve interpolations
+                try:
+                    OmegaConf.resolve(self.config)
+                    print(f"[INIT] ✅ Resolved interpolations, model.input_dim = {self.config.model.input_dim}")
+                except Exception as e2:
+                    print(f"[INIT] ⚠️ Failed to resolve interpolations: {e2}")
+        # --- AUTOMATION: Allow experiment-level model overrides to propagate globally ---
+        try:
+            exp_cfg = getattr(self.config, 'experiment', None)
+            if exp_cfg is not None and hasattr(exp_cfg, 'model') and exp_cfg.model is not None:
+                # Latent dim override
+                try:
+                    ld_override = getattr(exp_cfg.model, 'latent_dim', None)
+                    if ld_override is not None:
+                        self.config.model.latent_dim = int(ld_override)
+                        if hasattr(self.config, 'training') and hasattr(self.config.training, 'model'):
+                            self.config.training.model.latent_dim = int(ld_override)
+                except Exception:
+                    pass
+                # Metric freeze/temperature overrides
+                try:
+                    m_override = getattr(exp_cfg.model, 'metric', None)
+                    if m_override is not None and hasattr(self.config.model, 'metric') and self.config.model.metric is not None:
+                        if hasattr(m_override, 'trainable') and m_override.trainable is not None:
+                            self.config.model.metric.trainable = bool(m_override.trainable)
+                        if hasattr(m_override, 'init_from_fixed') and m_override.init_from_fixed is not None:
+                            self.config.model.metric.init_from_fixed = bool(m_override.init_from_fixed)
+                        if hasattr(m_override, 'temperature_override'):
+                            # May be None (to use persisted temperature)
+                            self.config.model.metric.temperature_override = m_override.temperature_override
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # ---------------------------------------------------------------
         
         # Setup device
@@ -116,7 +159,7 @@ class ExperimentRunner:
             # Stage C: add recon vs real panel using validation batch
             try:
                 import torchvision.utils as vutils
-                data_module = CyclicSpritesDataModule(self.config.data)
+                data_module = build_data_module(self.config.data)
                 data_module.setup("fit", self.config.training)
                 loader_c = data_module.val_dataloader()
                 batch_c = next(iter(loader_c))[:8].to(self.device)
@@ -155,7 +198,7 @@ class ExperimentRunner:
         wandb_logger = self._setup_wandb("single_run")
         
         # Create data module
-        data_module = CyclicSpritesDataModule(self.config.data)
+        data_module = build_data_module(self.config.data)
         data_module.setup("fit", self.config.training)
         
         # Create model
@@ -209,7 +252,7 @@ class ExperimentRunner:
             wandb_logger = self._setup_wandb(f"comparison_{model_name}")
             
             # Create data module
-            data_module = CyclicSpritesDataModule(model_config.data)
+            data_module = build_data_module(model_config.data)
             data_module.setup("fit", model_config.training)
             
             # Create model wrapper
@@ -741,12 +784,20 @@ class ExperimentRunner:
           - Stage C: RLVAE with Riemannian prior/posterior, optionally updating metric
         """
         from torch.utils.data import DataLoader
-        from scripts.train_diverse_metric_vae import (
-            create_model as create_vanilla,
-            SpritesDataset,
-            extract_diverse_metric,
-            save_model_components,
-        )
+        cfg = self.config
+
+        # Lazy-import Stage A/B helpers only when those stages are requested.
+        create_vanilla = None
+        SpritesDataset = None
+        extract_diverse_metric = None
+        save_model_components = None
+        if getattr(cfg.experiment, 'run_stage_a', True) or getattr(cfg.experiment, 'run_stage_b', True):
+            from scripts.train_diverse_metric_vae import (
+                create_model as create_vanilla,
+                SpritesDataset,
+                extract_diverse_metric,
+                save_model_components,
+            )
         from models.components.metric_tensor import MetricTensor
         from models.components.native_inverse_metric import NativeInverseMetricTensor, NativeInverseRHMC
         import torch
@@ -754,14 +805,13 @@ class ExperimentRunner:
         import yaml
         from pathlib import Path
         import wandb
-
-        cfg = self.config
         out_dir = Path(cfg.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
         # Create a single WandB run for the whole three-stage pipeline
         if cfg.wandb.mode != "disabled" and wandb.run is None:
             try:
+                from omegaconf import OmegaConf  # Ensure OmegaConf is available
                 wandb.init(
                     project=cfg.wandb.project,
                     name=f"three_stage_pipeline_{cfg.experiment.name}",
@@ -784,8 +834,49 @@ class ExperimentRunner:
             latent_dim = getattr(cfg.model, 'latent_dim', 16)
             print(f"[Stage A] Using architecture: {arch}, latent_dim: {latent_dim}")
             input_dim = (cfg.data.channels, cfg.data.image_size[0], cfg.data.image_size[1])
-            train_path = cfg.data.train_path
-            test_path = cfg.data.test_path
+
+            # Build data module generically (supports sprites, ellipses, etc.)
+            data_module = None
+            train_frames_tensor = None
+            test_frames_tensor = None
+            val_frames_tensor = None
+
+            def _dataset_to_frame_tensor(dataset):
+                if dataset is None:
+                    return None
+                frames = []
+                for item in dataset:
+                    sample = item[0] if isinstance(item, (tuple, list)) else item
+                    if isinstance(sample, dict):
+                        sample = sample.get('data', None)
+                    if sample is None:
+                        continue
+                    if sample.dim() == 5:
+                        # [B, T, C, H, W] -> flatten batch dimension first if any
+                        b, t = sample.shape[:2]
+                        sample = sample.reshape(b * t, *sample.shape[2:])
+                    if sample.dim() == 4:
+                        frames.append(sample)
+                    elif sample.dim() == 3:
+                        frames.append(sample.unsqueeze(0))
+                    else:
+                        raise ValueError(f"Unsupported sample rank {sample.dim()} for Stage A dataset flattening")
+                if not frames:
+                    return None
+                return torch.cat(frames, dim=0)
+
+            try:
+                data_module = build_data_module(cfg.data)
+                data_module.setup("fit", getattr(cfg, "training", None))
+                train_frames_tensor = _dataset_to_frame_tensor(getattr(data_module, 'train_dataset', None))
+                val_frames_tensor = _dataset_to_frame_tensor(getattr(data_module, 'val_dataset', None))
+                test_frames_tensor = _dataset_to_frame_tensor(getattr(data_module, 'test_dataset', None))
+            except Exception as data_module_err:
+                print(f"[Stage A] ⚠️ Data module setup failed ({data_module_err}); falling back to paths where available.")
+                data_module = None
+
+            train_path = getattr(cfg.data, 'train_path', None)
+            test_path = getattr(cfg.data, 'test_path', None)
 
             if model_choice == 'rhvae':
                 print("\n=== [Stage A] RHVAE training ===")
@@ -826,7 +917,16 @@ class ExperimentRunner:
                     seed=int(getattr(cfg, 'seed', 42)),
                 )
                 # Use configured batch size for RHVAE Stage A
-                rh_exp.load_data(train_path=train_path, test_path=test_path, batch_size=int(cfg.experiment.stage_a.batch_size))
+                batch_size = int(cfg.experiment.stage_a.batch_size)
+                if train_frames_tensor is not None and test_frames_tensor is not None:
+                    rh_exp.train_data = train_frames_tensor.float()
+                    rh_exp.test_data = test_frames_tensor.float()
+                    rh_exp.batch_size = batch_size
+                    print(f"[Stage A] RHVAE using in-memory tensors from data module (train={rh_exp.train_data.shape}, test={rh_exp.test_data.shape})")
+                elif train_path is not None and test_path is not None:
+                    rh_exp.load_data(train_path=train_path, test_path=test_path, batch_size=batch_size)
+                else:
+                    raise RuntimeError("Stage A RHVAE requires either data module tensors or explicit train/test paths")
                 rh_exp.train(
                     epochs=int(cfg.experiment.stage_a.epochs),
                     learning_rate=1e-4,
@@ -846,7 +946,12 @@ class ExperimentRunner:
                 try:
                     import torchvision.utils as vutils
                     # Load a small batch from test set
-                    raw_test = torch.load(test_path, map_location='cpu')
+                    if test_path is not None:
+                        raw_test = torch.load(test_path, map_location='cpu')
+                    elif test_frames_tensor is not None:
+                        raw_test = test_frames_tensor.cpu()
+                    else:
+                        raise RuntimeError("No Stage A test data available for RHVAE reconstruction logging")
                     if raw_test.ndim == 5:
                         # Use first timestep frames for clarity
                         imgs = raw_test[:8, 0].to(self.device)
@@ -980,19 +1085,58 @@ class ExperimentRunner:
                 print(f"  - Batch size: {cfg.experiment.stage_a.batch_size}")
                 print(f"  - Learning rate: {cfg.experiment.stage_a.lr}")
                 
-                # Build dataset: flatten sequences
-                ds_train = SpritesDataset(train_path, normalize=False, timestep_only=None)
-                ds_test = SpritesDataset(test_path, normalize=False, timestep_only=None)
-                loader = DataLoader(torch.utils.data.ConcatDataset([ds_train, ds_test]), batch_size=cfg.experiment.stage_a.batch_size, shuffle=True)
-                vanilla = create_vanilla(arch, input_dim=input_dim, latent_dim=latent_dim).to(self.device)
+                # Build dataset: flatten sequences (support in-memory tensors or legacy paths)
+                from torch.utils.data import DataLoader as TorchDataLoader
+                from torch.utils.data import ConcatDataset as TorchConcat
+                if train_frames_tensor is not None and train_frames_tensor.numel() > 0:
+                    ds_train = torch.utils.data.TensorDataset(train_frames_tensor.float())
+                else:
+                    ds_train = SpritesDataset(train_path, normalize=False, timestep_only=None)
+
+                if test_frames_tensor is not None and test_frames_tensor.numel() > 0:
+                    ds_test = torch.utils.data.TensorDataset(test_frames_tensor.float())
+                elif test_path is not None:
+                    ds_test = SpritesDataset(test_path, normalize=False, timestep_only=None)
+                elif val_frames_tensor is not None and val_frames_tensor.numel() > 0:
+                    ds_test = torch.utils.data.TensorDataset(val_frames_tensor.float())
+                else:
+                    ds_test = None
+
+                datasets_for_training = [ds_train] if ds_train is not None else []
+                if ds_test is not None:
+                    datasets_for_training.append(ds_test)
+                if len(datasets_for_training) == 0:
+                    raise RuntimeError("Stage A could not build a training dataset")
+                if len(datasets_for_training) == 1:
+                    full_training_dataset = datasets_for_training[0]
+                else:
+                    full_training_dataset = TorchConcat(datasets_for_training)
+
+                loader = TorchDataLoader(
+                    full_training_dataset,
+                    batch_size=cfg.experiment.stage_a.batch_size,
+                    shuffle=True
+                )
+
+                arch_lower = arch.lower()
+                effective_arch = arch_lower.replace('_gray', '') if '_gray' in arch_lower else arch_lower
+                factory_arch = effective_arch
+                if factory_arch not in ["cnn", "resnet", "mlp", "pythae"]:
+                    factory_arch = arch_lower
+
+                vanilla = create_vanilla(factory_arch, input_dim=input_dim, latent_dim=latent_dim).to(self.device)
                 optim = torch.optim.Adam(vanilla.parameters(), lr=cfg.experiment.stage_a.lr, weight_decay=1e-5)
                 # use single run; no extra wandb.init here
                 for epoch in range(cfg.experiment.stage_a.epochs):
                     vanilla.train()
                     total = 0.0
                     for batch in loader:
+                        batch = batch[0] if isinstance(batch, (tuple, list)) else batch
                         batch = batch.to(self.device)
-                        if arch.lower() in ["mlp", "pythae"]:
+                        if batch.dim() == 5:
+                            b, t = batch.shape[:2]
+                            batch = batch.reshape(b * t, *batch.shape[2:])
+                        if effective_arch in ["mlp", "pythae"]:
                             out = vanilla({"data": batch}); loss = out.loss
                         else:
                             out = vanilla(batch); loss = out.loss
@@ -1003,18 +1147,40 @@ class ExperimentRunner:
                     # Every 10 epochs, log PCA of latent means at t=0 to monitor clustering
                     try:
                         if (epoch + 1) % 10 == 0 or (epoch + 1) == int(cfg.experiment.stage_a.epochs):
-                            from scripts.train_diverse_metric_vae import SpritesDataset as _SD
-                            from torch.utils.data import DataLoader as _DL
                             import matplotlib.pyplot as plt
-                            # Build t=0 dataset (train only to save time)
-                            ds0 = _SD(train_path, normalize=False, timestep_only=0)
-                            dl0 = _DL(ds0, batch_size=256, shuffle=False)
+                            from torch.utils.data import DataLoader as _DL
+                            dl0 = None
+                            if train_path is not None:
+                                from scripts.train_diverse_metric_vae import SpritesDataset as _SD
+                                ds0 = _SD(train_path, normalize=False, timestep_only=0)
+                                dl0 = _DL(ds0, batch_size=256, shuffle=False)
+                            elif data_module is not None and getattr(data_module, 'train_dataset', None) is not None:
+                                first_frames = []
+                                for sample in data_module.train_dataset:
+                                    seq = sample[0] if isinstance(sample, (tuple, list)) else sample
+                                    if seq is None:
+                                        continue
+                                    if seq.dim() == 4:
+                                        frame0 = seq[0]
+                                    elif seq.dim() == 3:
+                                        frame0 = seq
+                                    else:
+                                        continue
+                                    first_frames.append(frame0.unsqueeze(0))
+                                    if len(first_frames) >= 6000:
+                                        break
+                                if first_frames:
+                                    frames_tensor = torch.cat(first_frames, dim=0).float()
+                                    dl0 = _DL(torch.utils.data.TensorDataset(frames_tensor), batch_size=256, shuffle=False)
+                            if dl0 is None:
+                                raise RuntimeError("No dataset available for Stage A PCA logging")
                             vanilla.eval()
                             mus = []
                             with torch.no_grad():
                                 for xb in dl0:
+                                    xb = xb[0] if isinstance(xb, (tuple, list)) else xb
                                     xb = xb.to(self.device)
-                                    if arch.lower() in ["mlp", "pythae"]:
+                                    if effective_arch in ["mlp", "pythae"]:
                                         enc = vanilla.encoder(xb); mu = enc.embedding
                                     else:
                                         mu, _ = vanilla.encode(xb)
@@ -1026,29 +1192,80 @@ class ExperimentRunner:
                                 Zc = Z - Z.mean(dim=0, keepdim=True)
                                 U, S, Vh = torch.linalg.svd(Zc, full_matrices=False)
                                 comp = Vh[:2].T
-                                proj = (Zc @ comp).numpy()
-                                plt.figure(figsize=(6,5))
-                                plt.scatter(proj[:,0], proj[:,1], s=4, alpha=0.35, c='tab:blue')
-                                plt.title(f'Stage A: Latent μ PCA(2) — epoch {epoch+1}')
+                                proj = (Zc @ comp).cpu().numpy()
+                                plt.figure(figsize=(6, 5))
+                                plt.scatter(proj[:, 0], proj[:, 1], s=4, alpha=0.35, c='tab:blue')
+                                plt.title(f'Stage A: Latent μ PCA(2) — t=0 (epoch {epoch+1})')
                                 plt.xlabel('PC1'); plt.ylabel('PC2'); plt.tight_layout()
                                 if wandb.run is not None:
-                                    wandb.log({"stageA/latent_pca_t0": wandb.Image(plt.gcf()), "stageA/epoch": epoch+1})
+                                    wandb.log({"stageA/latent_pca_t0": wandb.Image(plt.gcf())})
                                 plt.close()
+                            # Also log a PCA over all timesteps on the same cadence
+                            try:
+                                raw_all = None
+                                if train_path is not None and Path(train_path).exists():
+                                    raw_all = torch.load(train_path, map_location='cpu')
+                                elif data_module is not None and getattr(data_module, 'train_dataset', None) is not None:
+                                    seq_samples = []
+                                    for sample in data_module.train_dataset:
+                                        seq = sample[0] if isinstance(sample, (tuple, list)) else sample
+                                        if isinstance(seq, torch.Tensor) and seq.dim() == 4:
+                                            seq_samples.append(seq)
+                                        if len(seq_samples) >= 512:
+                                            break
+                                    if seq_samples:
+                                        raw_all = torch.stack(seq_samples, dim=0)
+                                if isinstance(raw_all, torch.Tensor):
+                                    if raw_all.ndim == 5:
+                                        B, T = raw_all.shape[:2]
+                                        frames = raw_all.view(B * T, *raw_all.shape[2:])
+                                    elif raw_all.ndim == 4:
+                                        frames = raw_all
+                                    else:
+                                        frames = None
+                                else:
+                                    frames = None
+                                if isinstance(frames, torch.Tensor):
+                                    with torch.no_grad():
+                                        xb = frames.to(self.device)
+                                        if effective_arch in ["mlp", "pythae"]:
+                                            enc = vanilla.encoder(xb); Z_all = enc.embedding
+                                        else:
+                                            Z_all, _ = vanilla.encode(xb)
+                                    Z_all = Z_all.detach().cpu()
+                                    Zc_all = Z_all - Z_all.mean(dim=0, keepdim=True)
+                                    U_all, S_all, Vh_all = torch.linalg.svd(Zc_all, full_matrices=False)
+                                    comp_all = Vh_all[:2].T
+                                    proj_all = (Zc_all @ comp_all).cpu().numpy()
+                                    plt.figure(figsize=(6, 5))
+                                    plt.scatter(proj_all[:, 0], proj_all[:, 1], s=3, alpha=0.3, c='tab:blue')
+                                    plt.title(f'Stage A: Latent μ PCA(2) — all timesteps (epoch {epoch+1})')
+                                    plt.xlabel('PC1'); plt.ylabel('PC2'); plt.tight_layout()
+                                    if wandb.run is not None:
+                                        wandb.log({"stageA/latent_pca_all_t": wandb.Image(plt.gcf())})
+                                    plt.close()
+                            except Exception:
+                                pass
                     except Exception as e:
                         print(f"[Stage A] ⚠️ Periodic PCA failed (epoch {epoch+1}): {e}")
                 # Reconstructions vs real for Stage A (vanilla path)
                 try:
                     import torchvision.utils as vutils
                     vanilla.eval()
-                    # Sample random, independent sprites (not a temporal sequence)
-                    sample_loader = DataLoader(
-                        torch.utils.data.ConcatDataset([ds_train, ds_test]),
+                    # Sample random, independent frames (not a temporal sequence)
+                    sample_loader = TorchDataLoader(
+                        full_training_dataset,
                         batch_size=8,
                         shuffle=True
                     )
-                    batch = next(iter(sample_loader)).to(self.device)
+                    batch = next(iter(sample_loader))
+                    batch = batch[0] if isinstance(batch, (tuple, list)) else batch
+                    batch = batch.to(self.device)
+                    if batch.dim() == 5:
+                        b, t = batch.shape[:2]
+                        batch = batch.reshape(b * t, *batch.shape[2:])
                     with torch.no_grad():
-                        if arch.lower() in ["mlp", "pythae"]:
+                        if effective_arch in ["mlp", "pythae"]:
                             out = vanilla({"data": batch}); recon = out.recon_x.clamp(0, 1)
                         else:
                             out = vanilla(batch); recon = out.recon_x.clamp(0, 1)
@@ -1065,15 +1282,21 @@ class ExperimentRunner:
                 # Stage A latent space PCA visualization (μ embeddings)
                 try:
                     import matplotlib.pyplot as plt
+                    import plotly.graph_objects as go
                     from torch.utils.data import DataLoader as TorchLoader
                     from torch.utils.data import ConcatDataset as TorchConcat
                     vanilla.eval()
-                    full_loader = TorchLoader(TorchConcat([ds_train, ds_test]), batch_size=256, shuffle=False)
+                    combined_dataset = full_training_dataset
+                    full_loader = TorchLoader(combined_dataset, batch_size=256, shuffle=False)
                     mus = []
                     with torch.no_grad():
                         for xb in full_loader:
+                            xb = xb[0] if isinstance(xb, (tuple, list)) else xb
                             xb = xb.to(self.device)
-                            if arch.lower() in ["mlp", "pythae"]:
+                            if xb.dim() == 5:
+                                b, t = xb.shape[:2]
+                                xb = xb.reshape(b * t, *xb.shape[2:])
+                            if effective_arch in ["mlp", "pythae"]:
                                 enc = vanilla.encoder(xb)
                                 mu = enc.embedding
                             else:
@@ -1095,6 +1318,8 @@ class ExperimentRunner:
                         if wandb.run is not None:
                             wandb.log({"stageA/latent_pca": wandb.Image(plt.gcf())})
                         plt.close()
+
+                        # No epoch sliders — only periodic images every ~10 epochs are logged above
                 except Exception as e:
                     print(f"[Stage A] ⚠️ Latent PCA visualization failed: {e}")
                 # Save vanilla VAE to organized Stage A folder
@@ -1138,15 +1363,633 @@ class ExperimentRunner:
                 'decoder': cfg.pretrained.decoder_path
             }
 
+        def _log_stage_b_wandb_visuals(metric_state, stageB_model, sample_tensor, data_train_path, canonical_arch, latent_dim, metric_save_path=None, extended_visuals=False):
+            if wandb.run is None:
+                return
+            try:
+                import matplotlib.pyplot as plt
+                import numpy as np
+                import torchvision.utils as vutils
+                from pathlib import Path
+                centroids = metric_state.get('centroids')
+                matrices = metric_state.get('M_matrices', None)
+                if matrices is None:
+                    matrices = metric_state.get('metric_matrices', None)
+                if centroids is None or matrices is None or centroids.numel() == 0:
+                    return
+                temperature = float(metric_state.get('temperature', cfg.experiment.stage_b.temperature))
+                regularization = float(metric_state.get('regularization', cfg.experiment.stage_b.regularization))
+                metric_tensor = MetricTensor(
+                    latent_dim=latent_dim,
+                    temperature=temperature,
+                    regularization=regularization,
+                    device=self.device
+                )
+                metric_tensor.load_pretrained(centroids.to(self.device), matrices.to(self.device), temperature, regularization)
+                with torch.no_grad():
+                    G_inv_centroids = metric_tensor.compute_inverse_metric(centroids.to(self.device))
+                det_centroids = torch.linalg.det(G_inv_centroids).clamp(min=1e-12).cpu()
+                log_det = det_centroids.log10()
+                eigvals = torch.linalg.eigvalsh(G_inv_centroids.cpu())
+                min_eigs = eigvals[:, 0].clamp(min=1e-12)
+                max_eigs = eigvals[:, -1].clamp(min=1e-12)
+                cond = (max_eigs / min_eigs).cpu()
+                log_payload = {}
+                visuals_scale_mode = str(getattr(cfg.experiment.stage_b, 'visuals_scale_mode', 'percentile') or 'percentile').lower()
+                if visuals_scale_mode not in {'percentile', 'global'}:
+                    visuals_scale_mode = 'percentile'
+                visuals_jitter_setting = getattr(cfg.experiment.stage_b, 'visuals_jitter_centroids', False)
+                visuals_jitter_auto = isinstance(visuals_jitter_setting, str) and visuals_jitter_setting.lower() == 'auto'
+                visuals_jitter = bool(visuals_jitter_setting) if not visuals_jitter_auto else False
+                visuals_filter_t0 = bool(getattr(cfg.experiment.stage_b, 'visuals_filter_centroids_to_t0', False))
+                data_diag_payload = {}
+                dataset_tensor = None
+                if isinstance(sample_tensor, torch.Tensor) and sample_tensor.numel() > 0:
+                    dataset_tensor = sample_tensor.detach().cpu()
+                elif data_train_path is not None:
+                    try:
+                        path_obj = Path(data_train_path)
+                        if path_obj.exists():
+                            raw_ds = torch.load(path_obj, map_location='cpu', weights_only=False)
+                            if isinstance(raw_ds, dict):
+                                raw_ds = raw_ds.get('data', raw_ds)
+                            if isinstance(raw_ds, torch.Tensor):
+                                dataset_tensor = raw_ds
+                    except Exception as dataset_exc:
+                        print(f"[Stage B] ⚠️ Dataset diagnostics skipped: {dataset_exc}")
+                if isinstance(dataset_tensor, torch.Tensor) and dataset_tensor.ndim >= 4:
+                    ds = dataset_tensor.float()
+                    n_sequences = int(ds.shape[0])
+                    seq_len = int(ds.shape[1]) if ds.ndim >= 5 else 1
+                    frame_shape = tuple(int(x) for x in ds.shape[-3:])
+                    print(f"[Stage B] Dataset diagnostics: n_sequences={n_sequences}, seq_len={seq_len}, frame_shape={frame_shape}")
+                    try:
+                        t0 = ds[:, 0].reshape(n_sequences, -1)
+                        quant = torch.round(t0 * 255).to(torch.int16)
+                        unique_t0 = int(torch.unique(quant, dim=0).shape[0])
+                        print(f"[Stage B] Dataset diagnostics: unique_t0_frames≈{unique_t0}")
+                        data_diag_payload['stageB/data/unique_t0_frames'] = unique_t0
+                    except Exception as diag_exc:
+                        print(f"[Stage B] ⚠️ Could not compute unique t0 frames: {diag_exc}")
+                    data_diag_payload.update({
+                        'stageB/data/n_sequences': n_sequences,
+                        'stageB/data/seq_len': seq_len,
+                    })
+                    if wandb.run is not None and data_diag_payload:
+                        wandb.log(data_diag_payload)
+
+                def _compute_percentile_bounds(log_img):
+                    finite = np.isfinite(log_img)
+                    if not finite.any():
+                        return -12.0, 3.0
+                    lo = float(np.nanpercentile(log_img[finite], 5))
+                    hi = float(np.nanpercentile(log_img[finite], 95))
+                    vmin = max(lo, -12.0)
+                    vmax = min(hi, 3.0)
+                    if not np.isfinite(vmin):
+                        vmin = -12.0
+                    if not np.isfinite(vmax):
+                        vmax = 3.0
+                    if vmax <= vmin:
+                        vmax = vmin + 1e-3
+                    return vmin, vmax
+
+                if stageB_model is not None:
+                    real_batch = None
+                    if sample_tensor is not None:
+                        if sample_tensor.dim() == 5:
+                            real_batch = sample_tensor[:8, 0]
+                        elif sample_tensor.dim() == 4:
+                            real_batch = sample_tensor[:8]
+                    elif data_train_path is not None:
+                        path_obj = Path(data_train_path)
+                        if path_obj.exists():
+                            raw = torch.load(path_obj, map_location='cpu', weights_only=False)
+                            if isinstance(raw, dict):
+                                raw = raw.get('data', raw)
+                            if isinstance(raw, torch.Tensor):
+                                if raw.ndim == 5:
+                                    real_batch = raw[:8, 0]
+                                elif raw.ndim == 4:
+                                    real_batch = raw[:8]
+                    if real_batch is not None and isinstance(real_batch, torch.Tensor):
+                        real_batch = real_batch.float().to(self.device)
+                        stageB_model = stageB_model.to(self.device).eval()
+                        with torch.no_grad():
+                            recon = None
+                            if canonical_arch in ['mlp', 'pythae']:
+                                out = stageB_model({'data': real_batch})
+                                if isinstance(out, dict):
+                                    recon = out.get('recon_x')
+                                    if recon is None:
+                                        recon = out.get('reconstruction')
+                                else:
+                                    recon = getattr(out, 'recon_x', None)
+                                    if recon is None:
+                                        recon = getattr(out, 'reconstruction', None)
+                            else:
+                                out = stageB_model(real_batch)
+                                if isinstance(out, dict):
+                                    recon = out.get('recon_x')
+                                    if recon is None:
+                                        recon = out.get('reconstruction')
+                                else:
+                                    recon = getattr(out, 'recon_x', None)
+                                    if recon is None:
+                                        recon = getattr(out, 'reconstruction', None)
+                            if recon is not None:
+                                recon = recon.to(real_batch.device).clamp(0, 1)
+                                grid = vutils.make_grid(
+                                    torch.cat([real_batch.cpu(), recon.cpu()], dim=0),
+                                    nrow=real_batch.shape[0],
+                                    normalize=True,
+                                    value_range=(0.0, 1.0)
+                                )
+                                log_payload['stageB/recon_grid'] = wandb.Image(grid, caption='Stage B real (top) vs recon (bottom)')
+                centroids_viz = centroids.clone()
+                log_det_viz = log_det.clone()
+                if visuals_filter_t0:
+                    try:
+                        mu0 = None
+                        for key in ['t0_latents', 'mu0', 'latents_t0', 'stageA_latents_t0']:
+                            cand = metric_state.get(key, None)
+                            if isinstance(cand, torch.Tensor) and cand.numel() > 0:
+                                mu0 = cand
+                                break
+                        if mu0 is not None:
+                            mu0 = mu0.to(self.device)
+                            distances = torch.cdist(mu0, centroids.to(self.device))
+                            winners = torch.argmin(distances, dim=1)
+                            visible_idx = torch.unique(winners).to(centroids.device).long()
+                            centroids_viz = centroids.index_select(0, visible_idx)
+                            log_det_viz = log_det.index_select(0, visible_idx.cpu())
+                            print(f"[Stage B] Visuals filtered to {centroids_viz.shape[0]} centroid(s) (config enabled).")
+                        else:
+                            print("[Stage B] No t=0 latents available; using all centroids for visuals.")
+                    except Exception as filt_exc:
+                        print(f"[Stage B] ⚠️ t=0 centroid filtering skipped during visuals: {filt_exc}")
+                        centroids_viz = centroids.clone()
+                        log_det_viz = log_det.clone()
+                total_centroids = int(centroids.shape[0])
+                try:
+                    unique_centroids_raw = int(torch.unique(centroids_viz, dim=0).shape[0])
+                except Exception:
+                    unique_centroids_raw = total_centroids
+                jitter_sigma = float(getattr(cfg.experiment.stage_b, 'visuals_jitter_sigma', 0.005) or 0.005)
+                if not np.isfinite(jitter_sigma) or jitter_sigma <= 0.0:
+                    jitter_sigma = 0.005
+                visuals_jitter_effective = bool(visuals_jitter)
+                if unique_centroids_raw < total_centroids:
+                    if visuals_jitter_auto:
+                        visuals_jitter_effective = True
+                        print(f"[Stage B] Auto-enabling centroid jitter (unique={unique_centroids_raw}/{total_centroids}).")
+                    elif not visuals_jitter_effective:
+                        print(f"[Stage B] Centroid overlap detected: {unique_centroids_raw}/{total_centroids} unique centroids. Enable experiment.stage_b.visuals_jitter_centroids to separate overlapping markers.")
+                log_payload['stageB/centroids/n_unique_raw'] = unique_centroids_raw
+                log_det_viz_np = log_det_viz.detach().cpu().numpy()
+
+                # Build plotting grid in PCA(2) coordinates unconditionally for stable alignment
+                # Prefer PCA fitted on a dense t=0 latent batch if available in metric_state
+                ref_latents = None
+                try:
+                    # Common keys used to store t=0 latents in the metric payload
+                    for k in ['t0_latents', 'z_sample', 'mu0', 'latents_t0']:
+                        if isinstance(metric_state.get(k, None), torch.Tensor):
+                            ref_latents = metric_state[k]
+                            break
+                except Exception:
+                    ref_latents = None
+
+                if ref_latents is not None and isinstance(ref_latents, torch.Tensor) and ref_latents.numel() > 0:
+                    # Subsample to a manageable size for PCA fit
+                    ref = ref_latents.detach().to(self.device)
+                    if ref.dim() != 2 or ref.size(1) != latent_dim:
+                        # Fallback if shape is unexpected
+                        ref = centroids.to(self.device)
+                else:
+                    ref = centroids.to(self.device)
+
+                # If too many points, take up to 2000 for robust PCA fit
+                if ref.size(0) > 2000:
+                    idx = torch.randperm(ref.size(0), device=ref.device)[:2000]
+                    ref = ref[idx]
+
+                ref_mean = ref.mean(0, keepdim=True)
+                centered = ref - ref_mean
+                # Compute top-2 principal directions using torch PCA
+                _, _, V = torch.pca_lowrank(centered, q=2)
+                basis = V[:, :2]  # [D, 2]
+
+                # Project centroids into PCA(2) for overlay
+                proj_centroids = ((centroids_viz.to(self.device) - ref_mean) @ basis).detach().cpu().numpy()
+                proj_centroids_display = proj_centroids.copy()
+                if visuals_jitter_effective and proj_centroids_display.size:
+                    jitter = np.random.normal(loc=0.0, scale=jitter_sigma, size=proj_centroids_display.shape)
+                    proj_centroids_display = proj_centroids_display + jitter
+                    print(f'[Stage B] Applied centroid jitter (sigma={jitter_sigma:.4f}) for visuals.')
+                # Diagnostics: count unique projected centroids (to detect overlaps)
+                try:
+                    pc_round = np.round(proj_centroids, 4)
+                    n_visible = int(pc_round.shape[0])
+                    n_unique = int(np.unique(pc_round, axis=0).shape[0])
+                    print(f"[Stage B] Centroid visibility diagnostics: total={total_centroids}, visible={n_visible}, unique_proj={n_unique}")
+                    if wandb.run is not None:
+                        wandb.log({
+                            'stageB/centroids/n_total': total_centroids,
+                            'stageB/centroids/n_unique_proj': n_unique,
+                            'stageB/centroids/n_unique_raw': unique_centroids_raw,
+                            'stageB/centroids/n_visible_after_filter': n_visible
+                        })
+                except Exception:
+                    pass
+
+                # Set extents from reference points AND projected centroids, so all centroids are visible
+                ref_proj = (centered @ basis).detach().cpu().numpy()  # already centered by ref_mean
+                x_data = np.concatenate([ref_proj[:, 0], proj_centroids[:, 0]]) if ref_proj.size else proj_centroids[:, 0]
+                y_data = np.concatenate([ref_proj[:, 1], proj_centroids[:, 1]]) if ref_proj.size else proj_centroids[:, 1]
+                # Use strict min/max to GUARANTEE all centroids appear, with gentle padding
+                x_min, x_max = float(np.min(x_data)), float(np.max(x_data))
+                y_min, y_max = float(np.min(y_data)), float(np.max(y_data))
+                pad_x = 0.05 * (x_max - x_min + 1e-6)
+                pad_y = 0.05 * (y_max - y_min + 1e-6)
+                xs = np.linspace(x_min - pad_x, x_max + pad_x, 300)
+                ys = np.linspace(y_min - pad_y, y_max + pad_y, 300)
+
+                # Build grid in PCA space, then map back to latent space: z = mean + U2 @ grid
+                # Build grid with PC1 as x and PC2 as y to match the projection of centroids
+                gx, gy = np.meshgrid(xs, ys, indexing='xy')  # gx: PC1, gy: PC2
+                grid_proj = torch.from_numpy(
+                    np.stack([gx, gy], axis=-1).reshape(-1, 2)
+                ).float().to(self.device)
+                mean_latent = ref_mean
+                latent_grid = grid_proj @ basis.T + mean_latent
+                # Optional: project random t=0 latent points for consistent overlays
+                # (Log-scale figures are generated after T selection; skip redundant baseline plots.)
+
+                # Temperature auto-calibration (median 5-NN distance) and T sweep overlays
+                try:
+                    # Compute 5-NN distances on reference latents used for PCA fit
+                    ref_for_t = ref.detach()
+                    if ref_for_t.size(0) > 4000:
+                        idx = torch.randperm(ref_for_t.size(0), device=ref_for_t.device)[:4000]
+                        ref_for_t = ref_for_t[idx]
+                    with torch.no_grad():
+                        # Pairwise distances and k=5 neighbor (skip self at idx 0)
+                        dmat = torch.cdist(ref_for_t, ref_for_t)
+                        dsort, _ = torch.sort(dmat, dim=1)
+                        d5 = dsort[:, 5].clamp_min(1e-8) if dsort.size(1) > 5 else dsort[:, -1].clamp_min(1e-8)
+                        d5_med = float(d5.median().item())
+                        d5_mean = float(d5.mean().item())
+                        d5_p10 = float(torch.quantile(d5, 0.10).item())
+                        d5_p90 = float(torch.quantile(d5, 0.90).item())
+                    T_auto = max(0.05, min(2.5, d5_med))
+                    if wandb.run is not None:
+                        wandb.log({
+                            'stageB/auto_temperature': T_auto,
+                            'stageB/nn_stats/d5_median': d5_med,
+                            'stageB/nn_stats/d5_mean': d5_mean,
+                            'stageB/nn_stats/d5_p10': d5_p10,
+                            'stageB/nn_stats/d5_p90': d5_p90,
+                        })
+
+                    # Precompute T-invariant density proxy on t=0 latents in PCA(2)
+                    ref_eval = ref_for_t  # use possibly downsampled ref set for cost control
+                    ref_eval_proj = ((ref_eval - ref_mean) @ basis).detach().cpu().numpy()
+                    # 5-NN density proxy: rho5 = 1 / d5^2 (computed in PCA space)
+                    try:
+                        from scipy.spatial import cKDTree
+                        tree = cKDTree(ref_eval_proj)
+                        dists, _ = tree.query(ref_eval_proj, k=min(6, max(2, ref_eval_proj.shape[0]-1)))
+                        # dists[:,0] is self-distance ~0; use the 6th or last as 5-NN
+                        d5_proxy = dists[:, -1]
+                    except Exception:
+                        # Fallback: brute force
+                        R = ref_eval_proj
+                        d2 = ((R[:,None,:] - R[None,:,:])**2).sum(-1)
+                        np.fill_diagonal(d2, np.inf)
+                        d5_proxy = np.partition(d2, 4, axis=1)[:, 4] ** 0.5
+                    rho5 = 1.0 / (d5_proxy**2 + 1e-12)
+                    log_rho5 = np.log(rho5 + 1e-24)
+
+                    # Far-set radius in PCA space for contrast computation (T-invariant threshold)
+                    r_far = max(0.75 * d5_p90, d5_med)
+
+                    # Evaluate and log det heatmaps for a small T sweep including T_auto
+                    def _canon_temp(val):
+                        return float(np.round(float(val), 6))
+                    base_candidates = [0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.7, 1.0]
+                    sweep_candidates = {_canon_temp(v) for v in base_candidates}
+                    try:
+                        sweep_candidates.add(_canon_temp(temperature))
+                    except Exception:
+                        pass
+                    if not np.isnan(T_auto):
+                        sweep_candidates.add(_canon_temp(T_auto))
+                    extra_temps = getattr(cfg.experiment.stage_b, 'extra_temps', None)
+                    if isinstance(extra_temps, (list, tuple)):
+                        for val in extra_temps:
+                            try:
+                                sweep_candidates.add(_canon_temp(val))
+                            except (TypeError, ValueError):
+                                print(f"[Stage B] ⚠️ Could not parse extra temperature value: {val}")
+                    sweep_candidates = {t for t in sweep_candidates if np.isfinite(t) and t > 0.0}
+                    sweep_T = sorted(sweep_candidates)
+                    # Storage for T-selection diagnostics (revised criterion) and slider grids
+                    t_sel_rows = []
+                    slider_data = []
+                    for Tval in sweep_T:
+                        try:
+                            mt = MetricTensor(
+                                latent_dim=latent_dim,
+                                temperature=float(Tval),
+                                regularization=regularization,
+                                device=self.device
+                            )
+                            mt.load_pretrained(centroids.to(self.device), matrices.to(self.device), float(Tval), regularization)
+                            with torch.no_grad():
+                                det_grid_T = torch.linalg.det(mt.compute_inverse_metric(latent_grid)).clamp(min=1e-12).cpu().numpy().reshape(len(ys), len(xs))
+                                # Also evaluate det at reference evaluation points (latent space)
+                                ref_eval_lat = ref_eval
+                                if ref_eval_lat.size(0) > 2000:
+                                    idx_eval = torch.randperm(ref_eval_lat.size(0), device=ref_eval_lat.device)[:2000]
+                                    ref_eval_lat = ref_eval_lat[idx_eval]
+                                det_ref = torch.linalg.det(mt.compute_inverse_metric(ref_eval_lat)).clamp(min=1e-12).detach().cpu().numpy()
+
+                            # Correlation with fixed density proxy
+                            try:
+                                from scipy.stats import spearmanr
+                                # Align length if we subsampled ref_eval_lat
+                                if ref_eval_lat.size(0) != ref_eval_proj.shape[0]:
+                                    # Take same number from ref_eval_proj deterministically
+                                    ref_proj_sub = ref_eval_proj[:ref_eval_lat.size(0)]
+                                    # recompute rho5 subset via nearest neighbor to keep order simple
+                                    # approximate by slicing first N entries
+                                    log_rho5_sub = log_rho5[:ref_eval_lat.size(0)]
+                                    corr, _ = spearmanr(np.log10(det_ref), log_rho5_sub)
+                                else:
+                                    corr, _ = spearmanr(np.log10(det_ref), log_rho5)
+                                corr = float(corr) if corr == corr else 0.0
+                            except Exception:
+                                # Fallback to Pearson
+                                a = np.log10(det_ref); b = log_rho5[:a.shape[0]]
+                                am = a - a.mean(); bm = b - b.mean()
+                                corr = float((am * bm).mean() / (am.std() * bm.std() + 1e-12))
+
+                            # Smoothness (lower is better): mean |gradient| of the log-det map
+                            det_grid_T_log = np.log10(np.asarray(det_grid_T) + 1e-16)
+                            local_vmin, local_vmax = _compute_percentile_bounds(det_grid_T_log)
+                            slider_data.append({'T': float(Tval), 'grid_log': det_grid_T_log, 'local_vmin': local_vmin, 'local_vmax': local_vmax})
+                            try:
+                                gy, gx = np.gradient(det_grid_T_log)
+                                smooth = float(np.mean(np.sqrt(gx*gx + gy*gy)))
+                            except Exception:
+                                smooth = float(np.mean(np.abs(det_grid_T_log)))
+
+                            # Contrast near vs far: median(logdet near) - median(logdet far)
+                            # Near: det at ref_eval_lat; Far: det at grid points far from any ref point
+                            try:
+                                # Build far-mask using KD-tree in PCA space
+                                try:
+                                    from scipy.spatial import cKDTree
+                                    tree = cKDTree(ref_eval_proj)
+                                    gx_full, gy_full = np.meshgrid(xs, ys, indexing='xy')
+                                    grid_pts = np.stack([gx_full.ravel(), gy_full.ravel()], axis=1)
+                                    dmin, _ = tree.query(grid_pts, k=1)
+                                except Exception:
+                                    # brute-force fallback in chunks
+                                    GX, GY = np.meshgrid(xs, ys, indexing='xy')
+                                    grid_pts = np.stack([GX.ravel(), GY.ravel()], axis=1)
+                                    R = ref_eval_proj
+                                    dmin = np.empty(grid_pts.shape[0])
+                                    bs = 2000
+                                    for s in range(0, grid_pts.shape[0], bs):
+                                        gp = grid_pts[s:s+bs]
+                                        d2 = ((gp[:,None,:] - R[None,:,:])**2).sum(-1)
+                                        dmin[s:s+bs] = np.sqrt(d2.min(axis=1))
+                                far_mask = dmin > r_far
+                                far_idx = np.flatnonzero(far_mask)
+                                if far_idx.size > 0:
+                                    # Subsample far indices for cost control
+                                    sel = far_idx[::max(1, far_idx.size // 2000)]
+                                    latent_far = latent_grid[sel]
+                                    with torch.no_grad():
+                                        det_far = torch.linalg.det(mt.compute_inverse_metric(latent_far)).clamp(min=1e-12).detach().cpu().numpy()
+                                    logdet_far_med = float(np.median(np.log10(det_far)))
+                                else:
+                                    logdet_far_med = float(np.median(det_grid_T_log))
+                                logdet_near_med = float(np.median(np.log10(det_ref)))
+                                contrast = logdet_near_med - logdet_far_med
+                            except Exception:
+                                contrast = 0.0
+
+                            t_sel_rows.append({'T': float(Tval), 'corr_fixed': corr, 'contrast': contrast, 'smoothness': smooth})
+
+                            # Skip per-T logging; data captured for slider and diagnostics
+                        except Exception as _e:
+                            print(f"[Stage B] ⚠️ T-sweep visualization failed for T={Tval:.3f}: {_e}")
+                    if slider_data:
+                        if visuals_scale_mode == 'global':
+                            global_vmin, global_vmax = -12.0, 3.0
+                        else:
+                            global_vmin = global_vmax = None
+                        for entry in slider_data:
+                            if visuals_scale_mode == 'percentile':
+                                entry['vmin'] = entry['local_vmin']
+                                entry['vmax'] = entry['local_vmax']
+                            else:
+                                entry['vmin'] = global_vmin
+                                entry['vmax'] = global_vmax
+
+                except Exception as e:
+                    print(f"[Stage B] ⚠️ Auto-T and sweep logging failed: {e}")
+                else:
+                    # Choose best T among tested using fixed-density correlation + contrast - small smoothness
+                    try:
+                        if t_sel_rows:
+                            smeds = np.median([r['smoothness'] for r in t_sel_rows]) + 1e-12
+                            for r in t_sel_rows:
+                                r['score'] = 0.6 * r['corr_fixed'] + 0.4 * r['contrast'] - 0.05 * (r['smoothness'] / smeds)
+                            best = max(t_sel_rows, key=lambda r: r['score'])
+                            best_T = float(best['T'])
+                            best_entry = None
+                            for entry in slider_data:
+                                if abs(entry['T'] - best_T) < 1e-6:
+                                    best_entry = entry
+                                    break
+                            if wandb.run is not None:
+                                wandb_payload = {}
+                                table = wandb.Table(columns=['T', 'corr_fixed', 'contrast', 'smoothness', 'score'])
+                                for r in sorted(t_sel_rows, key=lambda x: x['T']):
+                                    table.add_data(r['T'], r['corr_fixed'], r['contrast'], r['smoothness'], r.get('score', 0.0))
+                                wandb_payload['stageB/T_selection_fixed'] = table
+                                wandb_payload['stageB/selected_temperature_fixed'] = best_T
+                                if extended_visuals:
+                                    try:
+                                        import plotly.graph_objects as go
+                                        slider_sorted = sorted(slider_data, key=lambda d: d['T'])
+                                        if slider_sorted:
+                                            active_idx = 0
+                                            for idx, entry in enumerate(slider_sorted):
+                                                if abs(entry['T'] - best_T) < 1e-6:
+                                                    active_idx = idx
+                                                    break
+                                            initial = slider_sorted[active_idx] if active_idx < len(slider_sorted) else slider_sorted[0]
+                                            fig_slider = go.Figure()
+                                            heatmap_kwargs = dict(
+                                                z=initial['grid_log'], x=xs, y=ys,
+                                                colorscale='Viridis', showscale=True,
+                                                colorbar=dict(title='log10 det(G^{-1})')
+                                            )
+                                            if initial.get('vmin') is not None and initial.get('vmax') is not None:
+                                                heatmap_kwargs['zmin'] = initial['vmin']
+                                                heatmap_kwargs['zmax'] = initial['vmax']
+                                            fig_slider.add_trace(go.Heatmap(**heatmap_kwargs))
+                                            if proj_centroids_display.size:
+                                                fig_slider.add_trace(go.Scattergl(
+                                                    x=proj_centroids_display[:, 0], y=proj_centroids_display[:, 1], mode='markers',
+                                                    marker=dict(
+                                                        size=6,
+                                                        color=log_det_viz_np,
+                                                        colorscale='Magma',
+                                                        showscale=False
+                                                    ),
+                                                    name='centroids',
+                                                    hovertemplate='centroid<br>log10 det: %{marker.color:.2f}<extra></extra>'
+                                                ))
+                                            if isinstance(ref_eval_proj, np.ndarray) and ref_eval_proj.size:
+                                                fig_slider.add_trace(go.Scattergl(
+                                                    x=ref_eval_proj[:, 0], y=ref_eval_proj[:, 1], mode='markers',
+                                                    marker=dict(color='rgba(255,255,255,0.35)', size=2),
+                                                    name='t=0 samples',
+                                                    hoverinfo='skip'
+                                                ))
+                                            try:
+                                                stride = max(1, len(xs)//20)
+                                                gx_s = xs[::stride]; gy_s = ys[::stride]
+                                                GXs, GYs = np.meshgrid(gx_s, gy_s)
+                                                fig_slider.add_trace(go.Scattergl(
+                                                    x=GXs.ravel(), y=GYs.ravel(), mode='markers',
+                                                    marker=dict(color='black', size=2, opacity=0.2), name='grid samples'
+                                                ))
+                                            except Exception:
+                                                pass
+                                            frames = []
+                                            for entry in slider_sorted:
+                                                frame_name = f"T={entry['T']:.2f}"
+                                                frames.append(go.Frame(
+                                                    data=[go.Heatmap(z=entry['grid_log'], zmin=entry.get('vmin'), zmax=entry.get('vmax'))],
+                                                    name=frame_name,
+                                                    traces=[0]
+                                                ))
+                                            fig_slider.frames = frames
+                                            steps = []
+                                            for idx, entry in enumerate(slider_sorted):
+                                                label = f"T={entry['T']:.2f}"
+                                                steps.append({
+                                                    'method': 'animate',
+                                                    'label': label,
+                                                    'args': [[label], {'mode': 'immediate', 'frame': {'duration': 0, 'redraw': True}, 'transition': {'duration': 0}}]
+                                                })
+                                            fig_slider.update_layout(
+                                                title=f'Stage B: log10 det(G^{{-1}}) (interactive)',
+                                                xaxis_title='z1', yaxis_title='z2', width=720, height=560,
+                                                sliders=[{'active': active_idx, 'steps': steps, 'x': 0.1, 'y': -0.08, 'len': 0.8, 'currentvalue': {'prefix': 'T=', 'visible': True}}],
+                                                updatemenus=[{'type': 'buttons', 'showactive': False, 'x': 1.0, 'y': 1.05, 'xanchor': 'right', 'yanchor': 'top',
+                                                              'buttons': [{'label': 'Play', 'method': 'animate', 'args': [None, {'fromcurrent': True}]}]}]
+                                            )
+                                            wandb_payload['stageB/visuals/n_slider_frames'] = len(slider_sorted)
+                                            wandb_payload['stageB/plotly_logdet_heatmap_slider'] = fig_slider
+                                    except Exception as slider_exc:
+                                        print(f"[Stage B] ⚠️ Could not build slider visualization: {slider_exc}")
+                                if wandb_payload:
+                                    wandb.log(wandb_payload)
+                            # Persist selected temperature into metric artifact
+                            try:
+                                if metric_save_path is not None:
+                                    state = torch.load(metric_save_path, map_location='cpu', weights_only=False)
+                                    state['selected_temperature'] = best_T
+                                    state['temperature'] = best_T
+                                    torch.save(state, metric_save_path)
+                                    print(f"[Stage B] ✅ Persisted selected T={best_T:.3f} into metric: {metric_save_path}")
+                                    try:
+                                        metric_state['selected_temperature'] = best_T
+                                        metric_state['temperature'] = best_T
+                                    except Exception:
+                                        pass
+                            except Exception as persist_exc:
+                                print(f"[Stage B] ⚠️ Could not persist selected T: {persist_exc}")
+
+                            print(f"[Stage B] Selected temperature (fixed) T*={best_T:.3f} (corr={best['corr_fixed']:.3f}, contrast={best['contrast']:.3f}, smooth={best['smoothness']:.4f}, score={best['score']:.3f})")
+                    except Exception as e:
+                        print(f"[Stage B] ⚠️ Could not compute best-T selection: {e}")
+                # Note: linear-scale interactive plots removed in favour of consolidated log-scale slider.
+                wandb.log(log_payload)
+            except Exception as exc:
+                print(f"[Stage B] Enhanced WandB logging failed: {exc}")
+
         # Stage B: Metric learning at t=0
         if getattr(cfg.experiment, 'run_stage_b', True):
             print("\n=== [Stage B] Metric learning at t=0 ===")
             arch = cfg.model.encoder.architecture
             latent_dim = cfg.model.latent_dim
             metric_impl = cfg.experiment.stage_b.implementation
-            
+
+            def _canonical_architecture(name: str) -> str:
+                if not isinstance(name, str):
+                    return name
+                lowered = name.lower()
+                return lowered.replace('_gray', '')
+
+            canonical_arch = _canonical_architecture(arch)
+
+            data_train_path = getattr(cfg.data, 'train_path', None)
+            data_test_path = getattr(cfg.data, 'test_path', None)
+            stage_b_train_tensor = None
+
+            def _sequence_tensor(dataset):
+                if dataset is None:
+                    return None
+                sequences = []
+                for item in dataset:
+                    seq = item[0] if isinstance(item, (tuple, list)) else item
+                    if seq is None:
+                        continue
+                    if isinstance(seq, dict):
+                        seq = seq.get('data', None)
+                    if seq is None:
+                        continue
+                    if seq.dim() == 5:
+                        sequences.append(seq)
+                    elif seq.dim() == 4:
+                        sequences.append(seq.unsqueeze(0))
+                    elif seq.dim() == 3:
+                        sequences.append(seq.unsqueeze(0))
+                    else:
+                        raise ValueError(f"Unsupported sequence rank {seq.dim()} for Stage B dataset export")
+                if not sequences:
+                    return None
+                return torch.cat(sequences, dim=0)
+
             # Get organized Stage B paths
             stageB_paths = get_stage_paths(cfg, 'B', metric_impl.upper(), arch, latent_dim)
+
+            generated_dataset_path = None
+            if data_train_path is None or (isinstance(data_train_path, str) and not Path(data_train_path).exists()):
+                try:
+                    stage_b_datamodule = build_data_module(cfg.data)
+                    stage_b_datamodule.setup("fit", getattr(cfg, "training", None))
+                    stage_b_train_tensor = _sequence_tensor(getattr(stage_b_datamodule, 'train_dataset', None))
+                    if stage_b_train_tensor is not None:
+                        generated_dataset_path = stageB_paths['base_dir'] / 'stageB_train_sequences.pt'
+                        generated_dataset_path.parent.mkdir(parents=True, exist_ok=True)
+                        torch.save(stage_b_train_tensor, generated_dataset_path)
+                        data_train_path = str(generated_dataset_path)
+                        print(f"[Stage B] Generated train dataset tensor at {data_train_path}")
+                except Exception as dm_err:
+                    print(f"[Stage B] ⚠️ Could not generate in-memory dataset for Stage B metric extraction: {dm_err}")
+
+            if (metric_impl in ('rhvae', 'precision')) and data_train_path is None:
+                raise RuntimeError("Stage B requires a train dataset (data.train_path) but none was provided and automatic generation failed")
             
             # Try to find Stage A data automatically
             stage_a_data = find_stage_a_data(cfg, arch, latent_dim)
@@ -1184,6 +2027,7 @@ class ExperimentRunner:
                         # Force Stage B to use Stage A's architecture and latent_dim
                         arch = stage_a_arch
                         latent_dim = stage_a_ld
+                        canonical_arch = _canonical_architecture(arch)
                         print(f"  - ✅ Updated Stage B to use arch={arch}, latent_dim={latent_dim}")
                     else:
                         print(f"  - ✅ Architecture and latent_dim match between Stage A and Stage B")
@@ -1208,7 +2052,7 @@ class ExperimentRunner:
                     print(f"[Stage B] ✅ Loading model from Stage A:")
                     print(f"  - Encoder path: {stage_a_data['encoder_path']}")
                     print(f"  - Decoder path: {stage_a_data['decoder_path']}")
-                    stageB_model = create_vanilla(arch, input_dim=(cfg.data.channels, cfg.data.image_size[0], cfg.data.image_size[1]), latent_dim=latent_dim).to(self.device)
+                    stageB_model = create_vanilla(canonical_arch, input_dim=(cfg.data.channels, cfg.data.image_size[0], cfg.data.image_size[1]), latent_dim=latent_dim).to(self.device)
                     stageB_model.encoder.load_state_dict(torch.load(stage_a_data['encoder_path'], map_location=self.device, weights_only=False))
                     stageB_model.decoder.load_state_dict(torch.load(stage_a_data['decoder_path'], map_location=self.device, weights_only=False))
                     print(f"[Stage B] ✅ Successfully loaded Stage A encoder/decoder")
@@ -1217,19 +2061,22 @@ class ExperimentRunner:
                     # Fallback to existing model
                     stageB_model = (
                         rh_exp.model if 'rh_exp' in locals() and hasattr(rh_exp, 'model') else
-                        (vanilla if 'vanilla' in locals() else create_vanilla(arch, input_dim=(cfg.data.channels, cfg.data.image_size[0], cfg.data.image_size[1]), latent_dim=latent_dim).to(self.device))
+                        (vanilla if 'vanilla' in locals() else create_vanilla(canonical_arch, input_dim=(cfg.data.channels, cfg.data.image_size[0], cfg.data.image_size[1]), latent_dim=latent_dim).to(self.device))
                     )
                 
+                # Force 150 centroids for Stage B extraction (RHVAE implementation)
+                n_centroids_local = 150
+                print(f"[Stage B] Overriding number of centroids to {n_centroids_local}")
                 metric_path = extract_diverse_metric(
                     model=stageB_model,
-                    architecture=arch,
+                    architecture=canonical_arch,
                     latent_dim=latent_dim,
                     temperature=cfg.experiment.stage_b.temperature,
                     regularization=cfg.experiment.stage_b.regularization,
-                    num_centroids=cfg.experiment.stage_b.n_centroids,
+                    num_centroids=n_centroids_local,
                     save_dir=str(stageB_paths['base_dir']),
                     input_dim=(cfg.data.channels, cfg.data.image_size[0], cfg.data.image_size[1]),
-                    data_path=cfg.data.train_path,
+                    data_path=data_train_path,
                     timestep_only=cfg.experiment.stage_b.use_timestep,
                     standardize_latents=cfg.experiment.stage_b.standardize_latents,
                     centroid_method=cfg.experiment.stage_b.centroid_method,
@@ -1244,23 +2091,26 @@ class ExperimentRunner:
                 # Load model from Stage A if available
                 if stage_a_data is not None:
                     print(f"[Stage B] Loading model from Stage A for precision metric: {stage_a_data['encoder_path']}")
-                    stageB_model = create_vanilla(arch, input_dim=(cfg.data.channels, cfg.data.image_size[0], cfg.data.image_size[1]), latent_dim=latent_dim).to(self.device)
+                    stageB_model = create_vanilla(canonical_arch, input_dim=(cfg.data.channels, cfg.data.image_size[0], cfg.data.image_size[1]), latent_dim=latent_dim).to(self.device)
                     stageB_model.encoder.load_state_dict(torch.load(stage_a_data['encoder_path'], map_location=self.device, weights_only=False))
                     stageB_model.decoder.load_state_dict(torch.load(stage_a_data['decoder_path'], map_location=self.device, weights_only=False))
                 else:
-                    stageB_model = vanilla if 'vanilla' in locals() else create_vanilla(arch, input_dim=(cfg.data.channels, cfg.data.image_size[0], cfg.data.image_size[1]), latent_dim=latent_dim).to(self.device)
+                    stageB_model = vanilla if 'vanilla' in locals() else create_vanilla(canonical_arch, input_dim=(cfg.data.channels, cfg.data.image_size[0], cfg.data.image_size[1]), latent_dim=latent_dim).to(self.device)
                 
                 # Precision metric from posterior: reuse extraction with local KNN covariance -> invert
+                # Force 150 centroids for Stage B extraction (per request)
+                n_centroids_local = 150
+                print(f"[Stage B] Overriding number of centroids to {n_centroids_local}")
                 metric_path = extract_diverse_metric(
                     model=stageB_model,
-                    architecture=arch,
+                    architecture=canonical_arch,
                     latent_dim=latent_dim,
                     temperature=cfg.experiment.stage_b.temperature,
                     regularization=cfg.experiment.stage_b.regularization,
-                    num_centroids=cfg.experiment.stage_b.n_centroids,
+                    num_centroids=n_centroids_local,
                     save_dir=str(stageB_paths['base_dir']),
                     input_dim=(cfg.data.channels, cfg.data.image_size[0], cfg.data.image_size[1]),
-                    data_path=cfg.data.train_path,
+                    data_path=data_train_path,
                     timestep_only=cfg.experiment.stage_b.use_timestep,
                     standardize_latents=cfg.experiment.stage_b.standardize_latents,
                     centroid_method='kmeans',
@@ -1303,15 +2153,48 @@ class ExperimentRunner:
                 except Exception as e:
                     print(f"[Stage B] ⚠️ Could not copy metric to organized location: {e}")
             
+            try:
+                metric_state_for_logging = locals().get('metric_data', None)
+                if metric_state_for_logging is None:
+                    metric_state_for_logging = torch.load(metric_path, map_location='cpu', weights_only=False)
+                # Extended visuals only when running the full pipeline (A + B + C)
+                stage_abc = (
+                    bool(getattr(cfg.experiment, 'run_stage_a', True)) and
+                    bool(getattr(cfg.experiment, 'run_stage_b', True)) and
+                    bool(getattr(cfg.experiment, 'run_stage_c', True))
+                )
+                _log_stage_b_wandb_visuals(
+                    metric_state_for_logging,
+                    stageB_model if 'stageB_model' in locals() else None,
+                    stage_b_train_tensor,
+                    data_train_path,
+                    canonical_arch,
+                    int(latent_dim),
+                    metric_save_path=stageB_paths['metric_path'],
+                    extended_visuals=stage_abc
+                )
+            except Exception:
+                pass
+
             # Save Stage B configuration
+            metric_temp_cfg = cfg.experiment.stage_b.temperature
+            metric_temp_selected = metric_temp_cfg
+            try:
+                persisted_state = torch.load(stageB_paths['metric_path'], map_location='cpu', weights_only=False)
+                metric_temp_cfg = float(persisted_state.get('temperature', metric_temp_cfg))
+                metric_temp_selected = float(persisted_state.get('selected_temperature', metric_temp_cfg))
+            except Exception:
+                pass
+
             stageB_config = {
                 'stage': 'B',
                 'model_type': metric_impl.upper(),
                 'architecture': arch,
                 'latent_dim': latent_dim,
-                'temperature': cfg.experiment.stage_b.temperature,
+                'temperature': metric_temp_cfg,
+                'selected_temperature': metric_temp_selected,
                 'regularization': cfg.experiment.stage_b.regularization,
-                'n_centroids': cfg.experiment.stage_b.n_centroids,
+                'n_centroids': 150,
                 'centroid_method': cfg.experiment.stage_b.centroid_method,
                 'neighbor_mode': cfg.experiment.stage_b.neighbor_mode,
                 'knn_k': cfg.experiment.stage_b.knn_k,
@@ -1324,8 +2207,13 @@ class ExperimentRunner:
                 yaml.dump(stageB_config, f)
             print(f"[Stage B] ✅ Saved Stage B config to {stageB_paths['config_path']}")
             print(f"[Stage B] ✅ Saved metric checkpoint: {stageB_paths['metric_path']}")
-            # Stage B basic visuals (eigenvalue/condition/heatmaps) for quick verification
-            if cfg.wandb.mode != "disabled":
+            # Stage B basic visuals (eigenvalue/condition/heatmaps) — only when running Stage B standalone
+            stage_b_standalone = (
+                bool(getattr(cfg.experiment, 'run_stage_b', True)) and
+                not bool(getattr(cfg.experiment, 'run_stage_a', True)) and
+                not bool(getattr(cfg.experiment, 'run_stage_c', True))
+            )
+            if cfg.wandb.mode != "disabled" and stage_b_standalone:
                 try:
                     import matplotlib.pyplot as plt
                     import seaborn as sns
@@ -1387,7 +2275,7 @@ class ExperimentRunner:
                 import numpy as np
                 from rlvae.models.components.metric_loader import MetricLoader
                 loader = MetricLoader(device=self.device)
-                blob = loader.load_from_file(metric_path, cfg.experiment.stage_b.temperature, cfg.experiment.stage_b.regularization)
+                blob = loader.load_from_file(metric_path, None, None)
                 C = blob['centroids'].to(self.device)
                 M = blob['metric_matrices'].to(self.device)
                 # Use cached t0 latents if available
@@ -1499,27 +2387,29 @@ class ExperimentRunner:
             if 'metric_file' not in locals():
                 metric_file = stage_b_data_for_sampling['metric_path'] if stage_b_data_for_sampling else None
             metric_path_for_sampling = stage_b_data_for_sampling['metric_path'] if stage_b_data_for_sampling else metric_file
-            blob = loader.load_from_file(str(metric_path_for_sampling), cfg.experiment.stage_b.temperature, cfg.experiment.stage_b.regularization)
-            # Filter centroids to those that are actually used at timestep 0 (as in RHVAE, but restricted to t=0)
+            blob = loader.load_from_file(str(metric_path_for_sampling), None, None)
+            # Optionally filter centroids to those used at timestep 0 (RHVAE-style t=0 winners)
+            visuals_filter_t0 = bool(getattr(cfg.experiment.stage_b, 'visuals_filter_centroids_to_t0', False))
             C_all = blob['centroids'].to(self.device)
             M_all = blob['metric_matrices'].to(self.device)
             C_use, M_use = C_all, M_all
-            # Prefer precomputed t=0 latents from Stage A payload for deterministic filtering
-            try:
-                state = torch.load(metric_path_for_sampling, map_location='cpu', weights_only=False)
-                mu0 = state.get('t0_latents', None)
-                if mu0 is not None:
-                    mu0 = mu0.to(self.device)
-                    d2 = torch.cdist(mu0, C_all)  # [N0, K]
-                    winners = torch.argmin(d2, dim=1)
-                    used_ids = torch.unique(winners)
-                    C_use = C_all[used_ids]
-                    M_use = M_all[used_ids]
-                    print(f"[Stage B] Using {C_use.shape[0]} centroids relevant to t=0 (from {C_all.shape[0]} total).")
-                else:
-                    print("[Stage B] No t=0 latents in metric payload; using all centroids.")
-            except Exception as e:
-                print(f"[Stage B] ⚠️ t=0 centroid filtering skipped: {e}")
+            if visuals_filter_t0:
+                # Prefer precomputed t=0 latents from Stage A payload for deterministic filtering
+                try:
+                    state = torch.load(metric_path_for_sampling, map_location='cpu', weights_only=False)
+                    mu0 = state.get('t0_latents', None)
+                    if mu0 is not None:
+                        mu0 = mu0.to(self.device)
+                        d2 = torch.cdist(mu0, C_all)  # [N0, K]
+                        winners = torch.argmin(d2, dim=1)
+                        used_ids = torch.unique(winners)
+                        C_use = C_all[used_ids]
+                        M_use = M_all[used_ids]
+                        print(f"[Stage B] Using {C_use.shape[0]} t0-relevant centroids (from {C_all.shape[0]} total) for visuals.")
+                    else:
+                        print("[Stage B] No t=0 latents in metric payload; using all centroids for visuals.")
+                except Exception as e:
+                    print(f"[Stage B] ⚠️ t=0 centroid filtering skipped: {e}")
             class _MetricStub:
                 def __init__(
                     self,
@@ -1798,13 +2688,18 @@ class ExperimentRunner:
                     if model_enc is not None and model_dec is not None:
                         model_enc = model_enc.to(self.device).eval()
                         model_dec = model_dec.to(self.device).eval()
-                        raw_train = torch.load(cfg.data.train_path, map_location='cpu')
-                        if raw_train.ndim == 5:
-                            imgs0 = raw_train[:8, 0].to(self.device)
-                        elif raw_train.ndim == 4:
-                            imgs0 = raw_train[:8].to(self.device)
+                        if data_train_path is not None and Path(data_train_path).exists():
+                            raw_train = torch.load(data_train_path, map_location='cpu')
+                        elif stage_b_train_tensor is not None:
+                            raw_train = stage_b_train_tensor.cpu()
                         else:
-                            imgs0 = None
+                            raw_train = None
+                        imgs0 = None
+                        if raw_train is not None:
+                            if raw_train.ndim == 5:
+                                imgs0 = raw_train[:8, 0].to(self.device)
+                            elif raw_train.ndim == 4:
+                                imgs0 = raw_train[:8].to(self.device)
                         if imgs0 is not None:
                             with torch.no_grad():
                                 enc_out = model_enc(imgs0)
@@ -1890,6 +2785,11 @@ class ExperimentRunner:
                         try:
                             if 'fixed_metric_path' in self.config.model.metric:
                                 self.config.model.metric.fixed_metric_path = str(stage_b_data['metric_path'])
+                        except Exception:
+                            pass
+                        try:
+                            if 'temperature_override' in self.config.model.metric:
+                                self.config.model.metric.temperature_override = None
                         except Exception:
                             pass
                         try:
@@ -2058,24 +2958,53 @@ class ExperimentRunner:
             except Exception as e:
                 print(f"[Stage C] ⚠️ Failed to apply Stage C overrides: {e}")
 
-            # Use fully modular Stage C (ModRLVAE)
+            # Use fully modular Stage C (ModRLVAE) - respect existing target if set
             try:
-                self.config.model._target_ = 'rlvae.models.modrlvae.ModRLVAE'
+                if not hasattr(self.config.model, '_target_') or not self.config.model._target_:
+                    self.config.model._target_ = 'rlvae.models.modular_rlvae.ModularRiemannianFlowVAE'
+                else:
+                    print(f"[Stage C] Using existing model target: {self.config.model._target_}")
             except Exception:
                 pass
 
+            # Resolve input_dim interpolations before model creation
+            try:
+                from omegaconf import OmegaConf
+                if (hasattr(self.config, 'data') and 
+                    hasattr(self.config.data, 'channels') and 
+                    hasattr(self.config.data, 'image_size')):
+                    
+                    original_struct = OmegaConf.is_struct(self.config.model)
+                    OmegaConf.set_struct(self.config.model, False)
+                    self.config.model.input_dim = [
+                        self.config.data.channels,
+                        self.config.data.image_size[0],
+                        self.config.data.image_size[1]
+                    ]
+                    OmegaConf.set_struct(self.config.model, original_struct)
+                    print(f"[Stage C] ✅ Resolved input_dim = {self.config.model.input_dim}")
+            except Exception as e:
+                print(f"[Stage C] ⚠️ Failed to resolve input_dim: {e}")
+
             # Set specific model parameters for Stage C (guarded for struct configs)
             try:
-                # Ensure posterior is Riemannian for ModRLVAE
+                # Preserve posterior type from config - DON'T override it!
+                # If posterior.type is not set, default to 'riemannian_metric'
                 if hasattr(self.config.model, 'posterior') and self.config.model.posterior is not None:
                     try:
                         if 'type' in self.config.model.posterior:
+                            # Keep the configured posterior type (riemannian_metric, riemannian_rhmc, etc.)
+                            pass  # Don't override!
+                        else:
+                            # Only set default if not already configured
                             self.config.model.posterior.type = 'riemannian_metric'
                     except Exception:
                         pass
-                # Also set top-level posterior_type when present
+                # Sync top-level posterior_type with posterior.type
                 try:
-                    if 'posterior_type' in self.config.model:
+                    if hasattr(self.config.model, 'posterior') and hasattr(self.config.model.posterior, 'type'):
+                        self.config.model.posterior_type = self.config.model.posterior.type
+                    elif 'posterior_type' not in self.config.model:
                         self.config.model.posterior_type = 'riemannian_metric'
                 except Exception:
                     pass
@@ -2095,7 +3024,7 @@ class ExperimentRunner:
                     pass
                 try:
                     if 'riemannian_beta' in self.config.model and (self.config.model.riemannian_beta is None):
-                        self.config.model.riemannian_beta = 1.0
+                        self.config.model.riemannian_beta = 32.0  # Use optimized value for better μ alignment
                 except Exception:
                     pass
                 # Ensure temporal reconstruction is enabled for RLVAE
@@ -2117,15 +3046,232 @@ class ExperimentRunner:
                     pass
             except Exception:
                 pass
+            
+            # ============================================================================
+            # CRITICAL: Force-sync posterior type from experiment config to all locations
+            # This prevents training.model.* defaults from overriding experiment.model.*
+            # ============================================================================
+            try:
+                # Get the intended posterior type from experiment config (highest priority)
+                intended_posterior_type = None
+                
+                # Priority 1: experiment.model.posterior.type (from experiment yaml)
+                if hasattr(cfg.experiment, 'model') and hasattr(cfg.experiment.model, 'posterior'):
+                    intended_posterior_type = getattr(cfg.experiment.model.posterior, 'type', None)
+                
+                # Priority 2: model.posterior.type (from model config)
+                if intended_posterior_type is None and hasattr(self.config.model, 'posterior'):
+                    intended_posterior_type = getattr(self.config.model.posterior, 'type', None)
+                
+                # Priority 3: experiment.model.posterior_type (alternative location)
+                if intended_posterior_type is None and hasattr(cfg.experiment, 'model'):
+                    intended_posterior_type = getattr(cfg.experiment.model, 'posterior_type', None)
+                
+                # If we found an intended type, sync it EVERYWHERE to prevent overrides
+                if intended_posterior_type is not None and intended_posterior_type != '':
+                    print(f"[Stage C] 🔒 Forcing posterior type sync: '{intended_posterior_type}'")
+                    
+                    # Sync to model.posterior.type
+                    try:
+                        if hasattr(self.config.model, 'posterior'):
+                            self.config.model.posterior.type = intended_posterior_type
+                        else:
+                            from omegaconf import DictConfig
+                            self.config.model.posterior = DictConfig({'type': intended_posterior_type})
+                    except Exception as e:
+                        print(f"[Stage C] ⚠️ Could not set model.posterior.type: {e}")
+                    
+                    # Sync to model.posterior_type (top-level)
+                    try:
+                        # Temporarily disable struct mode to allow setting new keys
+                        original_struct = OmegaConf.is_struct(self.config.model)
+                        OmegaConf.set_struct(self.config.model, False)
+                        self.config.model.posterior_type = intended_posterior_type
+                        OmegaConf.set_struct(self.config.model, original_struct)
+                    except Exception as e:
+                        print(f"[Stage C] ⚠️ Could not set model.posterior_type: {e}")
+                        print(f"    full_key: model.posterior_type")
+                        print(f"    object_type={type(self.config.model)}")
+                    
+                    # Sync to training.model.posterior.type
+                    try:
+                        if hasattr(self.config.training, 'model'):
+                            original_struct = OmegaConf.is_struct(self.config.training.model)
+                            OmegaConf.set_struct(self.config.training.model, False)
+                            if hasattr(self.config.training.model, 'posterior'):
+                                self.config.training.model.posterior.type = intended_posterior_type
+                            else:
+                                from omegaconf import DictConfig
+                                self.config.training.model.posterior = DictConfig({'type': intended_posterior_type})
+                            OmegaConf.set_struct(self.config.training.model, original_struct)
+                        else:
+                            original_struct = OmegaConf.is_struct(self.config.training)
+                            OmegaConf.set_struct(self.config.training, False)
+                            from omegaconf import DictConfig
+                            self.config.training.model = DictConfig({
+                                'posterior': DictConfig({'type': intended_posterior_type})
+                            })
+                            OmegaConf.set_struct(self.config.training, original_struct)
+                    except Exception as e:
+                        print(f"[Stage C] ⚠️ Could not set training.model.posterior.type: {e}")
+                        print(f"    full_key: training.model.posterior.type")
+                        print(f"    object_type={type(self.config.training.model) if hasattr(self.config.training, 'model') else 'no model'}")
+                    
+                    # Sync to training.model.posterior_type (top-level)
+                    try:
+                        if hasattr(self.config.training, 'model'):
+                            original_struct = OmegaConf.is_struct(self.config.training.model)
+                            OmegaConf.set_struct(self.config.training.model, False)
+                            self.config.training.model.posterior_type = intended_posterior_type
+                            OmegaConf.set_struct(self.config.training.model, original_struct)
+                        else:
+                            original_struct = OmegaConf.is_struct(self.config.training)
+                            OmegaConf.set_struct(self.config.training, False)
+                            from omegaconf import DictConfig
+                            self.config.training.model = DictConfig({'posterior_type': intended_posterior_type})
+                            OmegaConf.set_struct(self.config.training, original_struct)
+                    except Exception as e:
+                        print(f"[Stage C] ⚠️ Could not set training.model.posterior_type: {e}")
+                        print(f"    full_key: training.model.posterior_type")
+                        print(f"    object_type={type(self.config.training.model) if hasattr(self.config.training, 'model') else 'no model'}")
+                    
+                    print(f"[Stage C] ✅ Posterior type synced to all config locations")
+                else:
+                    print(f"[Stage C] ⚠️ No posterior type found in experiment config, using defaults")
+                    
+            except Exception as e:
+                print(f"[Stage C] ⚠️ Error during posterior type sync: {e}")
+
+            # ============================================================================
+            # CRITICAL: Force-sync RHMC params and KL toggles across config locations
+            # ============================================================================
+            try:
+                # Optimized RHMC defaults for better μ alignment
+                rh_steps = 4
+                rh_eps = 0.02
+                rh_alpha = 0.20
+                safeties = {
+                    'max_momentum_norm': 3.0,
+                    'max_velocity_norm': 1.0,
+                    'max_position_step': 0.5,
+                    'max_position_norm': 8.0,
+                }
+                kl_eval = 'mu'
+                kl_norm = False
+                kl_norm_mode = 'none'
+                mu_l2_w = 0.5
+
+                from omegaconf import OmegaConf, DictConfig
+                def _set_safe(cfg_obj, setter):
+                    struct = OmegaConf.is_struct(cfg_obj)
+                    OmegaConf.set_struct(cfg_obj, False)
+                    try:
+                        setter()
+                    finally:
+                        OmegaConf.set_struct(cfg_obj, struct)
+
+                # model.posterior
+                if hasattr(self.config.model, 'posterior') and self.config.model.posterior is not None:
+                    def set_model_posterior():
+                        self.config.model.posterior.rhmc_steps = rh_steps
+                        self.config.model.posterior.rhmc_step_size = rh_eps
+                        self.config.model.posterior.rhmc_alpha = rh_alpha
+                        self.config.model.posterior.rhmc_eps_reg = getattr(self.config.model.posterior, 'rhmc_eps_reg', 1e-4)
+                        for k, v in safeties.items():
+                            setattr(self.config.model.posterior, k, v)
+                    _set_safe(self.config.model.posterior, set_model_posterior)
+                else:
+                    _set_safe(self.config.model, lambda: setattr(self.config.model, 'posterior', DictConfig({
+                        'rhmc_steps': rh_steps, 'rhmc_step_size': rh_eps, 'rhmc_alpha': rh_alpha, 'rhmc_eps_reg': 1e-4, **safeties
+                    })))
+
+                # model top-level duplicates
+                def set_model_top():
+                    self.config.model.rhmc_steps = rh_steps
+                    self.config.model.rhmc_step_size = rh_eps
+                    self.config.model.rhmc_alpha = rh_alpha
+                    self.config.model.rhmc_eps_reg = getattr(self.config.model, 'rhmc_eps_reg', 1e-4)
+                _set_safe(self.config.model, set_model_top)
+
+                # KL toggles at model level
+                def set_model_kl():
+                    self.config.model.kl_metric_eval_point = kl_eval
+                    self.config.model.kl_use_metric_normalization = kl_norm
+                    self.config.model.kl_metric_norm_mode = kl_norm_mode
+                    self.config.model.mu_l2_weight = mu_l2_w
+                _set_safe(self.config.model, set_model_kl)
+
+                # training model mirror
+                if hasattr(self.config, 'training'):
+                    if not hasattr(self.config.training, 'model') or self.config.training.model is None:
+                        _set_safe(self.config.training, lambda: setattr(self.config.training, 'model', DictConfig({})))
+                    def set_training_model():
+                        if not hasattr(self.config.training.model, 'posterior') or self.config.training.model.posterior is None:
+                            self.config.training.model.posterior = DictConfig({})
+                        self.config.training.model.posterior.rhmc_steps = rh_steps
+                        self.config.training.model.posterior.rhmc_step_size = rh_eps
+                        self.config.training.model.posterior.rhmc_alpha = rh_alpha
+                        self.config.training.model.posterior.rhmc_eps_reg = getattr(self.config.model, 'rhmc_eps_reg', 1e-4)
+                        self.config.training.model.kl_metric_eval_point = kl_eval
+                        self.config.training.model.kl_use_metric_normalization = kl_norm
+                        self.config.training.model.kl_metric_norm_mode = kl_norm_mode
+                        self.config.training.model.mu_l2_weight = mu_l2_w
+                    _set_safe(self.config.training.model, set_training_model)
+
+                print(f"[Stage C] 🔒 Enforced RHMC (steps={rh_steps}, eps={rh_eps}, alpha={rh_alpha}) and KL (eval={kl_eval}, norm={kl_norm}, mode={kl_norm_mode}, mu_l2={mu_l2_w})")
+            except Exception as e:
+                print(f"[Stage C] ⚠️ Error during RHMC/KL enforcement: {e}")
+
+            # ============================================================================
+            # ============================================================================
+            # CRITICAL: Enforce correct flows count (sequence_length - 1)
+            # ============================================================================
+            try:
+                seq_len = int(getattr(self.config.data, 'sequence_length', 8))
+                correct_n_flows = max(0, seq_len - 1)
+                
+                print(f"[Stage C] 🔧 Enforcing flows count: sequence_length={seq_len} → n_flows={correct_n_flows}")
+                
+                # Set in model config using struct=False to handle missing keys
+                try:
+                    original_struct = OmegaConf.is_struct(self.config.model)
+                    OmegaConf.set_struct(self.config.model, False)
+                    self.config.model.sequence_length = seq_len
+                    self.config.model.n_flows = correct_n_flows
+                    OmegaConf.set_struct(self.config.model, original_struct)
+                except Exception as e:
+                    print(f"[Stage C] ⚠️ Could not set model.sequence_length/n_flows: {e}")
+                
+                # Also set in training config if it exists
+                try:
+                    if hasattr(self.config.training, 'model'):
+                        original_struct = OmegaConf.is_struct(self.config.training.model)
+                        OmegaConf.set_struct(self.config.training.model, False)
+                        self.config.training.model.n_flows = correct_n_flows
+                        OmegaConf.set_struct(self.config.training.model, original_struct)
+                        print(f"[Stage C] ✅ Also synced training.model.n_flows = {correct_n_flows}")
+                except Exception as e:
+                    print(f"[Stage C] ⚠️ Could not sync training.model.n_flows: {e}")
+                    
+            except Exception as e:
+                print(f"[Stage C] ⚠️ Error during flows count enforcement: {e}")
+            # ============================================================================
+            
             print(f"[Stage C] Set model parameters:")
             try:
                 post_type = getattr(self.config.model.posterior, 'type', 'n/a') if hasattr(self.config.model, 'posterior') else 'n/a'
+                post_type_toplevel = getattr(self.config.model, 'posterior_type', 'n/a')
+                training_post_type = getattr(self.config.training.model.posterior, 'type', 'n/a') if hasattr(self.config.training, 'model') and hasattr(self.config.training.model, 'posterior') else 'n/a'
             except Exception:
                 post_type = 'n/a'
+                post_type_toplevel = 'n/a'
+                training_post_type = 'n/a'
             try:
                 n_flows_val = self.config.model.n_flows if hasattr(self.config.model, 'n_flows') else 'n/a'
+                seq_len_val = self.config.model.sequence_length if hasattr(self.config.model, 'sequence_length') else 'n/a'
             except Exception:
                 n_flows_val = 'n/a'
+                seq_len_val = 'n/a'
             try:
                 rkm_val = self.config.model.riemannian_kl_mode if ('riemannian_kl_mode' in self.config.model) else 'n/a'
             except Exception:
@@ -2134,7 +3280,10 @@ class ExperimentRunner:
                 rbeta_val = self.config.model.riemannian_beta if ('riemannian_beta' in self.config.model) else 'n/a'
             except Exception:
                 rbeta_val = 'n/a'
-            print(f"  - posterior.type: {post_type}")
+            print(f"  - model.posterior.type: {post_type}")
+            print(f"  - model.posterior_type: {post_type_toplevel}")
+            print(f"  - training.model.posterior.type: {training_post_type}")
+            print(f"  - sequence_length: {seq_len_val}")
             print(f"  - n_flows: {n_flows_val}")
             print(f"  - riemannian_kl_mode: {rkm_val}")
             print(f"  - riemannian_beta: {rbeta_val}")
@@ -2205,8 +3354,7 @@ class ExperimentRunner:
                 else:
                     Cb = None
                 # Build small dataloader for val set
-                from data.cyclic_dataset import CyclicSpritesDataModule
-                dm = CyclicSpritesDataModule(cfg.data)
+                dm = build_data_module(cfg.data)
                 dm.setup('fit', cfg.training)
                 vl = dm.val_dataloader()
                 model_wrapper = LightningRlVAETrainer(cfg, data_module=dm)
@@ -2326,20 +3474,22 @@ class ExperimentRunner:
                         art = wandb.Artifact(f"stageB_metric_{arch}_ld{latent_dim}", type="metric"); art.add_file(str(metric_file)); wandb.log_artifact(art)
                     # Stage A quick recon grid (if Stage A model was saved)
                     try:
-                        if 'model' in comp_paths:
+                        data_train_path = getattr(cfg.data, 'train_path', None)
+                        if 'model' in comp_paths and data_train_path is not None:
                             from scripts.train_diverse_metric_vae import create_model as create_stage1
                             import torchvision.utils as vutils
-                            stage1 = create_stage1(arch, input_dim=(cfg.data.channels, cfg.data.image_size[0], cfg.data.image_size[1]), latent_dim=latent_dim)
+                            stage1_arch = arch.lower().replace('_gray', '') if '_gray' in arch.lower() else arch
+                            stage1 = create_stage1(stage1_arch, input_dim=(cfg.data.channels, cfg.data.image_size[0], cfg.data.image_size[1]), latent_dim=latent_dim)
                             stage1.load_state_dict(torch.load(comp_paths['model'], map_location='cpu', weights_only=False))
                             stage1.eval()
-                            raw = torch.load(cfg.data.train_path, map_location='cpu')
+                            raw = torch.load(data_train_path, map_location='cpu')
                             if raw.ndim == 5:
                                 # [B, S, C, H, W] -> flatten
                                 b, s = raw.shape[:2]
                                 raw = raw.reshape(b*s, *raw.shape[2:])
                             batch = raw[:8]
                             with torch.no_grad():
-                                if arch.lower() in ["mlp", "pythae"]:
+                                if stage1_arch in ["mlp", "pythae"]:
                                     out = stage1({"data": batch})
                                     recon = out.recon_x.clamp(0, 1)
                                 else:
@@ -2347,6 +3497,8 @@ class ExperimentRunner:
                                     recon = out.recon_x.clamp(0, 1)
                             grid = vutils.make_grid(torch.cat([batch[:8], recon[:8]], dim=0), nrow=8, normalize=False)
                             wandb.log({"summary/stageA/final_recon_grid": wandb.Image(grid)})
+                        elif 'model' in comp_paths:
+                            print("[SUMMARY] ⚠️ Skipping Stage A recon grid logging because data.train_path is not set")
                     except Exception as e:
                         print(f"[SUMMARY] ⚠️ Could not log Stage A recon grid: {e}")
 
@@ -2609,8 +3761,9 @@ def find_stage_a_data(cfg, architecture, latent_dim):
                           list(stage_a_dir.glob('metric*.pkl')) + list(stage_a_dir.glob('metric.pkl')))
             
             if encoder_files and decoder_files and config_path.exists():
-                encoder_path = encoder_files[0]  # Take the first one
-                decoder_path = decoder_files[0]  # Take the first one
+                # Pick the most recent encoder/decoder by modification time
+                encoder_path = max(encoder_files, key=lambda p: p.stat().st_mtime)
+                decoder_path = max(decoder_files, key=lambda p: p.stat().st_mtime)
                 metric_path = metric_files[0] if metric_files else None
                 print(f"[Stage B] Found Stage A data in: {stage_a_dir}")
                 return {

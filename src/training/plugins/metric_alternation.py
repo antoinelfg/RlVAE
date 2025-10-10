@@ -18,6 +18,11 @@ from typing import Optional
 import torch
 import random
 
+try:
+    import wandb  # Optional logging; guarded on availability
+except Exception:  # pragma: no cover
+    wandb = None
+
 
 class MetricAlternationPlugin:
     def __init__(self, trainer: "LightningRlVAETrainer"):
@@ -33,9 +38,11 @@ class MetricAlternationPlugin:
         self.anchor_size = int(getattr(self.cfg, 'anchor_size', 20000)) if self.enabled else 0
         self.anchor_refresh_frac = float(getattr(self.cfg, 'anchor_refresh_frac', 0.1)) if self.enabled else 0.1
         self.consistency_weight = float(getattr(self.cfg, 'consistency_weight', 0.0)) if self.enabled else 0.0
+        self.metric_lr_multiplier = float(getattr(self.cfg, 'metric_lr_multiplier', 1.0)) if self.enabled else 1.0
         # State
         self.metric_only_epoch = False
         self._anchors_z: Optional[torch.Tensor] = None  # CPU tensor
+        self._metric_lr_backup = []
 
     # ---------------- scheduling ----------------
     def on_train_epoch_start(self):
@@ -64,9 +71,11 @@ class MetricAlternationPlugin:
             self._ensure_anchor_set()
             self._refresh_anchor_subset()
             self._wandb_phase('metric', e)
+            self._log_epoch_flag(True)
         else:
             self._freeze_for_rlvae_step()
             self._wandb_phase('rlvae', e)
+            self._log_epoch_flag(False)
 
     # ---------------- model freezing ----------------
     def _set_requires_grad(self, module: torch.nn.Module, requires: bool) -> None:
@@ -81,6 +90,9 @@ class MetricAlternationPlugin:
         metric_net = getattr(model, 'modular_metric', None)
         if metric_net is not None:
             self._set_requires_grad(metric_net, True)
+        # Temporarily scale optimizer LR for metric parameters if requested
+        if self.metric_lr_multiplier != 1.0:
+            self._scale_metric_lr(self.metric_lr_multiplier)
 
     def _freeze_for_rlvae_step(self) -> None:
         model = self.trainer.model
@@ -90,6 +102,9 @@ class MetricAlternationPlugin:
         metric_net = getattr(model, 'modular_metric', None)
         if metric_net is not None:
             self._set_requires_grad(metric_net, False)
+        # Restore original metric optimizer LR if modified
+        if self._metric_lr_backup:
+            self._restore_metric_lr()
 
     # ---------------- anchors management ----------------
     @torch.no_grad()
@@ -156,6 +171,7 @@ class MetricAlternationPlugin:
             not getattr(metric_net, 'trainable', False) or
             len(list(metric_net.parameters())) == 0
         ):
+            self._log_param_snapshot(metric_net)
             return torch.zeros((), device=self.trainer.device, requires_grad=True)
 
         # Prepare z batch
@@ -195,13 +211,90 @@ class MetricAlternationPlugin:
         loss = -(d_b.mean()) + logZ
         if self.consistency_weight > 0.0:
             loss = loss + 0.0 * self.consistency_weight
+        self._log_param_snapshot(metric_net)
         return loss
 
     # ---------------- utils ----------------
     def _wandb_phase(self, name: str, epoch: int):
+        if wandb is None or wandb.run is None:
+            return
         try:
-            import wandb
-            if wandb.run is not None:
-                wandb.log({"phase": name, "epoch": epoch})
+            wandb.log({"stageC/metric_phase": name}, step=epoch)
         except Exception:
             pass
+
+    def _log_epoch_flag(self, metric_only: bool) -> None:
+        flag = float(metric_only)
+        try:
+            if hasattr(self.trainer, 'log'):
+                self.trainer.log('metric_only_epoch', flag, prog_bar=False)
+            if wandb is not None and wandb.run is not None:
+                wandb.log({'stageC/metric_only_epoch': flag}, step=self.trainer.current_epoch)
+        except Exception:
+            pass
+
+    def _log_param_snapshot(self, metric_net: Optional[torch.nn.Module]) -> None:
+        if metric_net is None:
+            return
+        try:
+            params = [p.detach() for p in metric_net.parameters() if p.requires_grad]
+            if not params:
+                return
+            flat = torch.cat([p.reshape(-1) for p in params])
+            mean_val = flat.mean().item()
+            std_val = flat.std(unbiased=False).item()
+            if hasattr(self.trainer, 'log'):
+                self.trainer.log('metric_param_mean', mean_val, prog_bar=False)
+                self.trainer.log('metric_param_std', std_val, prog_bar=False)
+            if wandb is not None and wandb.run is not None:
+                wandb.log({
+                    'stageC/metric_param_mean': mean_val,
+                    'stageC/metric_param_std': std_val
+                }, step=getattr(self.trainer, 'global_step', None))
+        except Exception:
+            pass
+
+    def _scale_metric_lr(self, multiplier: float) -> None:
+        """Scale optimizer learning rate for metric parameter groups."""
+        optimizers = self._get_optimizers()
+        if not optimizers:
+            return
+        metric_ids = set()
+        metric_net = getattr(self.trainer.model, 'modular_metric', None)
+        if metric_net is not None:
+            metric_ids = {id(p) for p in metric_net.parameters() if p.requires_grad}
+        if not metric_ids:
+            return
+        self._metric_lr_backup.clear()
+        for opt in optimizers:
+            for group in opt.param_groups:
+                if any(id(p) in metric_ids for p in group['params']):
+                    self._metric_lr_backup.append((group, group['lr']))
+                    group['lr'] = group['lr'] * multiplier
+
+    def _restore_metric_lr(self) -> None:
+        for group, lr in self._metric_lr_backup:
+            group['lr'] = lr
+        self._metric_lr_backup.clear()
+
+    def _get_optimizers(self):
+        """Return list of optimizers from trainer, handling Lightning variations."""
+        opts = getattr(self.trainer, 'optimizers', None)
+        if opts is None:
+            return []
+        try:
+            if isinstance(opts, (list, tuple)):
+                return list(opts)
+            if hasattr(opts, 'optimizer'):
+                return [opts]
+            if isinstance(opts, torch.optim.Optimizer):
+                return [opts]
+            if callable(opts):
+                result = opts()
+                if isinstance(result, (list, tuple)):
+                    return list(result)
+                if result is not None:
+                    return [result]
+        except Exception:
+            pass
+        return []

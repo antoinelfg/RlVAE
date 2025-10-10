@@ -35,6 +35,8 @@ class SamplerManager:
         self.riemannian_sampler = RiemannianSampler(model)
         self._official_sampler = None
         self._hmc_sampler = None
+        # TRACE: print only once per process
+        self._trace_printed = False
 
     def setup_official(self):
         if OfficialRHVAESampler is None:
@@ -61,9 +63,22 @@ class SamplerManager:
             posterior_type: 'riemannian_metric' | 'gaussian'
             method: 'official' | 'hmc' | 'posterior_hmc' | 'enhanced' | 'geodesic' | 'basic' | None
         """
+        # DEBUG: Always print what we're doing
+        if not hasattr(self, '_debug_printed'):
+            print(f"[SamplerManager DEBUG] posterior_type={posterior_type}, method={method}")
+            self._debug_printed = True
+        
         if posterior_type == 'riemannian_metric':
             # Always prefer local metric–aligned Gaussian for differentiability
-            return self.posterior_sampler.sample_metric_aware_posterior(mu, log_var)
+            out = self.posterior_sampler.sample_metric_aware_posterior(mu, log_var)
+            try:
+                import os
+                if os.environ.get('RLVAE_TRACE', '0') == '1' and not self._trace_printed:
+                    print('USING LOCAL METRIC-ALIGNED GAUSSIAN (posterior_type=riemannian_metric)')
+                    self._trace_printed = True
+            except Exception:
+                pass
+            return out
 
         # Gaussian posterior type with manifold-aware alternatives
         m = (method or '').lower()
@@ -74,16 +89,45 @@ class SamplerManager:
                 # fallback to local gaussian
                 pass
         elif m in ('hmc', 'posterior_hmc'):
+            print(f"[SamplerManager DEBUG] Using HMC sampler with method={m}")
             self._ensure_hmc()
             if m == 'posterior_hmc':
+                try:
+                    import os
+                    if os.environ.get('RLVAE_TRACE', '0') == '1' and not self._trace_printed:
+                        print('USING RIEMANNIAN RHMC POSTERIOR (posterior_hmc)')
+                        self._trace_printed = True
+                except Exception:
+                    pass
                 return self._hmc_sampler.sample_posterior(mu, log_var)
             else:
                 # small refinement steps
+                try:
+                    import os
+                    if os.environ.get('RLVAE_TRACE', '0') == '1' and not self._trace_printed:
+                        print('USING RIEMANNIAN RHMC POSTERIOR (training refinement hmc)')
+                        self._trace_printed = True
+                except Exception:
+                    pass
                 return self._hmc_sampler.sample_riemannian_latents(mu, log_var, method='hmc')
         elif m in ('enhanced', 'geodesic', 'basic'):
+            try:
+                import os
+                if os.environ.get('RLVAE_TRACE', '0') == '1' and not self._trace_printed:
+                    print(f'USING RiemannianSampler ({m})')
+                    self._trace_printed = True
+            except Exception:
+                pass
             return self.riemannian_sampler.sample_riemannian_latents(mu, log_var, method=m)
 
         # Fallback: standard reparameterization
+        print(f"[SamplerManager DEBUG] FALLBACK to standard reparam - method='{method}', posterior_type='{posterior_type}'")
         eps = torch.randn_like(mu)
+        try:
+            import os
+            if os.environ.get('RLVAE_TRACE', '0') == '1' and not self._trace_printed:
+                print('⚠️ Riemannian sampling failed or not selected, using STANDARD reparam posterior')
+                self._trace_printed = True
+        except Exception:
+            pass
         return mu + eps * torch.exp(0.5 * log_var)
-

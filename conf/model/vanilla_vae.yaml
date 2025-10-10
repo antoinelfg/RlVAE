@@ -3,7 +3,10 @@
 _target_: rlvae.models.modular_rlvae.ModularRiemannianFlowVAE
 
 # Architecture (same as Riemannian for fair comparison)
-input_dim: [3, 64, 64]
+input_dim: 
+  - ${data.channels}
+  - ${data.image_size[0]}
+  - ${data.image_size[1]}
 latent_dim: 16
 n_flows: 0  # No normalizing flows
 flow_hidden_size: 256
@@ -29,6 +32,13 @@ loop:
   mode: "open"  # Standard VAE doesn't handle loops
   penalty: 0.0
   
+# Encoder/decoder defaults (override per experiment if needed)
+encoder:
+  architecture: cnn_gray
+
+decoder:
+  architecture: cnn_gray
+
 # Metric configuration (not used but for compatibility)
 metric:
   path: "metric_T0.7_scaled.pt"

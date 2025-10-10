@@ -1,0 +1,56 @@
+# @package visualization
+
+# Optimized visualization configuration for three-stage pipeline
+# Designed for clean WandB workspace with meaningful, non-redundant visualizations
+
+level: "three_stage_optimized"
+frequency: 10  # Visualize every 10 epochs to reduce noise
+
+# Module toggles - carefully selected for three-stage pipeline
+enable_basic: true          # Essential: reconstruction, loss curves
+enable_manifold: true       # Critical for 2D latent space analysis
+enable_interactive: false   # Disable: too heavy for pipeline
+enable_flow_analysis: true  # Important: flow diagnostics
+enable_dynamics: false     # Disable: redundant with manifold
+enable_geodesic_analysis: true  # NEW: geodesic trajectory visualization
+
+# Stage-specific frequency controls
+basic_frequency: 5          # Frequent: core metrics
+manifold_frequency: 10      # Moderate: 2D latent visualization
+interactive_frequency: 999  # Disabled
+flow_frequency: 15         # Less frequent: flow diagnostics
+dynamics_frequency: 999    # Disabled
+geodesic_frequency: 20     # NEW: geodesic visualization every 20 epochs
+
+# Performance optimizations
+disable_curvature: true     # Disable: computationally expensive
+max_sequences: 8           # Limit: reduce memory usage
+enable_fancy_plots: false  # Disable: focus on essential plots
+
+# Geodesic analysis settings
+geodesic_n_trajectories: 5        # Number of geodesic trajectories to compute
+geodesic_trajectory_resolution: 50  # Points per trajectory
+geodesic_magnification_resolution: 100  # Resolution for magnification factor heatmap
+geodesic_solver_type: "shooting"     # Solver type: "georce" or "shooting"
+
+# Output controls
+save_local: false          # WandB only: reduce disk usage
+log_to_wandb: true
+
+# Three-stage specific settings
+stage_specific_logging:
+  stage_a:
+    focus: ["reconstruction", "loss_curves", "latent_distribution"]
+    frequency_multiplier: 1.0
+  stage_b:
+    focus: ["metric_analysis", "centroids", "eigenvalues"]
+    frequency_multiplier: 0.5  # Less frequent
+  stage_c:
+    focus: ["riemannian_metrics", "flow_diagnostics", "final_analysis"]
+    frequency_multiplier: 1.5  # More frequent
+
+# WandB organization
+wandb_grouping:
+  use_stage_prefixes: true
+  group_by_stage: true
+  summary_plots_only: false

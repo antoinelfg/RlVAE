@@ -2,7 +2,10 @@
 
 _target_: rlvae.models.modular_rlvae.ModularRiemannianFlowVAE
 
-input_dim: [3, 64, 64]
+input_dim: 
+  - ${data.channels}
+  - ${data.image_size[0]}
+  - ${data.image_size[1]}
 latent_dim: 16
 n_flows: 8
 flow_hidden_size: 256

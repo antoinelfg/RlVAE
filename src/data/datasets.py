@@ -8,6 +8,9 @@ import numpy as np
 from pathlib import Path
 from typing import Optional, Tuple
 
+from .ellipse_sequences import EllipseSequenceDataset
+
+
 class MockDataset(Dataset):
     """Mock dataset for testing purposes."""
     
@@ -40,10 +43,23 @@ def get_dataloader(dataset_name: str,
     Returns:
         DataLoader instance
     """
-    if dataset_name == "dsprites" or dataset_name == "sprites":
-        # For now, return a mock dataset
-        # In a real implementation, this would load the actual dSprites dataset
+    if dataset_name in ("dsprites", "sprites"):
         dataset = MockDataset(num_samples=1000, data_shape=(1, 64, 64))
+    elif dataset_name in ("ellipse_sequences", "ellipses"):
+        # Expect shape: (T, 1, H, W). Return as-is; downstream code using sequences
+        # should collate appropriately or flatten per needs.
+        dataset = EllipseSequenceDataset(
+            num_sequences=int(kwargs.pop("num_sequences", 1000)),
+            seq_len=int(kwargs.pop("seq_len", 8)),
+            image_size=tuple(kwargs.pop("image_size", (64, 64))),
+            min_eccentricity=float(kwargs.pop("min_eccentricity", 0.0)),
+            max_eccentricity=float(kwargs.pop("max_eccentricity", 0.9)),
+            min_radius=int(kwargs.pop("min_radius", 8)),
+            max_radius=int(kwargs.pop("max_radius", 20)),
+            center_jitter=int(kwargs.pop("center_jitter", 4)),
+            antialias=bool(kwargs.pop("antialias", True)),
+            seed=kwargs.pop("seed", 42),
+        )
     else:
         # Default to mock dataset
         dataset = MockDataset(num_samples=1000, data_shape=(1, 64, 64))

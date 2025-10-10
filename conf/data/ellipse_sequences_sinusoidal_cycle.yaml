@@ -1,0 +1,20 @@
+defaults:
+  - ellipse_sequences
+
+name: ellipse_sequences_sinusoidal_cycle
+num_sequences: 1000
+seq_len: 8
+sequence_length: 8
+min_radius: 18
+max_radius: 18
+outline_only: false
+schedule_type: sinusoidal
+sinusoidal_amplitude_range: [0.45, 0.45]
+sinusoidal_phase_range: [0.0, 6.283185307179586]
+sinusoidal_cycle: true
+sinusoidal_frequency: 2.0
+fix_center: true
+fix_theta: true
+fix_intensity: true
+keep_major_axis_constant: true
+batch_size: 64

@@ -90,3 +90,4 @@ metric_alternation:
   anchor_refresh_frac: 0.1  # refresh 10% of anchors per metric epoch
   logdet_clip: 50.0      # clamp for numerical stability
   consistency_weight: 0.0  # optional pushforward consistency penalty weight
+  metric_lr_multiplier: 1.0

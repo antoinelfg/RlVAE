@@ -3,9 +3,12 @@
 _target_: rlvae.models.modular_rlvae.ModularRiemannianFlowVAE
 
 # Architecture
-input_dim: [3, 64, 64]
+input_dim: 
+  - ${data.channels}
+  - ${data.image_size[0]}
+  - ${data.image_size[1]}
 latent_dim: 16
-n_flows: 8
+n_flows: 7  # sequence_length - 1 (will be overridden by experiment)
 flow_hidden_size: 256
 flow_n_blocks: 2
 flow_n_hidden: 1
@@ -27,15 +30,23 @@ decoder:
 
 # VAE parameters
 beta: 1.0
-riemannian_beta: 8.0
+riemannian_beta: 16.0
 
 # Posterior configuration
 posterior:
-  type: "riemannian_metric"  # gaussian, iaf, riemannian_metric
+  type: "riemannian_rhmc"  # gaussian, iaf, riemannian_metric, riemannian_rhmc
+  rhmc_steps: 2
+  rhmc_step_size: 0.01
+  rhmc_alpha: 0.10
+  rhmc_eps_reg: 1e-4
+  max_momentum_norm: 3.0
+  max_velocity_norm: 1.0
+  max_position_step: 0.5
+  max_position_norm: 8.0
   
 # Sampling configuration
 sampling:
-  method: "geodesic"  # standard, basic, enhanced, geodesic, official
+  method: "posterior_hmc"  # posterior_hmc uses the RHMC posterior path
   use_riemannian: true
   
 # Loop configuration
@@ -47,6 +58,12 @@ loop:
 metric:
   path: "metric_T0.7_scaled.pt"
   temperature_override: 3.0
+  
+# KL settings
+kl_metric_eval_point: "mu"
+kl_use_metric_normalization: false
+kl_metric_norm_mode: "none"
+mu_l2_weight: 0.1
   
 # Pretrained components
 pretrained:

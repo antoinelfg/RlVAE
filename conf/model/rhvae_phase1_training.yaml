@@ -26,7 +26,10 @@ posterior_alpha_end: 0.6        # Conservative target for Phase 1
 posterior_alpha_ramp_epochs: 10
 
 # Architecture and training settings optimized for Phase 1
-input_dim: [3, 64, 64]          # RGB 64x64 images (Sprites)
+input_dim: 
+  - ${data.channels}
+  - ${data.image_size[0]}
+  - ${data.image_size[1]}          # RGB 64x64 images (Sprites)
 latent_dim: 16                  # Reasonable latent dimension for Sprites
 encoder:
   architecture: "cnn"           # CNN encoder for image data

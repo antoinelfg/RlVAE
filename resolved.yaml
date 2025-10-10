@@ -1,0 +1,262 @@
+model:
+  _target_: rlvae.models.modular_rlvae.ModularRiemannianFlowVAE
+  input_dim:
+  - 3
+  - 64
+  - 64
+  latent_dim: 16
+  n_flows: 0
+  flow_hidden_size: 256
+  flow_n_blocks: 2
+  flow_n_hidden: 1
+  epsilon: 1.0e-06
+  encoder:
+    architecture: mlp
+  decoder:
+    architecture: mlp
+  beta: 1.0
+  riemannian_beta: 8.0
+  posterior:
+    type: riemannian_rhmc
+  sampling:
+    method: geodesic
+    use_riemannian: true
+  loop:
+    mode: open
+    penalty: 5.0
+  metric:
+    path: metric_T0.7_scaled.pt
+    temperature_override: 3.0
+  pretrained:
+    encoder_path: data/pretrained/encoder.pt
+    decoder_path: data/pretrained/decoder.pt
+    metric_path: data/pretrained/metric_T0.7_scaled.pt
+  rhmc_steps: 0
+  rhmc_alpha: 0.15
+  rhmc_eps_reg: 0.001
+training:
+  trainer:
+    max_epochs: 1
+    accelerator: gpu
+    devices: 1
+    strategy: auto
+    precision: 32-true
+    log_every_n_steps: 5
+    val_check_interval: 0.5
+    num_sanity_val_steps: 2
+    enable_progress_bar: true
+    enable_model_summary: true
+    deterministic: false
+    use_distributed_sampler: false
+  data:
+    batch_size: 8
+    num_workers: 4
+    pin_memory: true
+  model:
+    latent_dim: 16
+    beta: 1.0
+    riemannian_beta: 8.0
+    posterior:
+      type: riemannian_metric
+    sampling:
+      method: geodesic
+      use_riemannian: true
+    loop:
+      mode: open
+      penalty: 0.0
+    n_flows: 0
+  optimizer:
+    name: adam
+    lr: 0.001
+    weight_decay: 0.0001
+  logging:
+    log_every_n_steps: 10
+    save_top_k: 3
+    monitor: val_loss
+    mode: min
+  visualization:
+    frequency: 10
+    level: standard
+  n_train_samples: 5000
+  n_val_samples: 888
+  scheduler:
+    mode: min
+    factor: 0.8
+    patience: 5
+    threshold: 0.01
+    min_lr: 1.0e-07
+  early_stopping:
+    patience: 30
+    monitor: val_loss
+    mode: min
+    min_delta: 0.001
+  metric_alternation:
+    enabled: false
+    warmup_epochs: 5
+    k_rlvae_epochs: 3
+    metric_step_epochs: 1
+    logdet_clip: 50.0
+    anchor_size: 20000
+    anchor_refresh_frac: 0.1
+    consistency_weight: 0.0
+    metric_lr_multiplier: 1.0
+data:
+  train_path: data/processed/Sprites_train_cyclic.pt
+  test_path: data/processed/Sprites_test_cyclic.pt
+  train_meta_path: data/processed/Sprites_train_cyclic_metadata.pt
+  test_meta_path: data/processed/Sprites_test_cyclic_metadata.pt
+  sequence_length: 8
+  image_size:
+  - 64
+  - 64
+  channels: 3
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  max_train_samples: 24000
+  max_test_samples: 1000
+  verify_cyclicity: true
+  cyclicity_threshold: 0.01
+visualization:
+  level: minimal
+  frequency: 5
+  enable_basic: true
+  enable_manifold: false
+  enable_interactive: false
+  enable_flow_analysis: false
+  basic_frequency: 5
+  manifold_frequency: 10
+  interactive_frequency: 20
+  flow_frequency: 10
+  disable_curvature: true
+  max_sequences: 4
+  enable_fancy_plots: false
+  save_local: false
+  log_to_wandb: true
+evaluation:
+  enabled: true
+  run_during_training: false
+  run_during_testing: true
+  run_at_end_only: true
+  fid:
+    enabled: true
+    compute_fid: true
+    n_generated_samples: 1000
+    batch_size: 50
+    inception_batch_size: 64
+    real_samples_subset: 2000
+    cache_real_stats: true
+    fid_cache_dir: data/fid_cache
+    fid_batch_size: 32
+    real_data_cache_key: test_dataset
+    n_real_samples: 1000
+  generation:
+    enabled: true
+    methods:
+    - geodesic
+    - enhanced
+    - basic
+    n_samples_per_method: 100
+    comprehensive_n_samples: 500
+    batch_size: 32
+    save_samples: true
+  generation_methods:
+  - geodesic
+  - enhanced
+  - basic
+  sampler_types:
+  - working
+  reconstruction:
+    enabled: true
+    n_test_samples: 200
+    metrics:
+    - mse
+    - psnr
+    - ssim
+    - l1
+    save_reconstructions: false
+  inference:
+    enabled: true
+    n_samples: 100
+    analyze_geometry: true
+    compute_effective_dim: true
+  benchmarking:
+    enabled: false
+    generation_trials: 5
+    inference_trials: 5
+  output:
+    save_detailed_results: true
+    log_to_wandb: true
+    create_summary_plot: true
+    save_generated_grid: true
+  memory:
+    max_batch_size: 64
+    enable_cleanup: true
+    use_cpu_offload: false
+  frequency:
+    every_n_epochs: 5
+    at_epochs: []
+    min_epoch: 10
+metric:
+  name: rhvae
+  implementation: rhvae
+  temperature: 0.7
+  regularization: 0.01
+  n_centroids: 50
+  centroid_method: kmedoids
+  neighbor_mode: global
+  knn_k: 300
+  log_heatmaps: 6
+sampling:
+  enabled: true
+  method: rhmc
+  n_steps: 100
+  n_leapfrog: 50
+  step_size: 0.001
+  log_acceptance_rate: true
+  log_energy: true
+checkpoint:
+  save: true
+  load: false
+  dir: outputs/checkpoints
+  metric_dir: outputs/metrics
+  stageA_dir: outputs/stageA
+  stageB_dir: outputs/stageB
+  stageC_dir: outputs/stageC
+  stageA_model: stageA_vae.pt
+  metric_file: metric_t0.7.pt
+  rhmc_samples: rhmc_samples_t0.pt
+experiment:
+  type: single
+  name: single_run
+  sweep: null
+  log_level: INFO
+  log_to_file: true
+  deterministic: true
+  benchmark: false
+experiment_name: rlvae_comparison
+project_name: rlvae-hyperparameter-optimization
+description: Systematic comparison of Riemannian geometry effects on VAE latent spaces
+  with hyperparameter optimization
+seed: 42
+experiment_type: research
+device: auto
+output_dir: outputs
+wandb:
+  project: rlvae-three-stage-visuals
+  entity: null
+  mode: online
+  tags: []
+  group: null
+  pipeline_mode: per_stage
+  artifacts:
+    enabled: true
+    namespace: rlvae
+    aliases:
+      stage_a_latest: stageA_latest
+      stage_b_latest: stageB_latest
+      stage_c_latest: stageC_latest
+pretrained:
+  encoder_path: null
+  decoder_path: null
+  metric_path: null

@@ -4,7 +4,10 @@ _target_: rlvae.models.riemannian_flow_vae.RiemannianFlowVAE
 
 # Model architecture
 latent_dim: 16
-input_dim: [64, 64, 3]
+input_dim:
+  - ${data.channels}
+  - ${data.image_size[0]}
+  - ${data.image_size[1]}
 architecture: mlp  # For experiment config interpolation
 
 # Encoder/decoder architecture (handled internally by the original model)
@@ -14,7 +17,7 @@ encoder:
   architecture: mlp
 
 # Flow configuration
-n_flows: 4
+n_flows: 7
 flow_type: "planar"
 flow_hidden_dims: [64, 64]
 # Add src-style flow parameters for Hydra interpolation compatibility

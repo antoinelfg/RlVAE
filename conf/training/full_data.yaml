@@ -29,7 +29,7 @@ data:
 model:
   latent_dim: 16  # Keep successful latent dim
   beta: 1.0
-  riemannian_beta: 8.0  # Keep successful riemannian beta
+  riemannian_beta: 32.0  # Optimized for better μ alignment
   posterior:
     type: "riemannian_metric"
   sampling:
@@ -75,3 +75,15 @@ early_stopping:
   monitor: "val_loss"
   mode: "min"
   min_delta: 0.001 
+
+# Metric alternation defaults (Stage C plugin)
+metric_alternation:
+  enabled: false
+  warmup_epochs: 5
+  k_rlvae_epochs: 3
+  metric_step_epochs: 1
+  logdet_clip: 50.0
+  anchor_size: 20000
+  anchor_refresh_frac: 0.1
+  consistency_weight: 0.0
+  metric_lr_multiplier: 1.0

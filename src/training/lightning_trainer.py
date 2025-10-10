@@ -25,6 +25,9 @@ from generation.generator import RlVAEGenerator
 from evaluation.fid_scorer import FIDScorer
 from evaluation.evaluator import ModelEvaluator
 from inference.inference_pipeline import RlVAEInferencePipeline
+from models.factory import ModelFactory
+from config.validator import validate_model_config
+from config.synchronizer import sync_pipeline_config
 
 
 class LightningRlVAETrainer(L.LightningModule):
@@ -33,38 +36,63 @@ class LightningRlVAETrainer(L.LightningModule):
     def __init__(self, config: DictConfig, data_module=None):
         super().__init__()
         
-        self.config = config
+        # Synchronize and validate configuration
+        self.config = sync_pipeline_config(config)
+        validation_result = validate_model_config(self.config.model, 'rlvae')
+        if not validation_result.is_valid:
+            print(f"⚠️ Configuration validation warnings: {validation_result.errors}")
+        
         self.data_module = data_module
         
-        # Create model based on config._target_
-        if hasattr(config.model, '_target_'):
-            # Check if it's the original RiemannianFlowVAE (either canonical or legacy path)
-            target_str = str(config.model._target_)
-            if (
-                'original_rlvae.src.models.riemannian_flow_vae.RiemannianFlowVAE' in target_str
-                or 'rlvae.models.riemannian_flow_vae.RiemannianFlowVAE' in target_str
-            ):
-                # Create the original model directly with proper parameter conversion
-                try:
-                    from rlvae.models.riemannian_flow_vae import RiemannianFlowVAE
-                except Exception:
-                    from original_rlvae.src.models.riemannian_flow_vae import RiemannianFlowVAE
-                
-                # Convert config parameters to proper types
-                model_config = config.model
-                input_dim = tuple(model_config.input_dim) if hasattr(model_config.input_dim, '_content') else tuple(model_config.input_dim)
-                latent_dim = int(model_config.latent_dim)
-                n_flows = int(model_config.n_flows)
-                # Handle both flow_hidden_size and flow_hidden_dims
-                if hasattr(model_config, 'flow_hidden_size'):
-                    flow_hidden_size = int(model_config.flow_hidden_size)
-                elif hasattr(model_config, 'flow_hidden_dims'):
-                    flow_hidden_size = int(model_config.flow_hidden_dims[0])
+        # Create model using unified factory
+        try:
+            print(f"🏭 Creating model using unified factory...")
+            self.model = ModelFactory.create_model(self.config.model, force_unified=True)
+            print(f"✅ Model created successfully: {type(self.model).__name__}")
+        except Exception as e:
+            print(f"⚠️ Unified factory failed: {e}")
+            print("🔄 Falling back to legacy model creation...")
+            
+            # Legacy fallback code
+            model_config = self.config.model  # Define model_config for the legacy fallback
+            if hasattr(config.model, '_target_'):
+                # Respect explicit modular target
+                target_str = str(config.model._target_)
+                if 'ModularRiemannianFlowVAE' in target_str:
+                    try:
+                        from rlvae.models.modular_rlvae import ModularRiemannianFlowVAE as _Mod
+                    except Exception:
+                        from rlvae.models.modular_rlvae import ModularRiemannianFlowVAE as _Mod
+                    self.model = _Mod(config.model)
                 else:
-                    flow_hidden_size = 64  # Default fallback
-                
-                flow_n_blocks = int(getattr(model_config, 'flow_n_blocks', 2))
-                flow_n_hidden = int(getattr(model_config, 'flow_n_hidden', 1))
+                    # Original RiemannianFlowVAE (canonical or legacy path)
+                    RiemannianFlowVAE = None
+                    try:
+                        from rlvae.models.riemannian_flow_vae import RiemannianFlowVAE
+                    except Exception:
+                        try:
+                            from original_rlvae.src.models.riemannian_flow_vae import RiemannianFlowVAE
+                        except Exception:
+                            # Final fallback - try modular version
+                            from rlvae.models.modular_rlvae import ModularRiemannianFlowVAE as RiemannianFlowVAE
+                    
+                    # Create the original model directly with proper parameter conversion
+                    
+                    # Convert config parameters to proper types
+                    model_config = config.model
+                    input_dim = tuple(model_config.input_dim) if hasattr(model_config.input_dim, '_content') else tuple(model_config.input_dim)
+                    latent_dim = int(model_config.latent_dim)
+                    n_flows = int(model_config.n_flows)
+                    # Handle both flow_hidden_size and flow_hidden_dims
+                    if hasattr(model_config, 'flow_hidden_size'):
+                        flow_hidden_size = int(model_config.flow_hidden_size)
+                    elif hasattr(model_config, 'flow_hidden_dims'):
+                        flow_hidden_size = int(model_config.flow_hidden_dims[0])
+                    else:
+                        flow_hidden_size = 64  # Default fallback
+                    
+                    flow_n_blocks = int(getattr(model_config, 'flow_n_blocks', 2))
+                    flow_n_hidden = int(getattr(model_config, 'flow_n_hidden', 1))
                 epsilon = float(getattr(model_config, 'epsilon', 1e-6))
                 beta = float(model_config.beta)
                 riemannian_beta = float(model_config.riemannian_beta) if hasattr(model_config, 'riemannian_beta') else beta
@@ -135,28 +163,20 @@ class LightningRlVAETrainer(L.LightningModule):
                 except Exception:
                     pass
             else:
-                # Check if it's ModularRiemannianFlowVAE which expects config parameter
-                if 'ModularRiemannianFlowVAE' in config.model._target_:
+                # No _target_: use hydra or explicit modular/modrlvae
+                target = str(getattr(config.model, '_target_', ''))
+                if 'modrlvae.ModRLVAE' in target or target.endswith('ModRLVAE'):
                     try:
-                        from rlvae.models.modular_rlvae import ModularRiemannianFlowVAE as _Mod
+                        from rlvae.models.modrlvae import ModRLVAE as _ModRLVAE
                     except Exception:
-                        from models.modular_rlvae import ModularRiemannianFlowVAE as _Mod
-                    self.model = _Mod(config.model)
+                        from rlvae.models.modrlvae import ModRLVAE as _ModRLVAE
+                    self.model = _ModRLVAE(config.model)
                 else:
-                    target = str(config.model._target_)
-                    if 'modrlvae.ModRLVAE' in target or target.endswith('ModRLVAE'):
-                        # Explicitly construct ModRLVAE(config)
-                        try:
-                            from rlvae.models.modrlvae import ModRLVAE as _ModRLVAE
-                        except Exception:
-                            from rlvae.models.modrlvae import ModRLVAE as _ModRLVAE
-                        self.model = _ModRLVAE(config.model)
-                    else:
-                        # Use hydra's instantiate for other models
-                        from hydra.utils import instantiate
-                        self.model = instantiate(config.model)
+                    from hydra.utils import instantiate
+                    self.model = instantiate(config.model)
         else:
             # Fallback to ModularRiemannianFlowVAE
+            from rlvae.models.modular_rlvae import ModularRiemannianFlowVAE
             self.model = ModularRiemannianFlowVAE(config.model)
         # --- FLOW DIAGNOSTICS: Log initial flow weights ---
         if hasattr(self.model, 'flow_manager'):
@@ -635,7 +655,9 @@ class LightningRlVAETrainer(L.LightningModule):
             return loss
 
         x = batch  # [B, T, C, H, W]
-        result = self.model(x)
+        # Ensure encoder forward runs with gradients in training, even if a no_grad was set above
+        with torch.enable_grad():
+            result = self.model(x)
         # Robust loss extraction
         if 'loss' in result:
             main_loss = result['loss']
@@ -1307,6 +1329,39 @@ class LightningRlVAETrainer(L.LightningModule):
                     _wandb.log(payload, step=self.current_epoch)
         except Exception as e:
             print(f"⚠️ Metric panel logging failed: {e}")
+
+    def on_before_optimizer_step(self, optimizer, optimizer_idx: int = 0):
+        """Log gradient norms and learning rate for the metric network."""
+        metric_net = getattr(self.model, 'modular_metric', None)
+        if metric_net is None or not getattr(metric_net, 'trainable', False):
+            return
+        grads = [p.grad.detach() for p in metric_net.parameters() if p.grad is not None]
+        if not grads:
+            return
+        grad_norm = 0.0
+        try:
+            grad_norm = torch.sqrt(sum(g.float().pow(2).sum() for g in grads)).item()
+        except Exception:
+            pass
+        self.log('metric_grad_norm', grad_norm, prog_bar=False)
+        metric_lr = self._find_metric_group_lr(optimizer, metric_net)
+        if metric_lr is not None:
+            self.log('metric_current_lr', metric_lr, prog_bar=False)
+        if wandb.run is not None:
+            payload = {'stageC/metric_grad_norm': grad_norm}
+            if metric_lr is not None:
+                payload['stageC/metric_current_lr'] = metric_lr
+            wandb.log(payload, step=self.global_step)
+
+    @staticmethod
+    def _find_metric_group_lr(optimizer, metric_net):
+        metric_ids = {id(p) for p in metric_net.parameters() if p.requires_grad}
+        if not metric_ids:
+            return None
+        for group in optimizer.param_groups:
+            if any(id(p) in metric_ids for p in group['params']):
+                return group.get('lr', None)
+        return None
 
     def _ensure_model_on_device(self):
         """Ensure all model components are on the correct device."""

@@ -45,10 +45,16 @@ class DecoderManager(nn.Module):
         """Create decoder based on architecture type."""
         if self.architecture.lower() == "mlp":
             return self._create_mlp_decoder()
+        elif self.architecture.lower() == "mlp_gray":
+            return self._create_mlp_decoder()
         elif self.architecture.lower() == "cnn":
             return self._create_cnn_decoder()
+        elif self.architecture.lower() == "cnn_gray":
+            return self._create_cnn_decoder(override_out_channels=1)
         elif self.architecture.lower() == "resnet":
             return self._create_resnet_decoder()
+        elif self.architecture.lower() == "resnet_gray":
+            return self._create_resnet_decoder(override_out_channels=1)
         elif self.architecture.lower() == "rhvae_rgb":
             return self._create_rhvae_rgb_decoder()
         elif self.architecture.lower() == "custom":
@@ -71,8 +77,9 @@ class DecoderManager(nn.Module):
         
         return Decoder_AE_MLP(decoder_config)
     
-    def _create_cnn_decoder(self) -> BaseDecoder:
+    def _create_cnn_decoder(self, override_out_channels: Optional[int] = None) -> BaseDecoder:
         """Create CNN decoder for image data."""
+        target_out_channels = override_out_channels
         class CNNDecoder(BaseDecoder):
             def __init__(self, input_dim, latent_dim, config):
                 super().__init__()
@@ -117,7 +124,8 @@ class DecoderManager(nn.Module):
                     in_channels = h_dim
                 
                 # Final output layer
-                layers.append(nn.ConvTranspose2d(in_channels, input_dim[0], kernel_size, stride, padding, output_padding))
+                out_channels = target_out_channels if target_out_channels is not None else input_dim[0]
+                layers.append(nn.ConvTranspose2d(in_channels, out_channels, kernel_size, stride, padding, output_padding))
                 
                 self.cnn = nn.Sequential(*layers)
             
@@ -144,9 +152,10 @@ class DecoderManager(nn.Module):
         
         # Use self.config directly, not self.config.get('cnn', {})
         return CNNDecoder(self.input_dim, self.latent_dim, self.config)
-    
-    def _create_resnet_decoder(self) -> BaseDecoder:
+
+    def _create_resnet_decoder(self, override_out_channels: Optional[int] = None) -> BaseDecoder:
         """Create ResNet decoder for image data."""
+        target_out_channels = override_out_channels
         class ResNetDecoder(BaseDecoder):
             def __init__(self, input_dim, latent_dim, config):
                 super().__init__()
@@ -192,7 +201,8 @@ class DecoderManager(nn.Module):
                     self.resnet_blocks.append(block)
                 
                 # Final output layer (no upsampling, just change channels)
-                self.final_conv = nn.Conv2d(hidden_dims[-1], input_dim[0], 3, 1, 1)
+                out_channels = target_out_channels if target_out_channels is not None else input_dim[0]
+                self.final_conv = nn.Conv2d(hidden_dims[-1], out_channels, 3, 1, 1)
             
             def _calculate_initial_size(self, input_dim, num_layers):
                 """Calculate the initial feature map size."""

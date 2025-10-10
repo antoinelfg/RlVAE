@@ -1,0 +1,16 @@
+# @package model
+
+defaults:
+  - riemannian_rhmc_vae
+
+# Override only the RHMC stepping to disable the integrator (test covariance only)
+posterior:
+  type: riemannian_rhmc
+  rhmc_steps: 0
+  rhmc_step_size: 0.01
+  # keep alpha/eps from base unless overridden at CLI
+
+# Mirror top-level convenience keys for components that read here
+rhmc_steps: 0
+rhmc_step_size: 0.01
+

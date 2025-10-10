@@ -1,0 +1,58 @@
+# @package experiment
+
+# Clean three-stage pipeline optimized for WandB workspace
+defaults:
+  - rlvae_three_stage_pipeline
+  - /visualization: three_stage_optimized
+  - /wandb: three_stage_optimized
+
+type: three_stage
+name: rlvae_three_stage_clean
+description: "Optimized three-stage pipeline with clean WandB logging for ellipse sequences"
+
+# Inherit all settings from base pipeline but override visualization/wandb
+# This ensures we keep the proven pipeline logic while optimizing logging
+
+# Stage-specific logging optimizations
+stage_a:
+  # Inherit from parent but add logging config
+  logging:
+    wandb_prefix: "stageA"
+    key_metrics: ["train_loss", "val_loss", "reconstruction_mse"]
+    visualization_frequency: 10
+
+stage_b:
+  # Inherit from parent but add logging config  
+  logging:
+    wandb_prefix: "stageB"
+    key_metrics: ["metric_eigenvalues", "centroids_quality", "temperature_stability"]
+    visualization_frequency: 20  # Less frequent for metric stage
+
+stage_c:
+  # Inherit from parent but add logging config
+  logging:
+    wandb_prefix: "stageC" 
+    key_metrics: ["riemannian_kl", "flow_loss", "total_loss", "convergence"]
+    visualization_frequency: 5   # More frequent for final stage
+
+# Pipeline-level logging
+pipeline_logging:
+  summary_frequency: "end_of_stage"  # Log summaries at stage transitions
+  progress_tracking: true
+  stage_timing: true
+  memory_monitoring: false  # Reduce noise
+
+# Optimized for ellipse_sequences with latent_dim=2
+model:
+  latent_dim: 2
+  
+training:
+  model:
+    latent_dim: 2
+
+# Clean WandB workspace settings
+wandb_optimization:
+  group_by_stage: true
+  use_clear_naming: true
+  reduce_logging_frequency: true
+  focus_on_essential_metrics: true

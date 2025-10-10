@@ -13,7 +13,7 @@ run_stage_c: true
 # Stage A: Warm VAE (time-conditioned VAE trained on full sequences flattened)
 stage_a:
   model: vanilla_vae  # Use vanilla VAE like in working global pipeline
-  epochs: 20  # Overridden for faster testing
+  epochs: 100  # Overridden for faster testing
   batch_size: 64
   lr: 1e-4
   beta: 1.0
@@ -23,7 +23,7 @@ stage_a:
 # Stage B: Metric learning at t=0
 stage_b:
   implementation: ${metric.implementation}  # rhvae|precision
-  n_centroids: ${metric.n_centroids}
+  n_centroids: 300
   temperature: ${metric.temperature}
   regularization: ${metric.regularization}
   centroid_method: ${metric.centroid_method}
@@ -31,6 +31,11 @@ stage_b:
   knn_k: ${oc.select:metric.knn_k,300}
   use_timestep: ${oc.select:metric.use_timestep,0}
   standardize_latents: ${oc.select:metric.standardize_latents,false}
+  # Visuals: show ALL centroids by default (set true to filter to t=0 winners)
+  visuals_filter_centroids_to_t0: false
+  visuals_jitter_centroids: auto  # false|true|auto; auto jitters when centroids overlap heavily
+  visuals_scale_mode: percentile
+  extra_temps: []
 
 # RHMC sampling after Stage B
 sampling:
@@ -42,13 +47,13 @@ sampling:
 # Stage C: RLVAE training with Riemannian prior/posterior
 stage_c:
   model: rhvae_original  # Use original working implementation
-  epochs: 20  # Overridden for faster testing
+  epochs: 50  # Overridden for faster testing
   batch_size: 64
   riemannian_beta: ${model.riemannian_beta}
-  allow_metric_updates: true
+  allow_metric_updates: false
   # Use original working implementation
   force_rhvae_components: false  # Don't force RHVAE components
-  update_metric_during_training: true
+  update_metric_during_training: false  # Freeze metric in Stage C
 
 # Checkpointing
 checkpoint:
@@ -63,3 +68,14 @@ checkpoint:
   metric_file: ${checkpoint.metric_file}
   rhmc_samples: ${checkpoint.rhmc_samples}
 
+# Enforce latent dimension and frozen metric globally for this experiment
+model:
+  latent_dim: 2
+  metric:
+    trainable: false
+    init_from_fixed: true
+    temperature_override: null  # Use temperature persisted in Stage B metric
+
+training:
+  model:
+    latent_dim: 2

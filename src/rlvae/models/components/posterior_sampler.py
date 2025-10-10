@@ -22,6 +22,8 @@ class PosteriorSampler(nn.Module):
         import weakref
         self._ctx = {'model': weakref.proxy(model)}
         self.device = getattr(model, 'device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+        # TRACE-once guard
+        self._trace_printed = False
 
     def sample_metric_aware_posterior(self, mu: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
         """
@@ -43,22 +45,26 @@ class PosteriorSampler(nn.Module):
         mu_f32 = mu.float()
         batch_size, latent_dim = mu_f32.shape
 
-        # Compute G(μ)
-        G_mu = self._ctx['model'].G(mu_f32)  # [B, D, D]
+        # Compute covariance at μ: Σ = α · G_inv(μ) + εI (Riemannian Gaussian has precision G)
+        if hasattr(self._ctx['model'], 'G_inv'):
+            G_inv_mu = self._ctx['model'].G_inv(mu_f32)
+        else:
+            G_mu = self._ctx['model'].G(mu_f32)
+            G_inv_mu = torch.linalg.inv(G_mu.float()).to(G_mu.dtype)
 
         # Optional normalization of covariance metric for sampling to prevent
         # excessively large steps when G has very large eigenvalues.
         cov_norm_mode = getattr(self._ctx['model'], 'posterior_cov_norm_mode', 'none')
         if cov_norm_mode and cov_norm_mode != 'none':
-            d = G_mu.shape[-1]
-            G_mu_f32 = G_mu.float()
+            d = G_inv_mu.shape[-1]
+            Ginv_f32 = G_inv_mu.float()
             if cov_norm_mode == 'geomean':
-                sign, logabsdet = torch.slogdet(G_mu_f32)
+                sign, logabsdet = torch.slogdet(Ginv_f32)
                 s = torch.exp(logabsdet / d).unsqueeze(-1).unsqueeze(-1)
-                G_mu = G_mu / (s.to(G_mu.dtype) + 1e-12)
+                G_inv_mu = G_inv_mu / (s.to(G_inv_mu.dtype) + 1e-12)
             elif cov_norm_mode == 'trace':
-                s = (torch.einsum('bii->b', G_mu_f32) / d).unsqueeze(-1).unsqueeze(-1)
-                G_mu = G_mu / (s.to(G_mu.dtype) + 1e-12)
+                s = (torch.einsum('bii->b', Ginv_f32) / d).unsqueeze(-1).unsqueeze(-1)
+                G_inv_mu = G_inv_mu / (s.to(G_inv_mu.dtype) + 1e-12)
 
         # Sample ε ~ N(0, I)
         eps = torch.randn_like(mu_f32)
@@ -73,9 +79,33 @@ class PosteriorSampler(nn.Module):
             pass
 
         # Numerical regularization
-        I = torch.eye(latent_dim, device=G_mu.device, dtype=G_mu.dtype).unsqueeze(0)
+        I = torch.eye(latent_dim, device=G_inv_mu.device, dtype=G_inv_mu.dtype).unsqueeze(0)
         eps_chol = getattr(self._ctx['model'], 'eps_chol', 1e-6)
-        Sigma = alpha * G_mu + eps_chol * I
+        Sigma = alpha * G_inv_mu + eps_chol * I
+
+        # TRACE: First-batch diagnostics (dtype, norms, spectrum)
+        try:
+            import os
+            if os.environ.get('RLVAE_TRACE', '0') == '1' and not self._trace_printed:
+                # dtypes
+                mu_dt = str(mu.dtype)
+                G_dt = str(G_inv_mu.dtype)
+                S_dt = str(Sigma.dtype)
+                # compute a cholesky in float32 to probe dtype safely
+                chol_probe = torch.linalg.cholesky(Sigma.float())
+                chol_dt = str(chol_probe.dtype)
+                # eigen stats (float32 for stability)
+                evals = torch.linalg.eigvalsh(Sigma.float())
+                eigmin = evals.min().item()
+                eigmed = evals.median().item()
+                cond = (evals.max() / (evals.min().clamp_min(1e-12))).item()
+                logdet_S = torch.logdet(Sigma.float()).median().item()
+                # sample stats (we’ll compute z right after L exists)
+                print(f"TRACE RHMC dtype: mu={mu_dt}, Ginv={G_dt}, Sigma={S_dt}, chol={chol_dt}")
+                print(f"TRACE RHMC Σ(μ): eigmin={eigmin:.3e}, median={eigmed:.3e}, cond={cond:.3e}, logdet_med={logdet_S:.3e}")
+                print(f"TRACE RHMC alpha, eps: alpha={float(alpha):.6g}, eps_chol={float(eps_chol):.3g}, autocast={torch.is_autocast_enabled()}")
+        except Exception:
+            pass
 
         try:
             L = torch.linalg.cholesky(Sigma)  # [B, D, D]
@@ -90,6 +120,16 @@ class PosteriorSampler(nn.Module):
                 eps = eps.detach()
 
             z = mu_f32 + torch.einsum('bij,bj->bi', L, eps)
+            try:
+                import os
+                if os.environ.get('RLVAE_TRACE', '0') == '1' and not self._trace_printed:
+                    # Norm stats of z0
+                    z0 = z
+                    z0_norm = torch.norm(z0, dim=1)
+                    print(f"TRACE RHMC z0,zK norms: ||z0|| mean={z0_norm.mean().item():.4g} std={z0_norm.std().item():.4g}; (no RHMC here)")
+                    self._trace_printed = True
+            except Exception:
+                pass
             # Optional Mahalanobis clamp using local precision at μ
             try:
                 r2 = float(getattr(self._ctx['model'], 'posterior_maha_clip', 0.0))
@@ -105,9 +145,23 @@ class PosteriorSampler(nn.Module):
             except Exception:
                 pass
             return z.to(mu.dtype)
-        except Exception:
-            # Fallback to standard Gaussian sampling
+        except Exception as e:
+            # STRICT: optionally disallow fallback to standard
+            try:
+                import os
+                strict = bool(getattr(self._ctx['model'], 'riemannian_strict', False) or os.environ.get('RLVAE_STRICT', '0') == '1')
+            except Exception:
+                strict = False
+            if strict:
+                raise RuntimeError(f"PosteriorSampler: Riemannian sampling failed under strict mode: {e}")
+            # Fallback to standard Gaussian sampling (non-strict only)
             eps = torch.randn_like(mu)
+            try:
+                import os
+                if os.environ.get('RLVAE_TRACE', '0') == '1':
+                    print(f"⚠️ Riemannian sampling failed in PosteriorSampler: {e}; using STANDARD reparam")
+            except Exception:
+                pass
             return mu + eps * torch.exp(0.5 * log_var)
 
     def _get_current_alpha(self, current_epoch: Optional[int]) -> float:

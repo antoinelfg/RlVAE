@@ -1,0 +1,111 @@
+# @package experiment
+
+# Long training configuration - RHMC posterior with ModRLVAE
+defaults:
+  - rlvae_three_stage_pipeline
+
+type: three_stage
+name: rlvae_three_stage_long_rhmc_modular
+description: "Long training with Modular RLVAE and riemannian_rhmc posterior (200 epochs A&C)"
+
+# Extended training configuration
+stage_a:
+  model: vanilla_vae
+  epochs: 50              # Extended from 50
+  batch_size: 64
+  lr: 1e-4
+  beta: 1.0
+  architecture: mlp
+  latent_dim: 2
+
+stage_b:
+  implementation: rhvae
+  n_centroids: 300
+  temperature: 0.7
+  regularization: 0.01
+  centroid_method: kmedoids
+  neighbor_mode: global
+  knn_k: 300
+
+stage_c:
+  model: modular_rlvae      # Use modular RLVAE instead of rhvae_original
+  epochs: 200              # Extended from 30
+  batch_size: 64
+  lr: 2e-4                 # Higher learning rate for faster μ convergence
+  riemannian_beta: 32.0   # Even stronger KL weighting to anchor μ
+  allow_metric_updates: false
+  force_rhvae_components: false
+  update_metric_during_training: false
+  # Enable RHMC sampling method for Stage C
+  sampling:
+    method: posterior_hmc
+  # KL/μ anchoring (stage-level to ensure propagation)
+  kl_metric_eval_point: "mu"
+  kl_use_metric_normalization: false
+  kl_metric_norm_mode: "none"
+  mu_l2_weight: 0.5
+  kl_prior_mode: "volume_gaussian"  # Pull μ toward RHMC prior
+
+# Model configuration (RHMC posterior) - WITH SAFETY BOUNDS
+model:
+  latent_dim: 2
+  posterior:
+    type: "riemannian_rhmc"  # RHMC posterior
+    rhmc_steps: 4             # More RHMC steps for better exploration
+    rhmc_step_size: 0.02      # Larger step size for better coverage
+    rhmc_alpha: 0.20          # Larger initial covariance scaling
+    rhmc_eps_reg: 1e-4        # Regularization for numerical stability
+    eps_regularization: 1e-6  # Legacy key
+    # Safety bounds to prevent divergence
+    max_momentum_norm: 3.0     # Tighter momentum cap
+    max_velocity_norm: 1.0     # Tighter velocity cap
+    max_position_step: 0.5     # Tighter per-step bound
+    max_position_norm: 8.0     # Tighter absolute bound
+  metric:
+    trainable: false           # Keep metric frozen
+    init_from_fixed: true
+    temperature_override: null
+  # Additional ModRLVAE config
+  posterior_type: "riemannian_rhmc"  # Ensure posterior type is set
+  rhmc_steps: 4
+  rhmc_step_size: 0.02
+  rhmc_alpha: 0.20
+  rhmc_eps_reg: 1e-4
+  kl_use_metric_normalization: false   # Disable normalization to strengthen KL magnitude
+  kl_metric_norm_mode: "none"
+  use_curvature_correction: true
+  # Fix KL evaluation point to align with posterior sampling
+  kl_metric_eval_point: "mu"  # Evaluate KL at encoder mean, not sampled points
+  # Auxiliary μ anchoring
+  mu_l2_weight: 0.5
+  kl_prior_mode: "volume_gaussian"  # Pull μ toward RHMC prior
+  # Enable RHMC sampling method for Stage C
+  sampling:
+    method: posterior_hmc
+
+training:
+  model:
+    latent_dim: 2
+    posterior:
+      type: riemannian_rhmc
+      rhmc_steps: 4
+      rhmc_step_size: 0.02
+      rhmc_alpha: 0.20
+      rhmc_eps_reg: 1e-4
+    posterior_type: riemannian_rhmc
+    # Ensure KL settings propagate to training model copy
+    kl_metric_eval_point: "mu"
+    kl_use_metric_normalization: false
+    kl_metric_norm_mode: "none"
+    mu_l2_weight: 0.5
+    kl_prior_mode: "volume_gaussian"
+
+# Visualization configuration
+visualization:
+  level: three_stage_optimized
+
+# WandB configuration
+wandb:
+  project: rlvae-rhmc-comparison-long
+  run_name_template: "RHMC_MOD_200ep_{experiment.name}_{data.name}_ld{model.latent_dim}"
+  tags: ["long_training", "rhmc_posterior", "200_epochs", "modular_rlvae"]

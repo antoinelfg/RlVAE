@@ -1,21 +1,31 @@
 _target_: rlvae.models.modrlvae.ModRLVAE
 
-input_dim: [3, 64, 64]
+input_dim: 
+  - ${data.channels}
+  - ${data.image_size[0]}
+  - ${data.image_size[1]}
 latent_dim: 8
 sequence_length: 8   # auto n_flows = sequence_length - 1
 
 posterior_type: riemannian_metric
 beta: 1.0
 riemannian_beta: 1.0
+rhmc_alpha: 1.0
+rhmc_eps_reg: 1e-4
+rhmc_steps: 0
+rhmc_step_size: 0.01
+rhmc_kl_mode: mc
+rhmc_kl_source: z0
+rhmc_kl_jacobian: false
 
 loop:
   mode: open
   penalty: 0.0
 
 encoder:
-  architecture: mlp
+  architecture: cnn_gray
 decoder:
-  architecture: mlp
+  architecture: cnn_gray
 
 flow_hidden_size: 64
 flow_n_blocks: 2
@@ -32,4 +42,3 @@ use_curvature_correction: true   # or set kl_metric_eval_point: 'z' | 'mu'
 
 phase1_training: false
 phase2_training: false
-

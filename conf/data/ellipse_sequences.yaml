@@ -1,0 +1,35 @@
+defaults:
+  - _self_
+
+name: ellipse_sequences
+channels: 1
+train_ratio: 0.8
+val_ratio: 0.1
+test_ratio: 0.1
+num_sequences: 1000
+seq_len: 8
+sequence_length: 8
+image_size: [64, 64]
+min_eccentricity: 0.0
+max_eccentricity: 0.9
+min_radius: 8
+max_radius: 20
+center_jitter: 4
+antialias: true
+seed: 42
+
+# Degrees of freedom controls
+fix_center: true
+fix_theta: true
+fix_intensity: true
+keep_major_axis_constant: true
+keep_area_constant: false
+
+# Rendering style
+outline_only: false
+outline_width: 2
+supersample_factor: 4
+
+batch_size: 64
+shuffle: true
+num_workers: 4

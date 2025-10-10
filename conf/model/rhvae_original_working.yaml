@@ -3,7 +3,10 @@
 _target_: src.models.riemannian_flow_vae.RiemannianFlowVAE
 
 # Architecture
-input_dim: [3, 64, 64]
+input_dim: 
+  - ${data.channels}
+  - ${data.image_size[0]}
+  - ${data.image_size[1]}
 latent_dim: 16
 
 # RHVAE specific parameters

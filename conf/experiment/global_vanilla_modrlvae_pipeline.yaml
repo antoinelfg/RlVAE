@@ -23,13 +23,15 @@ stage_a:
   batch_size: 64
   lr: 1e-3
   beta: 1.0
-  architecture: mlp
+  architecture: cnn_gray
   latent_dim: ${model.latent_dim}
   # RHVAE params used only if model=rhvae
   riemannian_beta: 1.0
   temperature: 0.7
   regularization: 0.01
   n_centroids: 50
+  # Data selection
+  data: ellipse_sequences  # use the new procedural ellipse dataset
 
 # Stage B: Metric extraction at t=0 (from Stage A outputs)
 stage_b:
@@ -55,7 +57,7 @@ stage_c:
     method: enhanced     # options: official | hmc | posterior_hmc | enhanced | geodesic | basic
   posterior:
     type: riemannian_metric
-  architecture: mlp
+  architecture: cnn_gray
   latent_dim: ${model.latent_dim}
   sequence_length: ${data.sequence_length}
   n_flows: ${oc.decode:${data.sequence_length} - 1}
@@ -66,7 +68,9 @@ stage_c:
   epsilon: ${model.epsilon}
   riemannian_beta: ${oc.select:model.riemannian_beta, 0.3}
   metric:
-    metric_reg_weight: 0.0
+    metric_reg_weight: 0.001
+    metric_reg_type: determinant
+    metric_reg_target: 0.0
 
   # Posterior/KL overrides for Stage C to match the metric‑aware
   # reparameterized posterior and volume‑element KL used in practice.
@@ -98,6 +102,7 @@ training:
     anchor_size: 20000
     anchor_refresh_frac: 0.1
     consistency_weight: 0.0
+    metric_lr_multiplier: 1.0
 
 # Checkpoint slots reused across pipeline
 checkpoint:

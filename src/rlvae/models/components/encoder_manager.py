@@ -46,10 +46,16 @@ class EncoderManager(nn.Module):
         """Create encoder based on architecture type."""
         if self.architecture.lower() == "mlp":
             return self._create_mlp_encoder()
+        elif self.architecture.lower() == "mlp_gray":
+            return self._create_mlp_encoder()
         elif self.architecture.lower() == "cnn":
             return self._create_cnn_encoder()
+        elif self.architecture.lower() == "cnn_gray":
+            return self._create_cnn_encoder(override_in_channels=1)
         elif self.architecture.lower() == "resnet":
             return self._create_resnet_encoder()
+        elif self.architecture.lower() == "resnet_gray":
+            return self._create_resnet_encoder(override_in_channels=1)
         elif self.architecture.lower() == "rhvae_rgb":
             return self._create_rhvae_rgb_encoder()
         elif self.architecture.lower() == "custom":
@@ -58,21 +64,18 @@ class EncoderManager(nn.Module):
             raise ValueError(f"Unknown encoder architecture: {self.architecture}")
     
     def _create_mlp_encoder(self) -> BaseEncoder:
-        """Create MLP encoder (default VAE architecture)."""
+        """Restore default Pythae MLP encoder to match Stage A."""
         from types import SimpleNamespace
-        
         encoder_config = SimpleNamespace()
         encoder_config.input_dim = self.input_dim
         encoder_config.latent_dim = self.latent_dim
-        
-        # Add custom MLP parameters if provided
+        # Optional config passthrough
         if hasattr(self.config, 'mlp'):
             encoder_config.hidden_dims = self.config.mlp.get('hidden_dims', [512, 512, 512])
             encoder_config.dropout = self.config.mlp.get('dropout', 0.1)
-        
         return Encoder_VAE_MLP(encoder_config)
     
-    def _create_cnn_encoder(self) -> BaseEncoder:
+    def _create_cnn_encoder(self, override_in_channels: Optional[int] = None) -> BaseEncoder:
         """Create CNN encoder for image data."""
         class CNNEncoder(BaseEncoder):
             def __init__(self, input_dim, latent_dim, config):
@@ -91,7 +94,10 @@ class EncoderManager(nn.Module):
                 
                 # Build CNN layers
                 layers = []
-                in_channels = input_dim[0] if len(input_dim) == 3 else 1
+                if override_in_channels is not None:
+                    in_channels = override_in_channels
+                else:
+                    in_channels = input_dim[0] if len(input_dim) == 3 else 1
                 
                 for h_dim in hidden_dims:
                     layers.extend([
@@ -144,8 +150,9 @@ class EncoderManager(nn.Module):
         # Use self.config directly, not self.config.get('cnn', {})
         return CNNEncoder(self.input_dim, self.latent_dim, self.config)
     
-    def _create_resnet_encoder(self) -> BaseEncoder:
+    def _create_resnet_encoder(self, override_in_channels: Optional[int] = None) -> BaseEncoder:
         """Create ResNet encoder for image data."""
+        forced_in_channels = override_in_channels
         class ResNetEncoder(BaseEncoder):
             def __init__(self, input_dim, latent_dim, config):
                 super().__init__()
@@ -158,7 +165,10 @@ class EncoderManager(nn.Module):
                 dropout = config.get('dropout', 0.1)
                 
                 # Initial convolution
-                in_channels = input_dim[0] if len(input_dim) == 3 else 1
+                if forced_in_channels is not None:
+                    in_channels = forced_in_channels
+                else:
+                    in_channels = input_dim[0] if len(input_dim) == 3 else 1
                 self.initial_conv = nn.Sequential(
                     nn.Conv2d(in_channels, hidden_dims[0], 7, 2, 3),
                     nn.BatchNorm2d(hidden_dims[0]),

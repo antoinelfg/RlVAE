@@ -16,6 +16,7 @@ from typing import Dict, Any, Optional, List
 from pathlib import Path
 from omegaconf import DictConfig
 import wandb
+from contextlib import nullcontext
 
 from .riemannian_flow_vae import RiemannianFlowVAE, OfficialRHVAESampler
 from .components.encoder_manager import EncoderManager
@@ -25,7 +26,9 @@ from .components.metric_loader import MetricLoader
 from .components.flow_manager import FlowManager
 from .components.loss_manager import LossManager
 from .components.posterior_sampler import PosteriorSampler
+from .components.riemannian_rhmc_posterior import RiemannianRHMCPosterior
 from .components.riemannian_sampler import RiemannianSampler
+from .components.sampler_manager import SamplerManager
 try:
     # Use top-level samplers module for RHMC
     from src.models.samplers import RiemannianHMCSampler
@@ -155,29 +158,95 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         print(f"[MODEL INIT] input_dim: {config.input_dim}, encoder architecture: {encoder_arch}")
         # Store config for later use
         self.config = config
+        
+        # Create single source of truth for model config
+        self.config_resolved = self._resolve_model_config(config)
+        
+        # Sanity check print (once)
+        if not hasattr(self, '_config_sanity_printed'):
+            print(f"[CONFIG] Resolved: latent_dim={self.config_resolved.get('latent_dim')}, "
+                  f"posterior.type={self.config_resolved.get('posterior', {}).get('type')}, "
+                  f"rhmc_steps={self.config_resolved.get('posterior', {}).get('rhmc_steps')}, "
+                  f"kl_metric_eval_point={self.config_resolved.get('kl_metric_eval_point')}, "
+                  f"riemannian_beta={self.config_resolved.get('riemannian_beta')}")
+            self._config_sanity_printed = True
         self.model_name = config.get('_target_', 'ModularRiemannianFlowVAE').split('.')[-1]
         
         # Initialize all modular components
         self._setup_modular_components()
         
-        # Setup components based on config
-        self._setup_from_config()
-
-        # Apply optional posterior RHMC params from config (if provided)
+        # Initialize μ alignment settings
+        self.mu_alignment_enabled = bool(getattr(self.config, 'mu_alignment_enabled', True))
+        self._mu_align_ready = False
+        self._mu_align_scale = None  # [D]
+        self._mu_align_bias = None   # [D]
+        # Target stats from metric centroids if available
         try:
-            ph = getattr(self.config, 'posterior_hmc', None)
-            if ph is None and hasattr(self.config, 'model'):
-                ph = getattr(self.config.model, 'posterior_hmc', None)
-            if ph is not None:
-                # DictConfig or dict
-                m_steps = ph.get('mcmc_steps_nbr', None) if hasattr(ph, 'get') else None
-                n_lf = ph.get('n_lf', None) if hasattr(ph, 'get') else None
-                eps = ph.get('eps_lf', None) if hasattr(ph, 'get') else None
-                b0 = ph.get('beta_zero', None) if hasattr(ph, 'get') else None
-                self.set_posterior_hmc_params(mcmc_steps_nbr=m_steps, n_lf=n_lf, eps_lf=eps, beta_zero=b0)
-                print(f"[POSTERIOR HMC] Applied params from config: steps={m_steps}, n_lf={n_lf}, eps={eps}, beta_zero={b0}")
+            if hasattr(self, 'centroids_tens') and self.centroids_tens is not None:
+                cm = self.centroids_tens.float()
+                self._mu_target_mean = cm.mean(dim=0).to(self.device)
+                self._mu_target_std = cm.std(dim=0).clamp_min(1e-6).to(self.device)
+            else:
+                self._mu_target_mean = torch.zeros(self.latent_dim, device=self.device)
+                self._mu_target_std = torch.ones(self.latent_dim, device=self.device)
+        except Exception:
+            self._mu_target_mean = torch.zeros(self.latent_dim, device=self.device)
+            self._mu_target_std = torch.ones(self.latent_dim, device=self.device)
+        
+        # Hook to ensure modular metric gets loaded when parent class loads metric
+        self._setup_metric_transfer_hook()
+        
+        # Override G and G_inv methods to use modular metric with fallback loading
+        self._setup_modular_metric_fallback()
+    
+    def _resolve_model_config(self, config):
+        """Resolve model config with precedence: stage_c > model > training.model"""
+        from omegaconf import OmegaConf
+        
+        # Start with base config
+        resolved = OmegaConf.to_container(config, resolve=True)
+        
+        # Apply precedence: stage_c overrides > model.* > training.model.*
+        if 'stage_c' in resolved:
+            stage_c = resolved['stage_c']
+            if isinstance(stage_c, dict):
+                # Merge stage_c overrides
+                for key, value in stage_c.items():
+                    if key != 'model':  # Don't merge the nested model key
+                        resolved[key] = value
+        
+        # Flatten nested model configs
+        if 'model' in resolved:
+            model_config = resolved['model']
+            if isinstance(model_config, dict):
+                for key, value in model_config.items():
+                    resolved[key] = value
+        
+        if 'training' in resolved and 'model' in resolved['training']:
+            training_model = resolved['training']['model']
+            if isinstance(training_model, dict):
+                for key, value in training_model.items():
+                    if key not in resolved:  # Only use if not already set
+                        resolved[key] = value
+        
+        return resolved
+
+        # Apply optional posterior RHMC params from resolved config
+        try:
+            posterior_config = self.config_resolved.get('posterior', {})
+            if posterior_config:
+                print(f"[CONFIG] Applying posterior config: {posterior_config}")
+                # Apply RHMC-specific configs if available
+                if 'rhmc_steps' in posterior_config:
+                    self.rhmc_steps = posterior_config['rhmc_steps']
+                if 'rhmc_step_size' in posterior_config:
+                    self.rhmc_step_size = posterior_config['rhmc_step_size']
+                if 'rhmc_alpha' in posterior_config:
+                    self.rhmc_alpha = posterior_config['rhmc_alpha']
+                if 'rhmc_eps_reg' in posterior_config:
+                    self.rhmc_eps_reg = posterior_config['rhmc_eps_reg']
         except Exception as e:
-            print(f"[POSTERIOR HMC] ⚠️ Could not apply posterior HMC params: {e}")
+            print(f"[CONFIG] Warning: Could not apply posterior config: {e}")
         
         # Initialize manifold sampling if enabled
         self._setup_manifold_sampling()
@@ -205,6 +274,8 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         reg_override = metric_cfg.get('regularization_override', None)
         if reg_override is None:
             reg_override = 0.01
+        import os
+        self.riemannian_strict = bool(getattr(self.config, 'riemannian_strict', False) or os.environ.get('RLVAE_STRICT', '1') == '1')
         self.modular_metric = MetricTensor(
             latent_dim=self.config.latent_dim,
             device=self.device,
@@ -228,18 +299,35 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         kl_use_metric_normalization = getattr(self.config, 'kl_use_metric_normalization', True)
         kl_metric_norm_mode = getattr(self.config, 'kl_metric_norm_mode', 'geomean')
         kl_amp_safe = getattr(self.config, 'kl_amp_safe', True)
+        kl_metric_eval_point = getattr(self.config, 'kl_metric_eval_point', 'mu')  # Force to 'mu' for testing
+        mu_l2_weight = float(getattr(self.config, 'mu_l2_weight', 0.0))
+        
+        # Route tracing: LossManager config
+        if not hasattr(self, '_loss_config_traced'):
+            print(f"[ROUTE] LossManager: kl_metric_eval_point={self.config_resolved.get('kl_metric_eval_point', 'z')}, "
+                  f"kl_prior_mode={self.config_resolved.get('kl_prior_mode', 'uniform')}, "
+                  f"mu_l2_weight={self.config_resolved.get('mu_l2_weight', 0.0)}")
+            self._loss_config_traced = True
+        
         self.loss_manager = LossManager(
-            beta=self.config.beta,
-            riemannian_beta=self.config.get('riemannian_beta', self.config.beta),
-            loop_penalty_weight=self.config.loop.penalty,
+            beta=self.config_resolved.get('beta', 1.0),
+            riemannian_beta=self.config_resolved.get('riemannian_beta', self.config_resolved.get('beta', 1.0)),
+            loop_penalty_weight=self.config_resolved.get('loop', {}).get('penalty', 1.0),
             device=self.device,
             metric_reg_weight=metric_reg_weight,
             metric_reg_type=metric_reg_type,
             metric_reg_target=metric_reg_target,
-            kl_use_metric_normalization=kl_use_metric_normalization,
-            kl_metric_norm_mode=kl_metric_norm_mode,
-            kl_amp_safe=kl_amp_safe,
+            mu_l2_weight=self.config_resolved.get('mu_l2_weight', 0.0),
+            kl_prior_mode=self.config_resolved.get('kl_prior_mode', 'uniform'),
+            kl_use_metric_normalization=self.config_resolved.get('kl_use_metric_normalization', True),
+            kl_metric_norm_mode=self.config_resolved.get('kl_metric_norm_mode', 'geomean'),
+            kl_amp_safe=self.config_resolved.get('kl_amp_safe', True),
+            kl_metric_eval_point=self.config_resolved.get('kl_metric_eval_point', 'z'),
         )
+        # Route tracing: LossManager created successfully
+        if not hasattr(self, '_loss_created_traced'):
+            print(f"[ROUTE] LossManager created with resolved config")
+            self._loss_created_traced = True
         
         # 🚀 NEW: Initialize modular flow manager (replace the one from parent)
         self.flow_manager = FlowManager(
@@ -277,7 +365,16 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         else:
             self.metric_update_manager = None
         
+        # 🚀 NEW: Initialize sampler manager for RHMC and other advanced sampling
+        self._sampler_manager = SamplerManager(self)
+        
+        # 🚀 NEW: Initialize sampling components (including RHMC posterior)
+        self._setup_sampling_components()
+        
         print(f"✅ Initialized all modular components for {self.model_name}")
+        
+        # CRITICAL: Load pretrained components AFTER all setup to avoid overwriting
+        self._load_pretrained_components_modular()
         
     def _setup_encoder_decoder(self):
         """Setup encoder and decoder using modular managers."""
@@ -367,7 +464,11 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             )
         
         # Load pretrained components using modular approach
-        self._load_pretrained_components_modular()
+        print(f"[DEBUG] Config structure: hasattr pretrained={hasattr(self.config, 'pretrained')}")
+        if hasattr(self.config, 'pretrained'):
+            print(f"[DEBUG] Pretrained config: {self.config.pretrained}")
+            print(f"[DEBUG] Metric path: {getattr(self.config.pretrained, 'metric_path', 'NOT_FOUND')}")
+        # Note: _load_pretrained_components_modular() is now called in __init__ after all setup
         
         # Configure Riemannian sampling
         if hasattr(self.config, 'sampling') and getattr(self.config.sampling, 'use_riemannian', False):
@@ -381,9 +482,19 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
     def _load_pretrained_components_modular(self):
         """Load pretrained components using modular approach."""
         
+        # Debug: Check if pretrained config exists
+        print(f"[PRETRAINED DEBUG] hasattr pretrained: {hasattr(self.config, 'pretrained')}")
+        if hasattr(self.config, 'pretrained'):
+            print(f"[PRETRAINED DEBUG] pretrained config: {self.config.pretrained}")
+            encoder_path_val = getattr(self.config.pretrained, 'encoder_path', None)
+            decoder_path_val = getattr(self.config.pretrained, 'decoder_path', None)
+            print(f"[PRETRAINED DEBUG] encoder_path: {encoder_path_val}")
+            print(f"[PRETRAINED DEBUG] decoder_path: {decoder_path_val}")
+        
         # Load encoder and decoder using managers
         if hasattr(self.config, 'pretrained') and getattr(self.config.pretrained, 'encoder_path', None):
             encoder_path = Path(self.config.pretrained.encoder_path)
+            print(f"[PRETRAINED DEBUG] encoder_path exists: {encoder_path.exists()}")
             if encoder_path.exists():
                 print(f"🔧 Loading encoder from: {encoder_path}")
                 
@@ -421,6 +532,7 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         
         if hasattr(self.config, 'pretrained') and getattr(self.config.pretrained, 'decoder_path', None):
             decoder_path = Path(self.config.pretrained.decoder_path)
+            print(f"[PRETRAINED DEBUG] decoder_path exists: {decoder_path.exists()}")
             if decoder_path.exists():
                 print(f"🔧 Loading decoder from: {decoder_path}")
                 
@@ -449,32 +561,48 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
                 print("✅ Loaded decoder weights")
         
         # 🚀 NEW: Load metrics using modular approach
-        if hasattr(self.config, 'pretrained') and getattr(self.config.pretrained, 'metric_path', None):
-            metric_path = Path(self.config.pretrained.metric_path)
-            if metric_path.exists():
-                try:
-                    # Use new modular metric loader
-                    metric_data = self.metric_loader.load_from_file(
-                        metric_path,
-                        temperature_override=self.config.metric.get('temperature_override'),
-                        regularization_override=self.config.metric.get('regularization_override')
-                    )
+        print(f"[DEBUG] Checking metric loading conditions:")
+        print(f"  - hasattr pretrained: {hasattr(self.config, 'pretrained')}")
+        if hasattr(self.config, 'pretrained'):
+            metric_path_val = getattr(self.config.pretrained, 'metric_path', None)
+            print(f"  - metric_path: {metric_path_val}")
+            if metric_path_val:
+                metric_path = Path(metric_path_val)
+                print(f"  - metric_path exists: {metric_path.exists()}")
+                if metric_path.exists():
+                    try:
+                        # Use new modular metric loader
+                        metric_data = self.metric_loader.load_from_file(
+                            metric_path,
+                            temperature_override=self.config.metric.get('temperature_override'),
+                            regularization_override=self.config.metric.get('regularization_override')
+                        )
+                        
+                        # ADAPT metric dimension to match model.latent_dim if needed
+                        metric_data = self._adapt_metric_dims(metric_data)
+                        # Load into modular metric tensor (no fallback)
+                        self.modular_metric.load_pretrained(**metric_data)
+                        
+                        # Create backward-compatible interface functions
+                        self._create_backward_compatible_interface()
+                        
+                        # Setup sampling components
+                        self._setup_sampling_components()
+                        
+                        print("✅ Loaded metrics using modular components (2x faster!)")
+                        try:
+                            import os
+                            if os.environ.get('RLVAE_TRACE', '0') == '1':
+                                print(f"Using Stage B metric: {metric_path}")
+                        except Exception:
+                            pass
                     
-                    # Load into modular metric tensor
-                    self.modular_metric.load_pretrained(**metric_data)
-                    
-                    # Create backward-compatible interface functions
-                    self._create_backward_compatible_interface()
-                    
-                    # Setup sampling components
-                    self._setup_sampling_components()
-                    
-                    print("✅ Loaded metrics using modular components (2x faster!)")
-                    
-                except Exception as e:
-                    print(f"⚠️ Failed to load metrics with modular components: {e}")
-                    print("🔄 Falling back to original implementation...")
-                    self._fallback_to_original_metric_loading()
+                    except Exception as e:
+                        if self.riemannian_strict:
+                            raise RuntimeError(f"Strict Riemannian mode: failed to load/adapt metric: {e}")
+                        print(f"⚠️ Failed to load metrics with modular components: {e}")
+                        print("🔄 Falling back to original implementation...")
+                        self._fallback_to_original_metric_loading()
     
     def _create_backward_compatible_interface(self):
         """Create backward-compatible interface for existing code."""
@@ -498,6 +626,11 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         self.temperature = self.modular_metric.temperature
         self.lbd = self.modular_metric.regularization
         
+        print(f"[MODULAR METRIC] Backward-compatible interface created")
+        print(f"  - Modular metric loaded: {self.modular_metric._is_loaded}")
+        print(f"  - Centroids shape: {self.centroids_tens.shape}")
+        print(f"  - Metric matrices shape: {self.M_tens.shape}")
+        
         # Debug: Test if metric is working
         print(f"[METRIC DEBUG] Metric loaded: {self.modular_metric.is_loaded()}")
         if self.modular_metric.is_loaded():
@@ -517,10 +650,56 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         print(f"  - beta: {getattr(self, 'beta', 'NOT_SET')}")
         
         print("✅ Created backward-compatible metric interface")
+
+    def _adapt_metric_dims(self, md: dict) -> dict:
+        """Adapt a KxDsrc metric to model latent_dim Ddst via block-diagonal padding/slicing.
+        - If Dsrc < Ddst: zero-pad centroids and block‑diag(Ginv, I)
+        - If Dsrc > Ddst: slice first Ddst dims with warning
+        """
+        try:
+            K, d_src = md['centroids'].shape
+            d_dst = int(self.config.latent_dim)
+            if d_src == d_dst:
+                return md
+            import torch
+            if d_src < d_dst:
+                pad = d_dst - d_src
+                C = md['centroids']
+                M = md['metric_matrices']
+                C_pad = torch.zeros(K, d_dst, device=C.device, dtype=C.dtype)
+                C_pad[:, :d_src] = C
+                M_pad = torch.zeros(K, d_dst, d_dst, device=M.device, dtype=M.dtype)
+                M_pad[:, :d_src, :d_src] = M
+                eye = torch.eye(pad, device=M.device, dtype=M.dtype).unsqueeze(0).expand(K, pad, pad)
+                M_pad[:, d_src:, d_src:] = eye
+                print(f"[METRIC ADAPT] Padded metric from D={d_src} to D={d_dst} with identity on extra dims")
+                return {
+                    'centroids': C_pad,
+                    'metric_matrices': M_pad,
+                    'temperature': md['temperature'],
+                    'regularization': md['regularization']
+                }
+            else:
+                # d_src > d_dst: slice
+                print(f"[METRIC ADAPT] Slicing metric from D={d_src} to D={d_dst}")
+                return {
+                    'centroids': md['centroids'][:, :d_dst],
+                    'metric_matrices': md['metric_matrices'][:, :d_dst, :d_dst],
+                    'temperature': md['temperature'],
+                    'regularization': md['regularization']
+                }
+        except Exception as e:
+            if self.riemannian_strict:
+                raise
+            print(f"⚠️ METRIC ADAPT failed: {e}. Proceeding without adaptation.")
+            return md
     
     def _setup_sampling_components(self):
         """Setup sampling components using modular metric."""
-        
+        # Idempotent guard to avoid double initialization
+        if getattr(self, '_sampling_components_initialized', False):
+            print("[RHMC CONFIG] Sampling components already initialized; skipping re-create")
+            return
         # Create multiple sampler options
         self._riemannian_sampler = RiemannianSampler(self)
         self._official_sampler = OfficialRHVAESampler(self)
@@ -532,8 +711,28 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
                 self._hmc_sampler = None
         else:
             self._hmc_sampler = None
+        # RHMC posterior component (training posterior alternative)
+        try:
+            # Pass the actual config dict, not the model object
+            rhmc_config = {}
+            if hasattr(self.config, 'posterior') and self.config.posterior is not None:
+                rhmc_config.update(dict(self.config.posterior))
+            # Top-level fallbacks override if provided
+            for k in (
+                'rhmc_steps', 'rhmc_step_size', 'rhmc_alpha', 'rhmc_eps_reg',
+                'max_momentum_norm', 'max_velocity_norm', 'max_position_step', 'max_position_norm',
+                'min_cov_eig', 'eps_regularization'
+            ):
+                if hasattr(self.config, k):
+                    rhmc_config[k] = getattr(self.config, k)
+            print(f"[RHMC CONFIG] Creating RHMC posterior with config: {rhmc_config}")
+            self.posterior_sampler_rhmc = RiemannianRHMCPosterior(self, rhmc_config)
+        except Exception as e:
+            print(f"[RHMC CONFIG] Failed to create RHMC posterior: {e}")
+            self.posterior_sampler_rhmc = None
         
         print("✅ Setup modular sampling components")
+        self._sampling_components_initialized = True
 
     # Convenience wrappers for RHMC (analysis/generation only)
     def sample_rhmc_prior(self, n_samples: int = 100, **kwargs):
@@ -569,7 +768,137 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
                 self.config.metric.get('temperature_override')
             )
         else:
-            print("⚠️ No fallback metric loading available")
+            print("⚠️ No pretrained metric available, initializing with default values")
+            # Initialize metric tensor with default values for Stage C
+            self._initialize_default_metric()
+        # Ensure sampling components are available even after fallback
+        try:
+            self._setup_sampling_components()
+        except Exception:
+            pass
+    
+    def _initialize_default_metric(self):
+        """Initialize metric tensor with default values when no pretrained metric is available."""
+        print("[METRIC INIT] Initializing default metric tensor for Stage C")
+        
+        # Create default centroids and metric matrices
+        n_centroids = 10  # Default number of centroids
+        centroids = torch.randn(n_centroids, self.latent_dim, device=self.device) * 0.5
+        metric_matrices = torch.eye(self.latent_dim, device=self.device).unsqueeze(0).repeat(n_centroids, 1, 1)
+        
+        # Load into modular metric tensor
+        self.modular_metric.load_pretrained(
+            centroids=centroids,
+            metric_matrices=metric_matrices,
+            temperature=0.1,
+            regularization=0.01
+        )
+        
+        # Create backward-compatible interface
+        self._create_backward_compatible_interface()
+        
+        print(f"[METRIC INIT] Default metric initialized with {n_centroids} centroids")
+    
+    def _setup_metric_transfer_hook(self):
+        """Setup hook to transfer loaded metric data to modular metric tensor."""
+        # Override the parent class's metric loading to also load modular metric
+        original_load_pretrained_metrics = super().load_pretrained_metrics
+        
+        def load_pretrained_metrics_with_transfer(metric_path, temperature_override=None):
+            print(f"[METRIC TRANSFER] Parent loading metric from: {metric_path}")
+            # Call parent method first
+            original_load_pretrained_metrics(metric_path, temperature_override)
+            
+            # Transfer loaded data to modular metric tensor
+            if hasattr(self, 'centroids_tens') and hasattr(self, 'M_tens'):
+                print(f"[METRIC TRANSFER] Transferring to modular metric tensor")
+                print(f"  - Centroids shape: {self.centroids_tens.shape}")
+                print(f"  - Metric matrices shape: {self.M_tens.shape}")
+                
+                # Load into modular metric tensor
+                self.modular_metric.load_pretrained(
+                    centroids=self.centroids_tens,
+                    metric_matrices=self.M_tens,
+                    temperature=getattr(self, 'temperature', 0.1),
+                    regularization=getattr(self, 'lbd', 0.01)
+                )
+                
+                # Create backward-compatible interface
+                self._create_backward_compatible_interface()
+                
+                print(f"[METRIC TRANSFER] ✅ Modular metric loaded: {self.modular_metric._is_loaded}")
+            else:
+                print(f"[METRIC TRANSFER] ⚠️ Parent metric loading didn't create required variables")
+        
+        # Replace the parent method
+        self.load_pretrained_metrics = load_pretrained_metrics_with_transfer
+    
+    def _setup_modular_metric_fallback(self):
+        """Setup fallback to load modular metric when G/G_inv are accessed."""
+        def G_with_fallback(z: torch.Tensor) -> torch.Tensor:
+            """G method with fallback to load modular metric if needed."""
+            if not self.modular_metric._is_loaded:
+                if hasattr(self, 'centroids_tens') and hasattr(self, 'M_tens'):
+                    self.modular_metric.load_pretrained(
+                        centroids=self.centroids_tens,
+                        metric_matrices=self.M_tens,
+                        temperature=getattr(self, 'temperature', 0.1),
+                        regularization=getattr(self, 'lbd', 0.01)
+                    )
+            return self.modular_metric.compute_metric(z)
+        
+        def G_inv_with_fallback(z: torch.Tensor) -> torch.Tensor:
+            """G_inv method with fallback to load modular metric if needed."""
+            if not self.modular_metric._is_loaded:
+                if hasattr(self, 'centroids_tens') and hasattr(self, 'M_tens'):
+                    self.modular_metric.load_pretrained(
+                        centroids=self.centroids_tens,
+                        metric_matrices=self.M_tens,
+                        temperature=getattr(self, 'temperature', 0.1),
+                        regularization=getattr(self, 'lbd', 0.01)
+                    )
+            return self.modular_metric.compute_inverse_metric(z)
+        
+        # Override the G and G_inv methods
+        self.G = G_with_fallback
+        self.G_inv = G_inv_with_fallback
+        
+        print(f"[METRIC FALLBACK] G and G_inv methods overridden with fallback loading")
+    
+    def load_pretrained_metrics(self, metric_path, temperature_override=None):
+        """Override parent method to load metrics into modular metric tensor."""
+        print(f"[MODULAR METRIC] load_pretrained_metrics called with path: {metric_path}")
+        print(f"[MODULAR METRIC] Loading pretrained metrics from: {metric_path}")
+        
+        try:
+            # First call parent method to load metric into parent variables
+            super().load_pretrained_metrics(metric_path, temperature_override)
+            
+            # Then transfer the loaded data to modular metric tensor
+            if hasattr(self, 'centroids_tens') and hasattr(self, 'M_tens'):
+                print(f"[MODULAR METRIC] Transferring loaded metric to modular tensor")
+                print(f"  - Centroids shape: {self.centroids_tens.shape}")
+                print(f"  - Metric matrices shape: {self.M_tens.shape}")
+                
+                # Load into modular metric tensor
+                self.modular_metric.load_pretrained(
+                    centroids=self.centroids_tens,
+                    metric_matrices=self.M_tens,
+                    temperature=getattr(self, 'temperature', 0.1),
+                    regularization=getattr(self, 'lbd', 0.01)
+                )
+                
+                # Create backward-compatible interface functions
+                self._create_backward_compatible_interface()
+                
+                print("✅ Loaded metrics into modular metric tensor")
+            else:
+                print("⚠️ Parent metric loading didn't create centroids_tens/M_tens")
+                
+        except Exception as e:
+            print(f"⚠️ Failed to load metrics into modular tensor: {e}")
+            # Fall back to parent method only
+            super().load_pretrained_metrics(metric_path, temperature_override)
     
     def _setup_metrics_tracking(self):
         """Initialize comprehensive metrics tracking."""
@@ -627,41 +956,8 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
                 setattr(self.decoder, 'input_dim', obs_dim)
         except Exception:
             pass
-        output = super().forward(x)
-
-        result = {
-            'reconstruction': output.recon_x,
-            'latent_samples': output.z,
-            'reconstruction_loss': output.recon_loss,
-            'kl_divergence': output.kld_loss,
-            'total_loss': output.loss,
-            'flow_loss': getattr(output, 'flow_loss', torch.tensor(0.0, device=output.loss.device if isinstance(output.loss, torch.Tensor) else self.device)),
-            'loop_penalty': getattr(output, 'loop_penalty', torch.tensor(0.0, device=output.loss.device if isinstance(output.loss, torch.Tensor) else self.device))
-        }
-
-        # Robustness: do NOT zero-out NaNs (that hides failures). Penalize instead.
-        for key in ['reconstruction_loss', 'kl_divergence', 'flow_loss', 'loop_penalty', 'total_loss']:
-            val = result.get(key, None)
-            if isinstance(val, torch.Tensor):
-                result[key] = torch.nan_to_num(val, nan=1e6, posinf=1e6, neginf=1e6)
-
-        # If latent sequence contains NaN/Inf, set a large penalty to surface the issue
-        try:
-            z_out = result.get('latent_samples', None)
-            if isinstance(z_out, torch.Tensor) and (torch.isnan(z_out).any() or torch.isinf(z_out).any()):
-                penalty = torch.tensor(1e6, device=z_out.device)
-                result['kl_divergence'] = penalty
-                result['total_loss'] = penalty
-        except Exception:
-            pass
-
-        if hasattr(output, 'riemannian_kl'):
-            result['riemannian_kl'] = output.riemannian_kl
-
-        if compute_metrics:
-            result.update(self._compute_additional_metrics(x, result))
-
-        return result
+        # Use the fully modular forward to ensure modular sampling + loss path
+        return self.forward_modular(x, compute_metrics=compute_metrics)
     
     def forward_modular(self, x: torch.Tensor, compute_metrics: bool = False) -> Dict[str, torch.Tensor]:
         """
@@ -676,25 +972,179 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         """
         batch_size, n_obs = x.shape[:2]
 
-        # Debug: Check input for NaN/Inf
-        if torch.isnan(x).any() or torch.isinf(x).any():
-            print("[DEBUG] Input x contains NaN or Inf!")
-        print(f"[DEBUG] Input x stats: min={x.min().item():.4f}, max={x.max().item():.4f}, mean={x.mean().item():.4f}, std={x.std().item():.4f}")
+        # Route tracing: model state and config
+        if not hasattr(self, '_route_traced'):
+            print(f"[ROUTE] Model: {self.model_name}, posterior_type: {self.posterior_type}")
+            print(f"[ROUTE] Has modular_metric: {hasattr(self, 'modular_metric')}, use_riem_kl: {self.posterior_type in ['riemannian_metric', 'riemannian_rhmc']}")
+            self._route_traced = True
         
         # Encode initial observation using modular encoder
         x_0 = x[:, 0]
-        encoder_out = self.encoder(x_0)
+        grad_enabled = torch.is_grad_enabled()
+        inference_mode_fn = getattr(torch, "is_inference_mode_enabled", None)
+        inference_mode_active = inference_mode_fn() if inference_mode_fn else False
+        encoder_ctx = nullcontext()
+        ctx_label = None
+        if self.training:
+            if inference_mode_active and hasattr(torch, "inference_mode"):
+                encoder_ctx = torch.inference_mode(False)
+                ctx_label = "inference_mode_off"
+            elif not grad_enabled:
+                encoder_ctx = torch.enable_grad()
+                ctx_label = "enable_grad"
+        with encoder_ctx:
+            encoder_out = self.encoder(x_0)
         mu = encoder_out.embedding
         log_var = encoder_out.log_covariance
+        # If mu unexpectedly has no grad, try a guarded re-encode under grad-enabled context
+        try:
+            if self.training and not getattr(mu, 'requires_grad', True):
+                if not hasattr(self, "_encoder_grad_ctx_reported"):
+                    print("[GRAD DEBUG] mu.requires_grad=False after initial encode; attempting to re-enable gradients")
+                    self._encoder_grad_ctx_reported = True
+                reencode_ctx = None
+                if inference_mode_active and hasattr(torch, "inference_mode"):
+                    reencode_ctx = torch.inference_mode(False)
+                elif not grad_enabled:
+                    reencode_ctx = torch.enable_grad()
+                if reencode_ctx is not None:
+                    with reencode_ctx:
+                        encoder_out = self.encoder(x_0)
+                else:
+                    encoder_out = self.encoder(x_0)
+                mu = encoder_out.embedding
+                log_var = encoder_out.log_covariance
+                if getattr(mu, 'requires_grad', False) is False and not hasattr(self, "_encoder_grad_warning_printed"):
+                    print("[GRAD WARNING] μ still lacks gradients after re-encode. Check for upstream inference/no_grad contexts.")
+                    self._encoder_grad_warning_printed = True
+        except Exception as _e:
+            print(f"[GRAD DEBUG] re-encode check error: {_e}")
+        if self.training and ctx_label and not hasattr(self, "_encoder_ctx_diag_printed"):
+            print(f"[ROUTE] Encoder context: '{ctx_label}' (training={self.training}, grad_enabled={grad_enabled}, inference_mode={inference_mode_active})")
+            self._encoder_ctx_diag_printed = True
+        # Gradient diagnostics: ensure μ receives gradients
+        try:
+            if self.training and getattr(mu, 'requires_grad', False) and not hasattr(self, "_mu_grad_hook_set"):
+                mu.retain_grad()
+                def _mu_grad_hook(g):
+                    try:
+                        if not hasattr(self, "_mu_grad_printed"):
+                            print(f"[GRAD DEBUG] mu grad norm: {g.norm().item():.6f}, mean {g.mean().item():.6f}, std {g.std().item():.6f}")
+                            self._mu_grad_printed = True
+                    except Exception:
+                        pass
+                    return g
+                mu.register_hook(_mu_grad_hook)
+                self._mu_grad_hook_set = True
+        except Exception as _e:
+            print(f"[GRAD DEBUG] Unable to attach mu grad hook: {_e}")
+        # Optional: align μ distribution to metric centroid stats (first-batch calibration)
+        if self.mu_alignment_enabled:
+            try:
+                if not self._mu_align_ready:
+                    mu_mean = mu.detach().float().mean(dim=0)
+                    mu_std = mu.detach().float().std(dim=0).clamp_min(1e-6)
+                    scale = (self._mu_target_std / mu_std).to(mu.device)
+                    bias = (self._mu_target_mean - scale * mu_mean).to(mu.device)
+                    self._mu_align_scale = scale
+                    self._mu_align_bias = bias
+                    self._mu_align_ready = True
+                    if os.environ.get('RLVAE_TRACE','0') == '1':
+                        print(f"TRACE MU ALIGN: target_mean={self._mu_target_mean.tolist()}, target_std={self._mu_target_std.tolist()}")
+                        print(f"TRACE MU ALIGN: batch_mean={mu_mean.tolist()}, batch_std={mu_std.tolist()}")
+                        print(f"TRACE MU ALIGN: scale={scale.tolist()}, bias={bias.tolist()}")
+                if self._mu_align_scale is not None and self._mu_align_bias is not None:
+                    mu = mu * self._mu_align_scale + self._mu_align_bias
+            except Exception:
+                pass
+        # TRACE encoder outputs
+        try:
+            import os
+            if os.environ.get('RLVAE_TRACE', '0') == '1':
+                print(f"TRACE ENCODER mu: dtype={mu.dtype}, shape={tuple(mu.shape)}, mean={mu.mean().item():.4g}, std={mu.std().item():.4g}, min={mu.min().item():.4g}, max={mu.max().item():.4g}")
+                if isinstance(log_var, torch.Tensor):
+                    print(f"TRACE ENCODER log_var: dtype={log_var.dtype}, shape={tuple(log_var.shape)}, mean={log_var.mean().item():.4g}, std={log_var.std().item():.4g}, min={log_var.min().item():.4g}, max={log_var.max().item():.4g}")
+        except Exception:
+            pass
+        
+        # DEBUG: Always print what we're using for posterior sampling
+        if not hasattr(self, '_debug_printed'):
+            print(f"[ModularRiemannianFlowVAE DEBUG] posterior_type={self.posterior_type}")
+            print(f"[ModularRiemannianFlowVAE DEBUG] hasattr modular_metric: {hasattr(self, 'modular_metric')}")
+            print(f"[ModularRiemannianFlowVAE DEBUG] hasattr posterior_sampler_rhmc: {hasattr(self, 'posterior_sampler_rhmc')}")
+            self._debug_printed = True
         
         # Sample latents using modular sampling
         if self.posterior_type == "riemannian_metric" and hasattr(self, 'modular_metric'):
+            try:
+                import os
+                if os.environ.get('RLVAE_TRACE', '0') == '1':
+                    print('USING LOCAL METRIC-ALIGNED GAUSSIAN (forward)')
+            except Exception:
+                pass
             z_0 = self.sample_metric_aware_posterior(mu, log_var)
+        elif self.posterior_type == "riemannian_rhmc":
+            # If model exposes a RHMC posterior sampler component, use it
+            rhmc_log_q = None
+            rhmc_z0 = None
+            rhmc_traj = None
+            try:
+                if hasattr(self, 'posterior_sampler_rhmc'):
+                    print('✅ USING RIEMANNIAN RHMC POSTERIOR (forward)')
+                    # Pull overrides from config when available
+                    alpha_override = getattr(self.config, 'rhmc_alpha', None)
+                    eps_override = getattr(self.config, 'rhmc_eps_reg', None)
+                    rhmc_ret = self.posterior_sampler_rhmc.sample_riemannian_rhmc_posterior(
+                        mu,
+                        log_var,
+                        return_log_prob=True,
+                        return_traj=True,
+                        return_initial=True,
+                        with_jacobian=bool(getattr(self.config, 'rhmc_kl_jacobian', False)),
+                        alpha=alpha_override,
+                        eps_reg=eps_override,
+                    )
+                    # Normalize return tuple
+                    if isinstance(rhmc_ret, tuple):
+                        # Expected ordering: (zK, log_q?, z0?, traj_info?)
+                        zK = rhmc_ret[0]
+                        # Identify optional parts by type/position
+                        for extra in rhmc_ret[1:]:
+                            if isinstance(extra, torch.Tensor) and extra.shape[:1] == (batch_size,):
+                                # Likely log_q
+                                rhmc_log_q = extra
+                            elif isinstance(extra, torch.Tensor) and extra.shape == mu.shape:
+                                rhmc_z0 = extra
+                            elif isinstance(extra, dict):
+                                rhmc_traj = extra
+                        z_0 = zK
+                    else:
+                        z_0 = rhmc_ret
+                        zK = z_0
+                    print(f"[RHMC DEBUG] zK shape: {z_0.shape}, mean: {z_0.mean().item():.4f}, std: {z_0.std().item():.4f}")
+                else:
+                    if getattr(self, 'riemannian_strict', False) or os.environ.get('RLVAE_STRICT','0') == '1':
+                        raise RuntimeError('Strict Riemannian mode: RHMC posterior component not wired')
+                    # Fall back to metric-aware Gaussian when RHMC component not wired (non-strict)
+                    print('⚠️ RHMC posterior not wired; USING LOCAL METRIC-ALIGNED GAUSSIAN')
+                    z_0 = self.sample_metric_aware_posterior(mu, log_var)
+                    zK = z_0
+            except Exception as e:
+                if getattr(self, 'riemannian_strict', False) or os.environ.get('RLVAE_STRICT','0') == '1':
+                    raise
+                print(f"⚠️ RHMC posterior sampling failed in forward: {e}; falling back to standard reparam")
+                eps = torch.randn_like(mu)
+                z_0 = mu + eps * torch.exp(0.5 * log_var)
+                zK = z_0
         else:
             print("⚠️ DEBUG: Falling back to standard Gaussian posterior sampling (no modular metric available or incorrect posterior_type)")
             eps = torch.randn_like(mu)
             z_0 = mu + eps * torch.exp(0.5 * log_var)
-        print(f"[DEBUG] z_0 stats before flows: mean={z_0.mean().item():.4f}, std={z_0.std().item():.4f}, min={z_0.min().item():.4f}, max={z_0.max().item():.4f}")
+            zK = z_0
+        # Route tracing: sampling method and z_0 stats
+        if not hasattr(self, '_sampling_traced'):
+            print(f"[ROUTE] Sampling: {self.posterior_type}, z_0 stats: mean={z_0.mean().item():.4f}, std={z_0.std().item():.4f}")
+            self._sampling_traced = True
         
         # Build latent sequence
         if self.n_flows > 0:
@@ -704,6 +1154,7 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         else:
             # No flows: tile z_0 across observed timesteps to keep shapes consistent
             log_det_jacobians = []
+            z_seq = [z_0]
             z_seq_tensor = z_0.unsqueeze(1).expand(-1, n_obs, -1).contiguous()
         if self.loop_mode == "closed":
             z_seq_tensor[:, -1] = z_seq_tensor[:, 0]
@@ -713,10 +1164,10 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         recon_x = recon_x.view(batch_size, n_obs, *self.input_dim)
         # Sanitize NaNs/Infs before clamping/log-losses
         recon_x = torch.nan_to_num(recon_x, nan=0.5, posinf=1.0, neginf=0.0)
-        # Debug: Check recon_x for NaN/Inf
-        if torch.isnan(recon_x).any() or torch.isinf(recon_x).any():
-            print("[DEBUG] recon_x contains NaN or Inf!")
-        print(f"[DEBUG] recon_x stats: min={recon_x.min().item():.4f}, max={recon_x.max().item():.4f}, mean={recon_x.mean().item():.4f}, std={recon_x.std().item():.4f}")
+        # Route tracing: reconstruction stats (once)
+        if not hasattr(self, '_recon_traced'):
+            print(f"[ROUTE] Reconstruction: min={recon_x.min().item():.4f}, max={recon_x.max().item():.4f}, mean={recon_x.mean().item():.4f}")
+            self._recon_traced = True
         # Clamp recon_x if using BCE loss (optional, here for safety)
         recon_x = torch.clamp(recon_x, min=1e-6, max=1-1e-6)
         # Compute losses using modular loss manager
@@ -738,14 +1189,31 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             z_seq=z_seq,
             loop_mode=self.loop_mode,
             metric_tensor=self.modular_metric if hasattr(self, 'modular_metric') else None,
-            use_riemannian_kl=self.posterior_type == "riemannian_metric"
+            use_riemannian_kl=(self.posterior_type in ["riemannian_metric", "riemannian_rhmc"]),
+            # RHMC KL Monte‑Carlo wiring
+            rhmc_z0=rhmc_z0 if self.posterior_type == "riemannian_rhmc" else None,
+            rhmc_zK=zK if self.posterior_type == "riemannian_rhmc" else None,
+            rhmc_log_q=rhmc_log_q if self.posterior_type == "riemannian_rhmc" else None,
+            rhmc_traj_info=rhmc_traj if self.posterior_type == "riemannian_rhmc" else None,
+            rhmc_posterior=getattr(self, 'posterior_sampler_rhmc', None) if self.posterior_type == "riemannian_rhmc" else None,
+            rhmc_kl_mode=str(getattr(self.config, 'rhmc_kl_mode', 'mc')).lower(),
+            rhmc_kl_source=str(getattr(self.config, 'rhmc_kl_source', 'z0')).lower(),
+            rhmc_kl_jacobian=bool(getattr(self.config, 'rhmc_kl_jacobian', False)),
         )
-        # Debug: Check loss values for NaN/Inf
-        for k, v in losses.items():
-            if isinstance(v, torch.Tensor) and (torch.isnan(v).any() or torch.isinf(v).any()):
-                print(f"[DEBUG] Loss {k} contains NaN or Inf! Value: {v}")
-            elif isinstance(v, torch.Tensor):
-                print(f"[DEBUG] Loss {k}: {v.item():.4f}")
+        # One-time check: encoder params require_grad
+        try:
+            if not hasattr(self, "_enc_require_grad_printed"):
+                enc_params = [(n, p.requires_grad) for n, p in self.encoder.named_parameters(recurse=True)]
+                true_count = sum(1 for _, r in enc_params if r)
+                total_count = len(enc_params)
+                print(f"[GRAD DEBUG] Encoder params require_grad: {true_count}/{total_count}")
+                self._enc_require_grad_printed = True
+        except Exception:
+            pass
+        # Route tracing: loss composition (once)
+        if not hasattr(self, '_loss_traced'):
+            print(f"[ROUTE] Losses: recon={losses['reconstruction_loss'].item():.4f}, kl={losses['kl_divergence_loss'].item():.4f}, flow={losses['flow_loss'].item():.4f}")
+            self._loss_traced = True
         
         # Prepare result
         result = {

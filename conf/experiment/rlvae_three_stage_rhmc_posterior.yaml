@@ -1,0 +1,60 @@
+# @package experiment
+
+# Three-stage pipeline with RHMC posterior for Stage C
+# Uses the exact same base as rlvae_three_stage_pipeline but with riemannian_rhmc posterior
+defaults:
+  - rlvae_three_stage_pipeline
+
+type: three_stage
+name: rlvae_three_stage_rhmc_posterior
+description: "Three-stage pipeline with new Riemannian RHMC posterior in Stage C"
+
+# Override ONLY the Stage C posterior type - everything else stays identical
+stage_c:
+  model: rhvae_original
+  epochs: 30
+  batch_size: 64
+  riemannian_beta: ${model.riemannian_beta}
+  allow_metric_updates: false
+  force_rhvae_components: false
+  update_metric_during_training: false
+  
+  # NEW: Use our Riemannian RHMC posterior
+  posterior_override:
+    type: "riemannian_rhmc"
+    rhmc_steps: 3
+    rhmc_step_size: 0.01
+    rhmc_alpha: 1.0
+    eps_regularization: 1e-6
+    max_grad_norm: 5.0
+    min_step_size: 1e-4
+
+# Keep all other settings identical to base pipeline
+model:
+  latent_dim: 2
+  # Add RHMC posterior configuration to model
+  posterior:
+    type: "riemannian_rhmc"  # This will be used in Stage C
+    rhmc_steps: 3
+    rhmc_step_size: 0.01
+    rhmc_alpha: 1.0
+    eps_regularization: 1e-6
+    max_grad_norm: 5.0
+    min_step_size: 1e-4
+  metric:
+    trainable: false
+    init_from_fixed: true
+    temperature_override: null
+
+training:
+  model:
+    latent_dim: 2
+    # Ensure Stage C uses RHMC posterior
+    posterior:
+      type: riemannian_rhmc
+
+# WandB configuration for comparison
+wandb:
+  project: rlvae-three-stage-visuals
+  run_name_template: "3stage_RHMC_{experiment.name}_{data.name}_ld{model.latent_dim}"
+  tags: ["rhmc_posterior", "comparison"]

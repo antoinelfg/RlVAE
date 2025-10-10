@@ -76,3 +76,14 @@ early_stopping:
   monitor: "val_loss"
   mode: "min"
   min_delta: 0.001 
+
+metric_alternation:
+  enabled: false
+  warmup_epochs: 5
+  k_rlvae_epochs: 3
+  metric_step_epochs: 1
+  logdet_clip: 50.0
+  anchor_size: 20000
+  anchor_refresh_frac: 0.1
+  consistency_weight: 0.0
+  metric_lr_multiplier: 1.0

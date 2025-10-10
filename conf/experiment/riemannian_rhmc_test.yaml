@@ -1,0 +1,65 @@
+# @package experiment
+
+# Test experiment for the new Riemannian RHMC posterior
+defaults:
+  - /model: riemannian_rhmc_vae
+  - /data: ellipse_sequences
+  - /visualization: ellipse_sequences_optimized
+  - /wandb: three_stage_optimized
+
+type: three_stage
+name: riemannian_rhmc_test
+description: "Test of the new Riemannian + RHMC posterior without acceptance/rejection"
+
+# Override model configuration for RHMC posterior
+model:
+  latent_dim: 2
+  
+  # RHMC posterior configuration (overrides defaults)
+  posterior:
+    rhmc_steps: 5            # Slightly more steps for better exploration
+    rhmc_step_size: 0.008    # Conservative step size
+    rhmc_alpha: 0.8          # Coefficient for G(μ) in initial sampling
+  
+  # Keep other settings
+  metric:
+    trainable: false
+    init_from_fixed: true
+    temperature_override: null
+
+# Reduced epochs for faster testing
+stage_a:
+  epochs: 30  # Reduced from 50
+  batch_size: 64
+  
+stage_c:
+  epochs: 20  # Reduced from 30
+
+training:
+  model:
+    latent_dim: 2
+
+# Enhanced logging for RHMC diagnostics
+wandb_optimization:
+  project_name: "rlvae-rhmc-test"
+  run_name_template: "rhmc_test_steps{model.posterior.rhmc_steps}_alpha{model.posterior.rhmc_alpha}"
+  
+  # Additional RHMC metrics
+  rhmc_diagnostics:
+    log_energy_changes: true
+    log_momentum_norms: true
+    log_position_changes: true
+    log_step_acceptance: true  # Always 1.0 for our method
+    
+  essential_visualizations:
+    - "reconstruction_grid"
+    - "latent_manifold_2d" 
+    - "sequence_trajectories"
+    - "loss_curves"
+    - "enhanced_kl/visualization"  # Compare with standard method
+
+# Performance monitoring
+performance:
+  monitor_rhmc_stability: true
+  log_numerical_issues: true
+  track_gradient_norms: true

@@ -84,17 +84,26 @@ def validate_spd_matrix(
     if check_positive_definite:
         try:
             eigenvals = torch.linalg.eigvals(G).real  # [batch_size, dim]
-            min_eigenval = eigenvals.min().item()
-            max_eigenval = eigenvals.max().item()
+            # Handle both single matrix and batch of matrices
+            min_eigenval = eigenvals.min()
+            max_eigenval = eigenvals.max()
             
-            diagnostics['eigenvals_min'] = min_eigenval
-            diagnostics['eigenvals_max'] = max_eigenval
-            diagnostics['condition_number'] = max_eigenval / max(min_eigenval, eps_tol)
-            diagnostics['is_positive_definite'] = min_eigenval > eps_tol
+            # Convert to scalar only if it's actually a scalar tensor
+            min_eigenval_scalar = min_eigenval.item() if min_eigenval.numel() == 1 else min_eigenval
+            max_eigenval_scalar = max_eigenval.item() if max_eigenval.numel() == 1 else max_eigenval
+            
+            diagnostics['eigenvals_min'] = min_eigenval_scalar
+            diagnostics['eigenvals_max'] = max_eigenval_scalar
+            # For condition number, use tensor values to avoid scalar conversion issues
+            diagnostics['condition_number'] = (max_eigenval / torch.clamp(min_eigenval, min=eps_tol)).item() if (max_eigenval / torch.clamp(min_eigenval, min=eps_tol)).numel() == 1 else (max_eigenval / torch.clamp(min_eigenval, min=eps_tol))
+            # Positive-definiteness across batch
+            diagnostics['is_positive_definite'] = (min_eigenval > eps_tol).all().item() if batch_size > 1 else (min_eigenval > eps_tol).item()
             diagnostics['eigenvals_range'] = (min_eigenval, max_eigenval)
             
             if not diagnostics['is_positive_definite']:
-                msg = f"{name} matrices are not positive definite (min eigenval: {min_eigenval:.2e})"
+                # Ensure scalar for message formatting even with batched eigenvalues
+                min_ev_scalar = (min_eigenval.min().item() if min_eigenval.numel() > 1 else float(min_eigenval.item()))
+                msg = f"{name} matrices are not positive definite (min eigenval: {min_ev_scalar:.2e})"
                 if warn_only:
                     warnings.warn(msg)
                 else:

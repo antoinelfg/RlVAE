@@ -1,0 +1,96 @@
+# @package visualization
+
+# Optimized visualization configuration specifically for ellipse_sequences dataset
+# Focuses on 2D latent space analysis and meaningful sequence visualizations
+
+level: "ellipse_optimized"
+frequency: 10  # Every 10 epochs
+
+# Module selection - optimized for ellipse sequences
+enable_basic: true          # Essential: reconstruction grids, loss curves
+enable_manifold: true       # Critical: 2D latent space visualization
+enable_interactive: false   # Disabled: not needed for ellipse analysis
+enable_flow_analysis: true  # Important: flow diagnostics for RLVAE
+enable_dynamics: false     # Disabled: redundant with manifold for ellipses
+
+# Ellipse-specific frequency controls
+basic_frequency: 5          # Frequent: core reconstruction quality
+manifold_frequency: 10      # Moderate: 2D latent manifold evolution
+flow_frequency: 15         # Less frequent: flow field analysis
+interactive_frequency: 999  # Disabled
+dynamics_frequency: 999    # Disabled
+
+# Performance optimizations for ellipse sequences
+disable_curvature: true     # Disabled: computationally expensive
+max_sequences: 8           # Optimal for ellipse visualization
+enable_fancy_plots: false  # Focus on clarity over aesthetics
+
+# Ellipse-specific visualization settings
+ellipse_specific:
+  # Focus on key ellipse parameters
+  highlight_eccentricity: true
+  highlight_radius: true
+  show_parameter_evolution: true
+  
+  # 2D latent space optimization
+  latent_2d_focus: true
+  show_latent_trajectories: true
+  color_by_parameters: true
+  
+  # Sequence visualization
+  sequence_grid_size: [2, 4]  # 2x4 grid for 8-frame sequences
+  show_temporal_arrows: true
+  highlight_t0_frames: true
+
+# Output controls
+save_local: false          # WandB only
+log_to_wandb: true
+
+# WandB-specific settings for ellipse sequences
+wandb_settings:
+  image_quality: "high"     # High quality for detailed ellipse analysis
+  max_images_per_epoch: 6   # Limited set of essential images
+  
+  # Essential plots for ellipse sequences
+  essential_plots:
+    - "reconstruction_grid"      # Show reconstruction quality
+    - "latent_manifold_2d"      # 2D latent space evolution
+    - "sequence_trajectories"    # Temporal evolution in latent space
+    - "parameter_correlation"    # Ellipse parameter relationships
+    - "loss_curves"             # Training progress
+    - "flow_diagnostics"        # Flow field analysis (Stage C only)
+  
+  # Disabled plots to reduce noise
+  disabled_plots:
+    - "3d_visualizations"
+    - "interactive_plots"
+    - "curvature_analysis"
+    - "high_dimensional_projections"
+    - "detailed_flow_fields"
+
+# Stage-specific visualization focus
+stage_focus:
+  stage_a:
+    priority_plots: ["reconstruction_grid", "loss_curves", "latent_distribution"]
+    frequency_multiplier: 1.0
+    
+  stage_b:
+    priority_plots: ["metric_eigenvalues", "centroids_2d", "temperature_effects"]
+    frequency_multiplier: 0.5  # Less frequent during metric learning
+    
+  stage_c:
+    priority_plots: ["latent_manifold_2d", "flow_diagnostics", "riemannian_metrics"]
+    frequency_multiplier: 1.5  # More frequent during RLVAE training
+
+# Memory and performance optimization
+performance:
+  batch_size_for_viz: 32     # Smaller batches for visualization
+  max_memory_usage_gb: 4     # Limit memory usage
+  enable_gpu_memory_cleanup: true
+  
+# Quality settings optimized for ellipse analysis
+quality:
+  dpi: 150                   # Good quality without excessive file size
+  figure_size: [10, 8]       # Appropriate size for ellipse grids
+  color_scheme: "viridis"    # Good for parameter visualization
+  font_size: 12              # Readable labels

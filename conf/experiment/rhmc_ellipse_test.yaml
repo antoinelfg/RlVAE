@@ -1,0 +1,74 @@
+# @package experiment
+
+# Simple RHMC test with ellipse sequences
+defaults:
+  - /model: riemannian_rhmc_vae
+  - /data: ellipse_sequences
+  - /visualization: ellipse_sequences_optimized
+  - /wandb: three_stage_optimized
+
+type: three_stage
+name: rhmc_ellipse_test
+description: "Test Riemannian RHMC posterior with ellipse sequences"
+
+# Model configuration
+model:
+  latent_dim: 2
+  
+  # RHMC posterior settings
+  posterior:
+    rhmc_steps: 3            # Conservative for testing
+    rhmc_step_size: 0.01     # Conservative step size
+    rhmc_alpha: 1.0          # Standard coefficient
+  
+  # Keep metric settings simple
+  metric:
+    trainable: false
+    init_from_fixed: true
+    temperature_override: null
+
+# Three-stage configuration
+stage_a:
+  model: vanilla_vae
+  epochs: 20               # Reduced for testing
+  batch_size: 32           # Smaller batch for testing
+  lr: 1e-4
+  beta: 1.0
+  architecture: mlp
+  latent_dim: 2
+
+stage_b:
+  implementation: rhvae
+  n_centroids: 100         # Reduced for testing
+  temperature: 0.7
+  regularization: 0.01
+  centroid_method: kmedoids
+  neighbor_mode: global
+  knn_k: 50               # Reduced for testing
+
+stage_c:
+  model: rhvae_original
+  epochs: 15              # Reduced for testing
+  batch_size: 32          # Smaller batch for testing
+  riemannian_beta: 8.0
+  allow_metric_updates: false
+
+# Training configuration
+training:
+  model:
+    latent_dim: 2
+    posterior:
+      type: riemannian_rhmc
+    beta: 1.0
+    riemannian_beta: 8.0
+
+# WandB configuration
+wandb:
+  project: rlvae-rhmc-test
+  run_name_template: "rhmc_ellipse_test_steps{model.posterior.rhmc_steps}"
+  mode: online
+
+# Performance settings
+performance:
+  reduce_memory_usage: true
+  optimize_for_speed: true

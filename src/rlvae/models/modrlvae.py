@@ -247,6 +247,7 @@ class ModRLVAE(nn.Module):
 
         # Optional prior/training sampler manager
         self.sampler_manager = SamplerManager(self)
+        self._sampler_manager = self.sampler_manager  # legacy forward expects this alias
         # Optional prior sampler (geodesic/enhanced/basic)
         self.riemannian_sampler = RiemannianSampler(self)
 
@@ -330,6 +331,12 @@ class ModRLVAE(nn.Module):
         mu = enc_out.embedding
         log_var = enc_out.log_covariance
 
+        # DEBUG: Always print what we're using for posterior sampling
+        if not hasattr(self, '_debug_printed'):
+            print(f"[ModRLVAE DEBUG] posterior_type={self.posterior_type}, sampling_method={self.sampling_method}")
+            print(f"[ModRLVAE DEBUG] Using {'metric_aware_posterior' if self.posterior_type == 'riemannian_metric' else 'sampler_manager'}")
+            self._debug_printed = True
+        
         # Posterior sampling (with optional sampler manager methods)
         if self.posterior_type == "riemannian_metric":
             z0 = self.posterior_sampler.sample_metric_aware_posterior(mu, log_var)

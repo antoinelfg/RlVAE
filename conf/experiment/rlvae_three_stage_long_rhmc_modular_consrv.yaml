@@ -1,0 +1,27 @@
+# @package experiment
+
+defaults:
+  - rlvae_three_stage_long_rhmc_modular
+
+# Conservative RHMC stepping to diagnose integrator drift
+model:
+  posterior:
+    type: riemannian_rhmc
+    rhmc_steps: 2
+    rhmc_step_size: 0.005
+    rhmc_alpha: 0.15
+    rhmc_eps_reg: 1e-3
+  rhmc_steps: 2
+  rhmc_step_size: 0.005
+  rhmc_alpha: 0.15
+  rhmc_eps_reg: 1e-3
+
+training:
+  model:
+    posterior:
+      type: riemannian_rhmc
+      rhmc_steps: 2
+      rhmc_step_size: 0.005
+      rhmc_alpha: 0.15
+      rhmc_eps_reg: 1e-3
+

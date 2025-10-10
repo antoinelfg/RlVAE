@@ -18,6 +18,7 @@ from .interactive import InteractiveVisualizations
 from .flow_analysis import FlowAnalysisVisualizations
 from .latent_dynamics import LatentDynamicsVisualizations
 from .manifold_evolution import ManifoldEvolutionVisualizations
+from .geodesic_analysis import GeodesicAnalysisVisualizations
 
 from omegaconf import DictConfig
 
@@ -31,6 +32,8 @@ class VisualizationLevel(Enum):
     DYNAMICS = "dynamics"    # Includes advanced dynamics analysis
     FULL = "full"           # All visualizations
     BETWEEN = "between"     # Only sequence slider and det G
+    ELLIPSE_OPTIMIZED = "ellipse_optimized"  # Optimized for ellipse sequences
+    THREE_STAGE_OPTIMIZED = "three_stage_optimized"  # Optimized for three-stage pipeline
 
 
 @dataclass
@@ -46,6 +49,7 @@ class VisualizationConfig:
     enable_interactive: bool = False
     enable_flow_analysis: bool = False
     enable_dynamics: bool = False
+    enable_geodesic_analysis: bool = False
     
     # Frequency controls (every N epochs)
     basic_frequency: int = 1
@@ -53,6 +57,7 @@ class VisualizationConfig:
     interactive_frequency: int = 9
     flow_frequency: int = 3
     dynamics_frequency: int = 5
+    geodesic_frequency: int = 20
     
     # Advanced controls
     disable_curvature: bool = True
@@ -160,6 +165,36 @@ class VisualizationConfig:
                 interactive_frequency=1,
                 manifold_frequency=1
             ),
+            VisualizationLevel.ELLIPSE_OPTIMIZED: cls(
+                level=level,
+                enable_basic=True,
+                enable_manifold=True,
+                enable_interactive=False,
+                enable_flow_analysis=True,
+                enable_dynamics=False,
+                basic_frequency=5,
+                manifold_frequency=10,
+                flow_frequency=15,
+                disable_curvature=True,
+                max_sequences=8,
+                enable_fancy_plots=False
+            ),
+            VisualizationLevel.THREE_STAGE_OPTIMIZED: cls(
+                level=level,
+                enable_basic=True,
+                enable_manifold=True,
+                enable_interactive=False,
+                enable_flow_analysis=True,
+                enable_dynamics=False,
+                enable_geodesic_analysis=True,
+                basic_frequency=5,
+                manifold_frequency=10,
+                flow_frequency=15,
+                geodesic_frequency=20,
+                disable_curvature=True,
+                max_sequences=8,
+                enable_fancy_plots=False
+            ),
         }
         return configs[level]
 
@@ -216,6 +251,9 @@ class VisualizationManager:
             
         if self.viz_config.enable_dynamics:
             self.modules['dynamics'] = LatentDynamicsVisualizations(model, device, config, should_log)
+            
+        if self.viz_config.enable_geodesic_analysis:
+            self.modules['geodesic_analysis'] = GeodesicAnalysisVisualizations(model, device, config, should_log)
             
         # Always enable manifold evolution for adaptive centroid training
         if hasattr(config, 'adaptive_centroids') and config.adaptive_centroids.get('enabled', False):
@@ -285,6 +323,11 @@ class VisualizationManager:
             if (self.viz_config.enable_dynamics and 
                 epoch % self.viz_config.dynamics_frequency == 0):
                 self._run_dynamics_visualizations(x_sample, epoch)
+            
+            # Geodesic analysis visualizations
+            if (self.viz_config.enable_geodesic_analysis and 
+                epoch % self.viz_config.geodesic_frequency == 0):
+                self._run_geodesic_visualizations(x_sample, epoch)
                 
         except Exception as e:
             print(f"⚠️ Visualization error at epoch {epoch}: {e}")
@@ -416,6 +459,17 @@ class VisualizationManager:
             dynamics.create_energy_landscape_analysis(x_sample, epoch)
             dynamics.create_attractor_analysis(x_sample, epoch)
     
+    def _run_geodesic_visualizations(self, x_sample: torch.Tensor, epoch: int):
+        """Run geodesic analysis visualizations."""
+        if 'geodesic_analysis' not in self.modules:
+            return
+            
+        print(f"🌐 Running geodesic visualizations for epoch {epoch}")
+        geodesic = self.modules['geodesic_analysis']
+        
+        # Create geodesic trajectory visualization
+        geodesic.create_geodesic_trajectories(x_sample, epoch)
+    
     def set_level(self, level: VisualizationLevel):
         """Change visualization level dynamically."""
         self.viz_config = VisualizationConfig.from_level(level)
@@ -433,6 +487,8 @@ class VisualizationManager:
             self.viz_config.enable_flow_analysis = True
         elif module_name == 'dynamics':
             self.viz_config.enable_dynamics = True
+        elif module_name == 'geodesic_analysis':
+            self.viz_config.enable_geodesic_analysis = True
         print(f"✅ Enabled {module_name} visualizations")
     
     def disable_module(self, module_name: str):
@@ -447,6 +503,8 @@ class VisualizationManager:
             self.viz_config.enable_flow_analysis = False
         elif module_name == 'dynamics':
             self.viz_config.enable_dynamics = False
+        elif module_name == 'geodesic_analysis':
+            self.viz_config.enable_geodesic_analysis = False
         print(f"❌ Disabled {module_name} visualizations")
     
     def get_summary(self) -> Dict:
@@ -458,14 +516,16 @@ class VisualizationManager:
                 'manifold': self.viz_config.enable_manifold,
                 'interactive': self.viz_config.enable_interactive,
                 'flow_analysis': self.viz_config.enable_flow_analysis,
-                'dynamics': self.viz_config.enable_dynamics
+                'dynamics': self.viz_config.enable_dynamics,
+                'geodesic_analysis': self.viz_config.enable_geodesic_analysis
             }.items() if enabled],
             'frequencies': {
                 'basic': self.viz_config.basic_frequency,
                 'manifold': self.viz_config.manifold_frequency,
                 'interactive': self.viz_config.interactive_frequency,
                 'flow': self.viz_config.flow_frequency,
-                'dynamics': self.viz_config.dynamics_frequency
+                'dynamics': self.viz_config.dynamics_frequency,
+                'geodesic': self.viz_config.geodesic_frequency
             }
         } 
 

@@ -234,6 +234,24 @@ class ManifoldVisualizations(BaseVisualization):
                         else:
                             d = z.shape[1]; K = self.centroids_tens.shape[0]
                             self.M_tens = torch.eye(d, device=device).unsqueeze(0).repeat(K, 1, 1)
+                    
+                    def parameters(self):
+                        """Return an iterator over parameters (required by BaseRiemannianSampler)."""
+                        # Return centroids as parameters so device detection works
+                        yield self.centroids_tens
+                    
+                    def G(self, zq):
+                        """Compute metric tensor G(z)."""
+                        # Fall back to model-provided G if exists
+                        if hasattr(self.model, 'G'):
+                            try:
+                                return self.model.G(zq)
+                            except Exception:
+                                pass
+                        # Compute G as inverse of G_inv
+                        G_inv = self.G_inv(zq)
+                        return torch.linalg.inv(G_inv + 1e-6 * torch.eye(G_inv.shape[-1], device=self.device).unsqueeze(0).expand_as(G_inv))
+                    
                     def G_inv(self, zq):
                         # Fall back to model-provided G_inv if exists
                         if hasattr(self.model, 'G_inv'):
