@@ -284,3 +284,4 @@ class AdaptiveRHMCConstraints(ManifoldConstraints):
         
         return super().apply_manifold_constraints(z, model, mu_reference)
 
+

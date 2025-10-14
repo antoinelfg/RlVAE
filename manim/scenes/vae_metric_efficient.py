@@ -152,3 +152,4 @@ class VAEMetricExtractionEfficient(Slide):
         final_text = Text("Scene 1 Complete!", font_size=36, color=COLOR_SCHEME["accent"])
         self.play(Write(final_text), run_time=2)
         self.wait(1)
+

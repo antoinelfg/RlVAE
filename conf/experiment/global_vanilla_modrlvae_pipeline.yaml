@@ -86,8 +86,12 @@ stage_c:
     kl_metric_norm_mode: geomean
     # Keep anisotropy in sampling; clamp tails by Mahalanobis radius
     posterior_cov_norm_mode: none          # preserve metric anisotropy in Σ
-    posterior_step_clip_scale: 3.0
-    posterior_maha_clip: 9.0              # ≈ 3σ in Mahalanobis units
+    posterior_step_clip_scale: 3.0         # tame rare 4–5σ excursions only
+    # Disable hard Mahalanobis-radius clipping for posterior sampling.
+    # This was forcing all samples to lie on a shell (ring) when the
+    # local metric produced large steps, which is undesirable for a
+    # Riemannian posterior. Set to 0.0 to turn it off.
+    posterior_maha_clip: 0.0
     # Stage‑C specific KL weight
     riemannian_beta: 0.3
 

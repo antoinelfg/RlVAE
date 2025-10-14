@@ -945,6 +945,7 @@ Timesteps: {n_obs}"""
             from src.models.samplers.hmc_sampler import RHVAEVolumeElementHMCSampler
             
             self.model.eval()
+            # Encode without gradients, but perform RHMC sampling with gradients enabled
             with torch.no_grad():
                 # Use RHMC for BOTH prior AND posterior sampling (UNIFIED approach)
                 # Get encoder output for posterior initialization
@@ -958,6 +959,28 @@ Timesteps: {n_obs}"""
                 else:
                     print("⚠️ Could not extract encoder output for enhanced KL visualization")
                     return
+                
+                # CRITICAL FIX: Get raw encoder means BEFORE mu alignment
+                # The visualization should show the actual encoder means, not the aligned ones
+                try:
+                    # Get raw encoder output directly from encoder
+                    raw_encoder_output = self.model.encoder(x_sample[:, 0])  # Use first timestep
+                    if hasattr(raw_encoder_output, 'embedding'):
+                        raw_mu = raw_encoder_output.embedding
+                    elif hasattr(raw_encoder_output, 'mu'):
+                        raw_mu = raw_encoder_output.mu
+                    elif isinstance(raw_encoder_output, dict) and 'mu' in raw_encoder_output:
+                        raw_mu = raw_encoder_output['mu']
+                    else:
+                        print("⚠️ Could not extract raw encoder means")
+                        raw_mu = z_encoder[:, 0, :]  # Fallback to aligned means
+                    
+                    # Use raw encoder means for visualization
+                    z_encoder = raw_mu.unsqueeze(1).expand(-1, z_encoder.shape[1], -1)  # [batch_size, n_obs, latent_dim]
+                    print(f"✅ Using raw encoder means for visualization (shape: {z_encoder.shape})")
+                except Exception as e:
+                    print(f"⚠️ Could not get raw encoder means: {e}, using aligned means")
+                    # Fallback to aligned means if raw extraction fails
                 
                 if z_encoder is None:
                     print("⚠️ No encoder output available for enhanced KL visualization")
@@ -983,17 +1006,79 @@ Timesteps: {n_obs}"""
                 
                 # Get actual posterior samples using the same method as training
                 # This shows what the model actually uses during training
-                if hasattr(self.model, 'sample_metric_aware_posterior'):
-                    # Use the same metric-aware sampling as training
-                    z_posterior_flat = self.model.sample_metric_aware_posterior(
-                        mu=z_encoder_flat,  # Use encoder output as mean
-                        log_var=torch.zeros_like(z_encoder_flat)  # Zero variance for deterministic sampling
-                    )
-                else:
-                    # Fallback to encoder output
+                try:
+                    # Use the same RHMC posterior sampling as training – requires autograd
+                    if hasattr(self.model, 'posterior_sampler_rhmc'):
+                        print("✅ Using RHMC posterior sampling for visualization")
+                        # Get proper log_var from encoder
+                        enc_out_vis = self.model.encoder(x_sample[:, 0])  # Use first timestep
+                        if hasattr(enc_out_vis, 'log_covariance'):
+                            log_var = enc_out_vis.log_covariance
+                        elif hasattr(enc_out_vis, 'log_var'):
+                            log_var = enc_out_vis.log_var
+                        else:
+                            # Fallback to reasonable variance
+                            log_var = torch.full_like(z_encoder_flat, -1.0)  # std ≈ 0.6
+                        # Perform RHMC sampling with gradients enabled
+                        with torch.enable_grad():
+                            rhmc_result = self.model.posterior_sampler_rhmc.sample_riemannian_rhmc_posterior(
+                                mu=z_encoder_flat,
+                                log_var=log_var,
+                                return_log_prob=False,
+                                return_traj=False,
+                                return_initial=False
+                            )
+                        z_posterior_flat = rhmc_result
+                        print(f"✅ RHMC posterior samples shape: {z_posterior_flat.shape}")
+                    elif hasattr(self.model, 'sample_metric_aware_posterior'):
+                        print("✅ Using metric-aware sampling for visualization")
+                        # Use metric-aware sampling with proper variance
+                        enc_out_vis = self.model.encoder(x_sample[:, 0])
+                        if hasattr(enc_out_vis, 'log_covariance'):
+                            log_var = enc_out_vis.log_covariance
+                        elif hasattr(enc_out_vis, 'log_var'):
+                            log_var = enc_out_vis.log_var
+                        else:
+                            log_var = torch.full_like(z_encoder_flat, -1.0)
+                        z_posterior_flat = self.model.sample_metric_aware_posterior(
+                            mu=z_encoder_flat,
+                            log_var=log_var
+                        )
+                        print(f"✅ Metric-aware posterior samples shape: {z_posterior_flat.shape}")
+                    else:
+                        # Fallback to encoder output
+                        z_posterior_flat = z_encoder_flat
+                        print("⚠️ Using encoder means as fallback")
+                except Exception as e:
+                    print(f"⚠️ Posterior sampling failed: {e}, using encoder means")
                     z_posterior_flat = z_encoder_flat
                 
-                # Sample prior points using RHMC
+                # ADD MORE ENCODER MEANS FOR BETTER COVERAGE
+                # Sample additional encoder means from the dataset for better visualization
+                try:
+                    print("📊 Adding more encoder means for better coverage...")
+                    # Get a larger sample from the dataset
+                    n_additional_samples = min(200, len(x_sample) * 4)  # More samples
+                    additional_x = x_sample[:n_additional_samples] if len(x_sample) >= n_additional_samples else x_sample
+                    
+                    # Get encoder means for additional samples
+                    additional_encoder_out = self.model.encoder(additional_x[:, 0])
+                    if hasattr(additional_encoder_out, 'embedding'):
+                        additional_mu = additional_encoder_out.embedding
+                    elif hasattr(additional_encoder_out, 'mu'):
+                        additional_mu = additional_encoder_out.mu
+                    elif isinstance(additional_encoder_out, dict) and 'mu' in additional_encoder_out:
+                        additional_mu = additional_encoder_out['mu']
+                    else:
+                        additional_mu = z_encoder_flat[:n_additional_samples]
+                    
+                    # Combine with original encoder means
+                    z_encoder_flat = torch.cat([z_encoder_flat, additional_mu], dim=0)
+                    print(f"✅ Added {additional_mu.shape[0]} more encoder means (total: {z_encoder_flat.shape[0]})")
+                except Exception as e:
+                    print(f"⚠️ Could not add more encoder means: {e}")
+                
+                # Sample prior points using RHMC (volume‑element sampler uses analytic gradients)
                 n_prior_samples = 200
                 z_prior = rhmc_sampler.sample(n_samples=n_prior_samples)  # [n_prior_samples, latent_dim]
                 
@@ -1044,37 +1129,65 @@ Timesteps: {n_obs}"""
                 X_grid, Y_grid = np.meshgrid(x_grid, y_grid)
                 Z_grid_2d = np.column_stack([X_grid.flatten(), Y_grid.flatten()])
                 
-                # Compute G^-1 determinant for each grid point
-                det_G_inv_grid = np.zeros(len(Z_grid_2d))
+                # Compute log det(G^{-1}) for each grid point (consistent with Stage B plots)
+                det_G_grid = np.zeros(len(Z_grid_2d))
                 for i, z_2d in enumerate(Z_grid_2d):
                     try:
                         # Project back to full latent space (approximate)
                         z_full = pca.inverse_transform(z_2d.reshape(1, -1))
                         z_tensor = torch.tensor(z_full, dtype=torch.float32, device=self.device)
                         
-                        # Compute metric tensor
-                        if hasattr(self.model, 'metric'):
-                            G_inv = self.model.metric.G_inv(z_tensor)
-                            det_G_inv = torch.det(G_inv).item()
-                        else:
-                            det_G_inv = 1.0  # Identity metric
-                        
-                        det_G_inv_grid[i] = det_G_inv
+                        # Prefer orientation in precision space: log det(G^{-1})
+                        logdetGinv = None
+                        try:
+                            if hasattr(self.model, 'G_inv'):
+                                G_inv = self.model.G_inv(z_tensor)
+                                _, logdet_inv = torch.slogdet(G_inv.float())
+                                logdetGinv = logdet_inv.item()
+                            elif hasattr(self.model, 'modular_metric'):
+                                G_inv = self.model.modular_metric.compute_inverse_metric(z_tensor)
+                                _, logdet_inv = torch.slogdet(G_inv.float())
+                                logdetGinv = logdet_inv.item()
+                            elif hasattr(self.model, 'metric') and hasattr(self.model.metric, 'compute_inverse_metric'):
+                                G_inv = self.model.metric.compute_inverse_metric(z_tensor)
+                                _, logdet_inv = torch.slogdet(G_inv.float())
+                                logdetGinv = logdet_inv.item()
+                        except Exception:
+                            logdetGinv = None
+
+                        if logdetGinv is None:
+                            # Fallback via G if needed: log det(G^{-1}) = - log det(G)
+                            try:
+                                if hasattr(self.model, 'G'):
+                                    G = self.model.G(z_tensor)
+                                elif hasattr(self.model, 'modular_metric'):
+                                    G = self.model.modular_metric.compute_metric(z_tensor)
+                                elif hasattr(self.model, 'metric') and hasattr(self.model.metric, 'compute_metric'):
+                                    G = self.model.metric.compute_metric(z_tensor)
+                                else:
+                                    G = None
+                                if G is not None:
+                                    _, logdet = torch.slogdet(G.float())
+                                    logdetGinv = (-logdet).item()
+                            except Exception:
+                                logdetGinv = None
+
+                        det_G_grid[i] = np.exp(logdetGinv) if logdetGinv is not None else 1.0
                     except:
-                        det_G_inv_grid[i] = 1.0
-                
+                        det_G_grid[i] = 1.0
+
                 # Ensure we have a proper range for gradient visualization
-                det_G_inv_grid = det_G_inv_grid.reshape(X_grid.shape)
+                det_G_grid = det_G_grid.reshape(X_grid.shape)
                 
                 # Normalize to create a proper gradient
-                det_min = np.min(det_G_inv_grid)
-                det_max = np.max(det_G_inv_grid)
+                det_min = np.min(det_G_grid)
+                det_max = np.max(det_G_grid)
                 
                 # If the range is too small, create artificial variation for visualization
                 if det_max - det_min < 1e-6:
                     # Create a synthetic gradient based on distance from centroids
                     if len(centroids_2d) > 0:
-                        synthetic_gradient = np.zeros_like(det_G_inv_grid)
+                        synthetic_gradient = np.zeros_like(det_G_grid)
                         for i in range(X_grid.shape[0]):
                             for j in range(X_grid.shape[1]):
                                 point = np.array([X_grid[i, j], Y_grid[i, j]])
@@ -1083,33 +1196,53 @@ Timesteps: {n_obs}"""
                                 min_dist = min(distances)
                                 # Create gradient: closer to centroids = higher values
                                 synthetic_gradient[i, j] = np.exp(-min_dist / 2.0)
-                        det_G_inv_grid = synthetic_gradient
+                        det_G_grid = synthetic_gradient
                     else:
                         # Fallback: create a radial gradient from center
                         center_x, center_y = 0, 0
                         for i in range(X_grid.shape[0]):
                             for j in range(X_grid.shape[1]):
                                 dist = np.sqrt((X_grid[i, j] - center_x)**2 + (Y_grid[i, j] - center_y)**2)
-                                det_G_inv_grid[i, j] = np.exp(-dist / 3.0)
-                
-                det_G_inv_grid = det_G_inv_grid.reshape(X_grid.shape)
+                                det_G_grid[i, j] = np.exp(-dist / 3.0)
+
+                det_G_grid = det_G_grid.reshape(X_grid.shape)
                 
                 # Create visualization
                 fig, ax = plt.subplots(figsize=(12, 10))
                 
-                # Plot manifold structure as contour with proper gradient
-                # Use log scale for better visualization
-                det_log = np.log10(det_G_inv_grid + 1e-16)
+                # Plot manifold structure as contour (log det G^{-1}) to match Stage B intuition
+                det_log = np.log10(det_G_grid + 1e-16)
                 
                 # Create more levels for smoother gradient
                 levels = np.linspace(det_log.min(), det_log.max(), 100)
-                contour = ax.contourf(X_grid, Y_grid, det_log, 
-                                     levels=levels, cmap='viridis', alpha=0.7)
+                contour = ax.contourf(X_grid, Y_grid, det_log, levels=levels, cmap='viridis', alpha=0.7)
                 cbar = plt.colorbar(contour, ax=ax, label='log₁₀(det(G⁻¹))')
                 
                 # Add contour lines for better definition
-                contour_lines = ax.contour(X_grid, Y_grid, det_log, 
-                                          levels=levels[::10], colors='white', alpha=0.3, linewidths=0.5)
+                contour_lines = ax.contour(X_grid, Y_grid, det_log, levels=levels[::10], colors='white', alpha=0.3, linewidths=0.5)
+
+                # One-time metric sanity check
+                try:
+                    with torch.no_grad():
+                        z_test = z_encoder_flat[: min(32, z_encoder_flat.shape[0])]
+                        if hasattr(self.model, 'G'):
+                            Gt = self.model.G(z_test).float()
+                        elif hasattr(self.model, 'modular_metric'):
+                            Gt = self.model.modular_metric.compute_metric(z_test).float()
+                        else:
+                            Gt = None
+                        if hasattr(self.model, 'G_inv'):
+                            Ginv_t = self.model.G_inv(z_test).float()
+                        elif hasattr(self.model, 'modular_metric'):
+                            Ginv_t = self.model.modular_metric.compute_inverse_metric(z_test).float()
+                        else:
+                            Ginv_t = None
+                        if Gt is not None and Ginv_t is not None:
+                            I = torch.eye(Gt.shape[-1], device=Gt.device).unsqueeze(0)
+                            err = (torch.matmul(Gt, Ginv_t) - I).norm(dim=(-2, -1)).mean().item()
+                            print(f"[METRIC CHECK] ||G G^-1 - I|| ≈ {err:.2e}")
+                except Exception as _e:
+                    pass
                 
                 # Plot posterior samples
                 ax.scatter(z_posterior_2d[:, 0], z_posterior_2d[:, 1], 

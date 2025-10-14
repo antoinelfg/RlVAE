@@ -57,6 +57,10 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
     
     def __init__(self, config: DictConfig):
         """Initialize from Hydra configuration with all modular components."""
+        # Ensure metric attributes exist before any parent/loader call paths
+        # that might reference them.
+        self.modular_metric = None
+        self._metric_ready = False
         # Debug print for metric config
         print("[DEBUG] model.metric config at model init:", config.get('metric', {}))
         # Check if n_flows was explicitly set by checking if it's NOT the default auto value
@@ -290,6 +294,37 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         
         # 🚀 NEW: Initialize modular metric loader
         self.metric_loader = MetricLoader(device=self.device)
+
+        # Optionally load metric directly from config.metric.path to avoid
+        # later ambiguous reloads via pretrained. Prefer this if provided.
+        try:
+            metric_cfg_path = None
+            if hasattr(self.config, 'metric') and hasattr(self.config.metric, 'get'):
+                metric_cfg_path = self.config.metric.get('path', None)
+            if metric_cfg_path:
+                md = self.metric_loader.load_from_file(
+                    metric_cfg_path,
+                    temperature_override=self.config.metric.get('temperature_override', None),
+                    regularization_override=self.config.metric.get('regularization_override', None),
+                )
+                self.modular_metric.load_pretrained(**md)
+
+                # Expose safe wrappers immediately
+                def _G_impl(z: torch.Tensor) -> torch.Tensor:
+                    return self.modular_metric.compute_metric(z)
+                def _Ginv_impl(z: torch.Tensor) -> torch.Tensor:
+                    return self.modular_metric.compute_inverse_metric(z)
+                self.G = _G_impl
+                self.G_inv = _Ginv_impl
+                self._metric_ready = True
+                # Backward-compatible buffers for other subsystems
+                self.centroids_tens = self.modular_metric.centroids
+                self.M_tens = self.modular_metric.metric_matrices
+                self.temperature = getattr(self.modular_metric, 'temperature', torch.tensor(0.1, device=self.device))
+                self.lbd = getattr(self.modular_metric, 'regularization', torch.tensor(0.01, device=self.device))
+                print(f"✅ Loaded metric from config.metric.path: {metric_cfg_path}")
+        except Exception as _e:
+            print(f"[METRIC CONFIG LOAD] Warning: { _e }")
         
         # 🚀 NEW: Initialize modular loss manager
         metric_reg_weight = metric_cfg.get('metric_reg_weight', 0.0)
@@ -299,7 +334,7 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         kl_use_metric_normalization = getattr(self.config, 'kl_use_metric_normalization', True)
         kl_metric_norm_mode = getattr(self.config, 'kl_metric_norm_mode', 'geomean')
         kl_amp_safe = getattr(self.config, 'kl_amp_safe', True)
-        kl_metric_eval_point = getattr(self.config, 'kl_metric_eval_point', 'mu')  # Force to 'mu' for testing
+        kl_metric_eval_point = getattr(self.config, 'kl_metric_eval_point', 'z')  # Force to 'mu' for testing
         mu_l2_weight = float(getattr(self.config, 'mu_l2_weight', 0.0))
         
         # Route tracing: LossManager config
@@ -481,7 +516,10 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
     
     def _load_pretrained_components_modular(self):
         """Load pretrained components using modular approach."""
-        
+        # Idempotency: avoid re-loading the same pretrained components multiple times
+        if getattr(self, '_pretrained_loaded_once', False):
+            print("[PRETRAINED DEBUG] Skipping pretrained load (already loaded once)")
+            return
         # Debug: Check if pretrained config exists
         print(f"[PRETRAINED DEBUG] hasattr pretrained: {hasattr(self.config, 'pretrained')}")
         if hasattr(self.config, 'pretrained'):
@@ -508,8 +546,14 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
                 with torch.no_grad():
                     encoder_out = self.encoder(test_input)
                     decoder_out = self.decoder(encoder_out.embedding)
-                    recon_before = decoder_out["reconstruction"] if isinstance(decoder_out, dict) else decoder_out
-                    print(f"[ENCODER DEBUG] Recon BEFORE loading: min={recon_before.min():.4f}, max={recon_before.max():.4f}, mean={recon_before.mean():.4f}")
+                    if isinstance(decoder_out, dict):
+                        recon_before = decoder_out.get("reconstruction", next(iter(decoder_out.values())))
+                    elif hasattr(decoder_out, 'reconstruction'):
+                        recon_before = decoder_out.reconstruction
+                    else:
+                        recon_before = decoder_out
+                    if isinstance(recon_before, torch.Tensor):
+                        print(f"[ENCODER DEBUG] Recon BEFORE loading: min={recon_before.min():.4f}, max={recon_before.max():.4f}, mean={recon_before.mean():.4f}")
                 
                 self.encoder_manager.load_pretrained(encoder_path)
                 
@@ -521,8 +565,14 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
                 with torch.no_grad():
                     encoder_out = self.encoder(test_input)
                     decoder_out = self.decoder(encoder_out.embedding)
-                    recon_after = decoder_out["reconstruction"] if isinstance(decoder_out, dict) else decoder_out
-                    print(f"[ENCODER DEBUG] Recon AFTER loading: min={recon_after.min():.4f}, max={recon_after.max():.4f}, mean={recon_after.mean():.4f}")
+                    if isinstance(decoder_out, dict):
+                        recon_after = decoder_out.get("reconstruction", next(iter(decoder_out.values())))
+                    elif hasattr(decoder_out, 'reconstruction'):
+                        recon_after = decoder_out.reconstruction
+                    else:
+                        recon_after = decoder_out
+                    if isinstance(recon_after, torch.Tensor):
+                        print(f"[ENCODER DEBUG] Recon AFTER loading: min={recon_after.min():.4f}, max={recon_after.max():.4f}, mean={recon_after.mean():.4f}")
                     
                     # Debug: Check if encoder and decoder are the same objects
                     print(f"[ENCODER DEBUG] Encoder is same object: {self.encoder is self.encoder_manager.encoder}")
@@ -551,14 +601,21 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
                 with torch.no_grad():
                     encoder_out = self.encoder(test_input)
                     decoder_out = self.decoder(encoder_out.embedding)
-                    recon_final = decoder_out["reconstruction"] if isinstance(decoder_out, dict) else decoder_out
-                    print(f"[DECODER DEBUG] Final recon: min={recon_final.min():.4f}, max={recon_final.max():.4f}, mean={recon_final.mean():.4f}")
-                    
+                    if isinstance(decoder_out, dict):
+                        recon_final = decoder_out.get("reconstruction", next(iter(decoder_out.values())))
+                    elif hasattr(decoder_out, 'reconstruction'):
+                        recon_final = decoder_out.reconstruction
+                    else:
+                        recon_final = decoder_out
+                    if isinstance(recon_final, torch.Tensor):
+                        print(f"[DECODER DEBUG] Final recon: min={recon_final.min():.4f}, max={recon_final.max():.4f}, mean={recon_final.mean():.4f}")
                     # Debug: Check if encoder and decoder are the same objects
                     print(f"[DECODER DEBUG] Encoder is same object: {self.encoder is self.encoder_manager.encoder}")
                     print(f"[DECODER DEBUG] Decoder is same object: {self.decoder is self.decoder_manager.decoder}")
                 
                 print("✅ Loaded decoder weights")
+        # Mark as loaded to prevent duplicate loads later in the pipeline
+        self._pretrained_loaded_once = True
         
         # 🚀 NEW: Load metrics using modular approach
         print(f"[DEBUG] Checking metric loading conditions:")
@@ -721,12 +778,21 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             for k in (
                 'rhmc_steps', 'rhmc_step_size', 'rhmc_alpha', 'rhmc_eps_reg',
                 'max_momentum_norm', 'max_velocity_norm', 'max_position_step', 'max_position_norm',
-                'min_cov_eig', 'eps_regularization'
+                'min_cov_eig', 'eps_regularization', 'use_factorized_G_mu'
             ):
                 if hasattr(self.config, k):
                     rhmc_config[k] = getattr(self.config, k)
             print(f"[RHMC CONFIG] Creating RHMC posterior with config: {rhmc_config}")
             self.posterior_sampler_rhmc = RiemannianRHMCPosterior(self, rhmc_config)
+            # Enforce config on instance in case sampler sets internal defaults
+            try:
+                for k in ('rhmc_steps','rhmc_step_size','rhmc_alpha','rhmc_eps_reg',
+                          'max_momentum_norm','max_velocity_norm','max_position_step','max_position_norm',
+                          'min_cov_eig','eps_regularization','use_factorized_G_mu'):
+                    if k in rhmc_config:
+                        setattr(self.posterior_sampler_rhmc, k if k != 'eps_regularization' else 'eps_reg', rhmc_config[k])
+            except Exception:
+                pass
         except Exception as e:
             print(f"[RHMC CONFIG] Failed to create RHMC posterior: {e}")
             self.posterior_sampler_rhmc = None
@@ -835,6 +901,14 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
     
     def _setup_modular_metric_fallback(self):
         """Setup fallback to load modular metric when G/G_inv are accessed."""
+        # If metric is already loaded/ready, do not override wrappers again.
+        try:
+            if getattr(self, '_metric_ready', False) and getattr(self, 'modular_metric', None) is not None \
+               and getattr(self.modular_metric, '_is_loaded', False):
+                print("[METRIC FALLBACK] Skipping override (metric already loaded)")
+                return
+        except Exception:
+            pass
         def G_with_fallback(z: torch.Tensor) -> torch.Tensor:
             """G method with fallback to load modular metric if needed."""
             if not self.modular_metric._is_loaded:
@@ -869,8 +943,17 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         """Override parent method to load metrics into modular metric tensor."""
         print(f"[MODULAR METRIC] load_pretrained_metrics called with path: {metric_path}")
         print(f"[MODULAR METRIC] Loading pretrained metrics from: {metric_path}")
+        # Avoid duplicate loads/overwrites if metric already attached
+        try:
+            if getattr(self, '_metric_ready', False) and getattr(self, 'modular_metric', None) is not None \
+               and getattr(self.modular_metric, '_is_loaded', False):
+                print("[MODULAR METRIC] Skipping reload (metric already attached)")
+                return
+        except Exception:
+            pass
         
         try:
+            self._metric_source = str(metric_path)
             # First call parent method to load metric into parent variables
             super().load_pretrained_metrics(metric_path, temperature_override)
             
@@ -879,19 +962,61 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
                 print(f"[MODULAR METRIC] Transferring loaded metric to modular tensor")
                 print(f"  - Centroids shape: {self.centroids_tens.shape}")
                 print(f"  - Metric matrices shape: {self.M_tens.shape}")
-                
+
+                # Lazily create modular metric if not present
+                if getattr(self, 'modular_metric', None) is None:
+                    from .components.metric_tensor import MetricTensor
+                    ld = int(getattr(self, 'latent_dim', self.M_tens.shape[-1]))
+                    self.modular_metric = MetricTensor(latent_dim=ld, device=self.device)
+
+                # Freeze and eval for safety
+                try:
+                    self.modular_metric.eval()
+                    for p in self.modular_metric.parameters():
+                        p.requires_grad_(False)
+                except Exception:
+                    pass
+
                 # Load into modular metric tensor
                 self.modular_metric.load_pretrained(
                     centroids=self.centroids_tens,
                     metric_matrices=self.M_tens,
-                    temperature=getattr(self, 'temperature', 0.1),
-                    regularization=getattr(self, 'lbd', 0.01)
+                    temperature=float(getattr(self, 'temperature', 0.1)),
+                    regularization=float(getattr(self, 'lbd', 0.01))
                 )
-                
-                # Create backward-compatible interface functions
-                self._create_backward_compatible_interface()
-                
+
+                # Expose safe wrappers immediately
+                def _G_impl(z: torch.Tensor) -> torch.Tensor:
+                    return self.modular_metric.compute_metric(z)
+                def _Ginv_impl(z: torch.Tensor) -> torch.Tensor:
+                    return self.modular_metric.compute_inverse_metric(z)
+                self.G = _G_impl
+                self.G_inv = _Ginv_impl
+                self._metric_ready = True
+
+                # Backward compatibility buffers
+                self.centroids_tens = self.modular_metric.centroids
+                self.M_tens = self.modular_metric.metric_matrices
+                self.temperature = getattr(self.modular_metric, 'temperature', torch.tensor(0.1, device=self.device))
+                self.lbd = getattr(self.modular_metric, 'regularization', torch.tensor(0.01, device=self.device))
+
+                # Sanity check
+                try:
+                    with torch.no_grad():
+                        z_test = torch.zeros(2, int(self.latent_dim), device=self.device)
+                        Gz = self.G(z_test)
+                        Ginv = self.G_inv(z_test)
+                        eye = torch.eye(Gz.shape[-1], device=self.device).unsqueeze(0)
+                        err = torch.linalg.norm(Gz @ Ginv - eye).item()
+                        eig = torch.linalg.eigvalsh(Gz.float())
+                        emin, emax = eig.min().item(), eig.max().item()
+                        print(f"[METRIC CHECK] ||G G^-1 - I|| ≈ {err:.2e}  |  eig(G): [{emin:.3e}, {emax:.3e}]")
+                        assert not torch.isnan(eig).any() and emin > 0.0, "Loaded G is not SPD"
+                except Exception as _e:
+                    print(f"[METRIC CHECK] Warning: sanity check failed: {_e}")
+
                 print("✅ Loaded metrics into modular metric tensor")
+                print(f"[METRIC SOURCE] {self._metric_source}")
             else:
                 print("⚠️ Parent metric loading didn't create centroids_tens/M_tens")
                 
@@ -1066,6 +1191,41 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
                     print(f"TRACE ENCODER log_var: dtype={log_var.dtype}, shape={tuple(log_var.shape)}, mean={log_var.mean().item():.4g}, std={log_var.std().item():.4g}, min={log_var.min().item():.4g}, max={log_var.max().item():.4g}")
         except Exception:
             pass
+
+        # One-time metric orientation and conditioning diagnostics (Stage C)
+        try:
+            if not hasattr(self, '_metric_diag_printed'):
+                if hasattr(self, 'G') and hasattr(self, 'G_inv'):
+                    with torch.no_grad():
+                        mu2 = mu[: min(mu.shape[0], 8)].detach() if isinstance(mu, torch.Tensor) else None
+                        if mu2 is None or mu2.numel() == 0:
+                            mu2 = torch.zeros(2, self.latent_dim, device=self.device)
+                        G_mu = self.G(mu2)
+                        Ginv_mu = self.G_inv(mu2)
+                        # Conditioning and SPD checks
+                        evals_G = torch.linalg.eigvalsh(G_mu.float())
+                        cond_G = (evals_G.max(dim=-1).values / evals_G.min(dim=-1).values.clamp_min(1e-12)).median().item()
+                        emin = evals_G.min().item(); emax = evals_G.max().item()
+                        # Orientation consistency
+                        Ginv_from_G = torch.linalg.inv(G_mu.float())
+                        diff_inv = torch.linalg.norm(Ginv_mu.float() - Ginv_from_G).item()
+                        G_from_Ginv = torch.linalg.inv(Ginv_mu.float())
+                        diff_G = torch.linalg.norm(G_mu.float() - G_from_Ginv).item()
+                        # Metadata
+                        nC = int(getattr(self, 'centroids_tens', torch.empty(0)).shape[0]) if hasattr(self, 'centroids_tens') else -1
+                        Tval = float(getattr(self, 'temperature', torch.tensor(float('nan'), device=self.device)).item()) if hasattr(self, 'temperature') else float('nan')
+                        Lval = float(getattr(self, 'lbd', torch.tensor(float('nan'), device=self.device)).item()) if hasattr(self, 'lbd') else float('nan')
+                        print(f"[STAGE C METRIC] n_centroids={nC}, T={Tval:.3g}, λ={Lval:.3g}")
+                        print(f"[STAGE C METRIC] eig(G): min={emin:.3e}, max={emax:.3e}, cond~{cond_G:.2e}")
+                        print(f"[STAGE C METRIC] ||G_inv - inv(G)||_F = {diff_inv:.3e}; ||G - inv(G_inv)||_F = {diff_G:.3e}")
+                        eye = torch.eye(G_mu.shape[-1], device=G_mu.device).unsqueeze(0)
+                        err = torch.linalg.norm(G_mu @ Ginv_mu - eye).item()
+                        print(f"[STAGE C METRIC] ||G(mu) G_inv(mu) - I|| = {err:.3e}")
+                else:
+                    print("[STAGE C METRIC] Missing G/G_inv wrappers on model")
+                self._metric_diag_printed = True
+        except Exception as _e:
+            print(f"[STAGE C METRIC] Diagnostic error: {_e}")
         
         # DEBUG: Always print what we're using for posterior sampling
         if not hasattr(self, '_debug_printed'):
@@ -1108,15 +1268,12 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
                     if isinstance(rhmc_ret, tuple):
                         # Expected ordering: (zK, log_q?, z0?, traj_info?)
                         zK = rhmc_ret[0]
-                        # Identify optional parts by type/position
-                        for extra in rhmc_ret[1:]:
-                            if isinstance(extra, torch.Tensor) and extra.shape[:1] == (batch_size,):
-                                # Likely log_q
-                                rhmc_log_q = extra
-                            elif isinstance(extra, torch.Tensor) and extra.shape == mu.shape:
-                                rhmc_z0 = extra
-                            elif isinstance(extra, dict):
-                                rhmc_traj = extra
+                        if len(rhmc_ret) > 1 and isinstance(rhmc_ret[1], torch.Tensor) and rhmc_ret[1].dim() == 1:
+                            rhmc_log_q = rhmc_ret[1]
+                        if len(rhmc_ret) > 2 and isinstance(rhmc_ret[2], torch.Tensor) and rhmc_ret[2].shape == mu.shape:
+                            rhmc_z0 = rhmc_ret[2]
+                        if len(rhmc_ret) > 3 and isinstance(rhmc_ret[3], dict):
+                            rhmc_traj = rhmc_ret[3]
                         z_0 = zK
                     else:
                         z_0 = rhmc_ret
@@ -1160,7 +1317,12 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             z_seq_tensor[:, -1] = z_seq_tensor[:, 0]
         z_flat = z_seq_tensor.reshape(-1, self.latent_dim)
         decoder_out = self.decoder(z_flat)
-        recon_x = decoder_out["reconstruction"]
+        if isinstance(decoder_out, dict):
+            recon_x = decoder_out.get("reconstruction", next(iter(decoder_out.values())))
+        elif hasattr(decoder_out, 'reconstruction'):
+            recon_x = decoder_out.reconstruction
+        else:
+            recon_x = decoder_out
         recon_x = recon_x.view(batch_size, n_obs, *self.input_dim)
         # Sanitize NaNs/Infs before clamping/log-losses
         recon_x = torch.nan_to_num(recon_x, nan=0.5, posinf=1.0, neginf=0.0)

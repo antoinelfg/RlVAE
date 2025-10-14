@@ -106,8 +106,9 @@ class MetricLoader:
 
         Priority:
         - Use 'inverse_metrics' if present (already precision matrices).
-        - If only covariance-like keys exist (e.g., 'M_matrices', 'M', 'M_tens'), invert them robustly.
-        - If 'metric_matrices' exists but no other hint, assume these are already precision matrices.
+        - Stage B convention: 'M_matrices' are precision matrices (do NOT invert).
+        - If only covariance-like keys exist (e.g., 'M', 'metric_vars', 'M_i_flat', 'M_tens'), invert them robustly.
+        - If 'metric_matrices' exists, assume precision.
         - Fall back to identity precision.
         """
         n_centroids, latent_dim = centroid_shape
@@ -116,34 +117,35 @@ class MetricLoader:
         if 'inverse_metrics' in data:
             matrices = data['inverse_metrics']
         else:
-            cov = None
-            # 2) Covariance-like entries
+            # 2) Stage B: precision matrices under 'M_matrices'
             if 'M_matrices' in data:
-                cov = data['M_matrices']
-            elif 'M' in data:
-                cov = data['M']
-            elif 'metric_vars' in data:
-                cov = data['metric_vars']
-            elif 'M_i_flat' in data:
-                flat = data['M_i_flat']
-                flat = flat.to(self.device) if isinstance(flat, torch.Tensor) else torch.tensor(flat, device=self.device)
-                cov = torch.diag_embed(flat)
-            elif 'M_tens' in data:
-                cov = data['M_tens']
+                matrices = data['M_matrices']
             elif 'metric_matrices' in data:
-                # Treat as already precision matrices
                 matrices = data['metric_matrices']
+            else:
+                # 3) Covariance-like entries that require inversion
+                cov = None
+                if 'M' in data:
+                    cov = data['M']
+                elif 'metric_vars' in data:
+                    cov = data['metric_vars']
+                elif 'M_i_flat' in data:
+                    flat = data['M_i_flat']
+                    flat = flat.to(self.device) if isinstance(flat, torch.Tensor) else torch.tensor(flat, device=self.device)
+                    cov = torch.diag_embed(flat)
+                elif 'M_tens' in data:
+                    cov = data['M_tens']
 
-            if cov is not None:
-                cov = cov.to(self.device) if isinstance(cov, torch.Tensor) else torch.tensor(cov, device=self.device)
-                try:
-                    matrices = torch.linalg.inv(cov)
-                except Exception:
-                    epsI = 1e-6 * torch.eye(latent_dim, device=self.device).unsqueeze(0)
-                    matrices = torch.linalg.inv(cov + epsI)
-            elif 'metric_matrices' not in locals():
-                warnings.warn("No metric matrices found; using identity precision matrices")
-                matrices = torch.eye(latent_dim, device=self.device).unsqueeze(0).repeat(n_centroids, 1, 1)
+                if cov is not None:
+                    cov = cov.to(self.device) if isinstance(cov, torch.Tensor) else torch.tensor(cov, device=self.device)
+                    try:
+                        matrices = torch.linalg.inv(cov)
+                    except Exception:
+                        epsI = 1e-6 * torch.eye(latent_dim, device=self.device).unsqueeze(0)
+                        matrices = torch.linalg.inv(cov + epsI)
+                else:
+                    warnings.warn("No metric matrices found; using identity precision matrices")
+                    matrices = torch.eye(latent_dim, device=self.device).unsqueeze(0).repeat(n_centroids, 1, 1)
 
         # Ensure tensor on device
         matrices = matrices.to(self.device) if isinstance(matrices, torch.Tensor) else torch.tensor(matrices, device=self.device)

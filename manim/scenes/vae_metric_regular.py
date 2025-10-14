@@ -152,3 +152,4 @@ class VAEMetricExtractionRegular(Scene):
         )
 
         self.wait(1)
+

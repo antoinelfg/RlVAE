@@ -42,7 +42,8 @@ posterior:
   max_momentum_norm: 3.0
   max_velocity_norm: 1.0
   max_position_step: 0.5
-  max_position_norm: 8.0
+  # Avoid shell artifacts in RHMC posterior; 0 disables clamp.
+  max_position_norm: 0.0
   
 # Sampling configuration
 sampling:

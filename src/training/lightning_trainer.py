@@ -35,9 +35,18 @@ class LightningRlVAETrainer(L.LightningModule):
     
     def __init__(self, config: DictConfig, data_module=None):
         super().__init__()
+        # Safer multiprocessing start method for CUDA + workers
+        try:
+            import torch.multiprocessing as mp
+            mp.set_start_method("spawn", force=True)
+            print("[CUDA SAFE] Multiprocessing start method set to 'spawn'")
+        except Exception:
+            pass
         
         # Synchronize and validate configuration
-        self.config = sync_pipeline_config(config)
+        # Monolith mode: use config as-is to avoid hidden overrides
+        monolith = bool(getattr(config, 'monolith', False))
+        self.config = config if monolith else sync_pipeline_config(config)
         validation_result = validate_model_config(self.config.model, 'rlvae')
         if not validation_result.is_valid:
             print(f"⚠️ Configuration validation warnings: {validation_result.errors}")
@@ -196,7 +205,11 @@ class LightningRlVAETrainer(L.LightningModule):
         print(f"⚡ Lightning trainer initialized")
         print(f"   Model: {self.model.model_name}")
         print(f"   Visualization level: {self.config.visualization.level}")
-        print(f"   Evaluation enabled: {getattr(self.config.evaluation, 'enabled', False)}")
+        try:
+            eval_enabled = getattr(self.config.evaluation, 'enabled', False)
+        except Exception:
+            eval_enabled = False
+        print(f"   Evaluation enabled: {eval_enabled}")
         # SamplerManager diagnostics (if available)
         try:
             sm = getattr(self.model, 'sampler_manager', None)
@@ -271,6 +284,129 @@ class LightningRlVAETrainer(L.LightningModule):
         if metric_net is not None:
             self._set_requires_grad(metric_net, False)
         print("[METRIC ALT] Freeze metric; training encoder/decoder/flows")
+
+    @torch.no_grad()
+    def _run_epoch0_mu_diagnostics(self) -> None:
+        """Epoch‑0 check: ensure μ and RHMC pushforward are sane, and log overlay.
+
+        Saves outputs/viz/epoch0_z0_vs_zK.png and logs summary stats to WandB.
+        """
+        if self.data_module is None:
+            print("[EPOCH0 DIAG] No data module; skipping μ diagnostics")
+            return
+        try:
+            loader = self.data_module.train_dataloader()
+            batch = next(iter(loader))
+        except Exception as e:
+            print(f"[EPOCH0 DIAG] Failed to fetch train batch: {e}")
+            return
+        device = self.device
+        x = batch[0] if isinstance(batch, (tuple, list)) else (batch.get('x', next(iter(batch.values()))) if isinstance(batch, dict) else batch)
+        x = x.to(device)
+        x0 = x[:, 0]
+        enc_out = self.model.encoder(x0)
+        mu = enc_out.embedding
+        log_var = enc_out.log_covariance if hasattr(enc_out, 'log_covariance') else torch.zeros_like(mu)
+
+        # Default RHMC params (read from config if present)
+        alpha = getattr(self.config.model, 'rhmc_alpha', None)
+        steps = getattr(self.config.model, 'rhmc_steps', None)
+        eps_reg = getattr(self.config.model, 'rhmc_eps_reg', None)
+
+        # Posterior sampling
+        z0 = None; zK = None; log_q = None; traj = None
+        posterior = getattr(self.model, 'posterior_sampler_rhmc', None)
+        try:
+            if posterior is not None:
+                ret = posterior.sample_riemannian_rhmc_posterior(
+                    mu, log_var,
+                    return_log_prob=True,
+                    return_initial=True,
+                    return_traj=True,
+                    alpha=alpha, eps_reg=eps_reg,
+                )
+                if isinstance(ret, tuple):
+                    zK, log_q, z0, traj = ret
+                else:
+                    zK = ret
+            else:
+                raise RuntimeError("posterior_sampler_rhmc not available")
+        except Exception as e:
+            print(f"[EPOCH0 DIAG] RHMC posterior unavailable: {e}; using local metric posterior")
+            try:
+                z0 = self.model.sample_metric_aware_posterior(mu, log_var)
+                zK = z0
+            except Exception:
+                eps = torch.randn_like(mu)
+                z0 = mu + eps * torch.exp(0.5 * log_var)
+                zK = z0
+            steps = 0 if steps is None else steps
+
+        # KL stats
+        mean_log_q = None; mean_log_p = None; mean_kl = None
+        try:
+            posterior = getattr(self.model, 'posterior_sampler_rhmc', None)
+            if posterior is not None:
+                if log_q is None:
+                    log_q = posterior._compute_log_riemannian_gaussian(zK, mu, log_var)
+                log_p = posterior._compute_log_prior(zK)
+                mean_log_q = float(log_q.mean().item())
+                mean_log_p = float(log_p.mean().item())
+                mean_kl = float((log_q - log_p).mean().item())
+                print(f"[EPOCH0 DIAG] mean(log_q)={mean_log_q:.4f}  mean(log_p)={mean_log_p:.4f}  mean(KL)={mean_kl:.4f}")
+        except Exception as e:
+            print(f"[EPOCH0 DIAG] KL computation failed: {e}")
+
+        # Radii
+        try:
+            mu_norm2 = float((mu.pow(2).sum(-1)).mean().item())
+            zK_norm2 = float((zK.pow(2).sum(-1)).mean().item())
+            print(f"[EPOCH0 DIAG] E||mu||^2={mu_norm2:.4f}  E||zK||^2={zK_norm2:.4f}")
+        except Exception:
+            mu_norm2 = None; zK_norm2 = None
+
+        # Overlay
+        try:
+            import os
+            import matplotlib.pyplot as plt
+            zk_np = zK[:, :2].detach().cpu().numpy()
+            z0_np = z0[:, :2].detach().cpu().numpy() if z0 is not None else None
+            fig, ax = plt.subplots(figsize=(6, 6))
+            ax.scatter(zk_np[:, 0], zk_np[:, 1], s=18, c='C0', alpha=0.6, label='zK (post-RHMC)')
+            if z0_np is not None:
+                ax.scatter(z0_np[:, 0], z0_np[:, 1], s=40, c='C2', marker='x', alpha=0.8, label='z0 (pre-RHMC)')
+            ax.legend(); ax.set_xlabel('z[0]'); ax.set_ylabel('z[1]')
+            ax.set_title('Epoch 0: z0 (crosses) vs zK (dots)')
+            lines = []
+            if mean_log_q is not None: lines.append(f"mean(log_q)={mean_log_q:.3f}")
+            if mean_log_p is not None: lines.append(f"mean(log_p)={mean_log_p:.3f}")
+            if mean_kl is not None:    lines.append(f"mean(KL)={mean_kl:.3f}")
+            if alpha is not None:      lines.append(f"alpha={float(alpha):.3g}")
+            if steps is not None:      lines.append(f"steps={int(steps)}")
+            if eps_reg is not None:    lines.append(f"eps={float(eps_reg):.1e}")
+            if mu_norm2 is not None and zK_norm2 is not None:
+                lines.append(f"E||mu||^2={mu_norm2:.3f}")
+                lines.append(f"E||zK||^2={zK_norm2:.3f}")
+            if lines:
+                ax.text(0.02, 0.02, "\n".join(lines), transform=ax.transAxes,
+                        fontsize=9, va='bottom', ha='left',
+                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+            os.makedirs('outputs/viz', exist_ok=True)
+            out_path = 'outputs/viz/epoch0_z0_vs_zK.png'
+            plt.tight_layout(); plt.savefig(out_path, dpi=150)
+            plt.close(fig)
+            print(f"[EPOCH0 DIAG] 💾 Saved overlay: {out_path}")
+            if wandb.run is not None:
+                wandb.log({
+                    'epoch0/z0_vs_zK': wandb.Image(out_path),
+                    'epoch0/mean_log_q': mean_log_q if mean_log_q is not None else float('nan'),
+                    'epoch0/mean_log_p': mean_log_p if mean_log_p is not None else float('nan'),
+                    'epoch0/mean_kl': mean_kl if mean_kl is not None else float('nan'),
+                    'epoch0/E_mu_norm2': mu_norm2 if mu_norm2 is not None else float('nan'),
+                    'epoch0/E_zK_norm2': zK_norm2 if zK_norm2 is not None else float('nan'),
+                }, step=0)
+        except Exception as e:
+            print(f"[EPOCH0 DIAG] Overlay generation failed: {e}")
 
     @torch.no_grad()
     def _collect_anchor_samples(self, max_needed: int) -> torch.Tensor:
@@ -1151,6 +1287,11 @@ class LightningRlVAETrainer(L.LightningModule):
         print(f"🚀 Starting training for {self.config.training.trainer.max_epochs} epochs")
         print(f"   Model parameters: {sum(p.numel() for p in self.parameters()):,}")
         print(f"   Visualization frequency: every {self.config.visualization.frequency} epochs") 
+        # Run a pre‑fit μ/posterior diagnostic overlay once
+        try:
+            self._run_epoch0_mu_diagnostics()
+        except Exception as _e:
+            print(f"[EPOCH0 DIAG] ⚠️ Skipped μ/pushforward overlay: {_e}")
 
     def on_train_epoch_end(self):
         # Option 2: Save metric_net weights every epoch

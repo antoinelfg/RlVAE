@@ -107,7 +107,7 @@ class ModRLVAE(nn.Module):
         self.kl_metric_eval_point = str(getattr(config, "kl_metric_eval_point", "z"))
         # Backward-compat toggle: use_curvature_correction -> choose eval point
         if hasattr(config, 'use_curvature_correction'):
-            self.kl_metric_eval_point = 'z' if bool(getattr(config, 'use_curvature_correction')) else 'mu'
+            self.kl_metric_eval_point = 'z' if bool(getattr(config, 'use_curvature_correction')) else 'z'
 
         # Optional posterior alpha ramp schedule (by epoch)
         self.posterior_alpha_ramp_enabled = bool(getattr(config, "posterior_alpha_ramp_enabled", False))

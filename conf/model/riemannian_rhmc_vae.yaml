@@ -21,7 +21,9 @@ posterior:
   max_momentum_norm: 5.0     # Clip momentum magnitude
   max_velocity_norm: 2.0     # Clip velocity magnitude
   max_position_step: 1.0     # Bound position update size
-  max_position_norm: 12.0    # Clip absolute position magnitude
+  # Disable absolute position-norm clamping to avoid ring-shaped posterior.
+  # Set >0 to re-enable with a hard radius if ever needed.
+  max_position_norm: 0.0
   
   # Legacy parameters (kept for compatibility)
   max_grad_norm: 2.0         # Maximum gradient norm (legacy)
@@ -31,7 +33,7 @@ posterior:
   cov_norm_mode: "geomean"   # Normalize covariance for sampling (legacy)
 
 # Use standard riemannian_beta  
-riemannian_beta: 32.0        # Optimized value for better μ alignment
+riemannian_beta: 8        # Optimized value for better μ alignment
 rhmc_kl_mode: mc
 rhmc_kl_source: z0
 rhmc_kl_jacobian: false

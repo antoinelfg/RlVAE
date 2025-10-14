@@ -40,6 +40,15 @@ class EllipseSequenceDataModule(L.LightningDataModule):
         self.val_dataset = None
         self.test_dataset = None
 
+        # Optional safety override for environments where CUDA initialization
+        # or forked worker + pinned memory causes failures.
+        import os
+        if os.environ.get("RLVAE_CUDA_SAFE_DATALOADER", "0") == "1":
+            print("[DATALOADER SAFE] Enabling safe settings: num_workers=0, pin_memory=False, persistent_workers=False")
+            self.num_workers = 0
+            self.pin_memory = False
+            self.persistent_workers = False
+
     # ------------------------------------------------------------------
     # Dataset construction helpers
     # ------------------------------------------------------------------
@@ -105,6 +114,12 @@ class EllipseSequenceDataModule(L.LightningDataModule):
             self.batch_size = data_cfg.batch_size
             self.num_workers = data_cfg.num_workers
             self.pin_memory = data_cfg.pin_memory
+        # Re-apply safety override after reading training config
+        import os
+        if os.environ.get("RLVAE_CUDA_SAFE_DATALOADER", "0") == "1":
+            self.num_workers = 0
+            self.pin_memory = False
+            self.persistent_workers = False
 
     # ------------------------------------------------------------------
     # DataLoaders

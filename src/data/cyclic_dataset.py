@@ -170,6 +170,13 @@ class CyclicSpritesDataModule(L.LightningDataModule):
         print(f"   Test path: {self.test_path}")
         print(f"   Verify cyclicity: {self.verify_cyclicity}")
         print(f"   Cyclicity threshold: {self.cyclicity_threshold}")
+        # Safety override for CUDA initialization issues in certain HPC setups
+        import os
+        if os.environ.get("RLVAE_CUDA_SAFE_DATALOADER", "0") == "1":
+            print("[DATALOADER SAFE] Enabling safe settings: num_workers=0, pin_memory=False, persistent_workers=False")
+            self.num_workers = 0
+            self.pin_memory = False
+            self.persistent_workers = False
     
     def setup(self, stage: str = None, training_config: DictConfig = None):
         """Setup data splits."""
@@ -181,6 +188,12 @@ class CyclicSpritesDataModule(L.LightningDataModule):
                 self.batch_size = training_config.data.batch_size
                 self.num_workers = training_config.data.num_workers
                 self.pin_memory = training_config.data.pin_memory
+            # Re-apply safety override after reading training config
+            import os
+            if os.environ.get("RLVAE_CUDA_SAFE_DATALOADER", "0") == "1":
+                self.num_workers = 0
+                self.pin_memory = False
+                self.persistent_workers = False
             else:
                 # Fallback to old structure
                 self.batch_size = training_config.batch_size

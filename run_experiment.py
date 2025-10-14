@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+from src.enhanced_component_loader import EnhancedComponentLoader
 """
 RlVAE Experiment Runner
 ======================
@@ -140,7 +140,13 @@ class ExperimentRunner:
             self.device = torch.device(config.device)
         
         print(f"🚀 RlVAE Experiment Runner")
-        print(f"📅 Experiment: {config.experiment_name}")
+        try:
+            exp_name = getattr(config, 'experiment_name', None)
+            if exp_name is None and hasattr(config, 'experiment'):
+                exp_name = getattr(config.experiment, 'name', 'unnamed')
+        except Exception:
+            exp_name = 'unnamed'
+        print(f"📅 Experiment: {exp_name}")
         print(f"💻 Device: {self.device}")
         print(f"📁 Output: {self.output_dir}")
         
@@ -154,7 +160,7 @@ class ExperimentRunner:
         """Run the experiment based on configuration."""
         experiment_type = self.config.experiment.type
         print(f"\n🧪 Running {experiment_type} experiment: {self.config.experiment.name}")
-        if experiment_type == "single":
+        if experiment_type in ("single", "monolith"):
             self.run_single_experiment()
             # Stage C: add recon vs real panel using validation batch
             try:
@@ -190,6 +196,46 @@ class ExperimentRunner:
             self.run_three_stage_experiment()
         else:
             raise ValueError(f"Unknown experiment type: {experiment_type}")
+
+    # --- Monolith config updater -----------------------------------------
+    def _update_monolith_stagec_config(
+        self,
+        *,
+        encoder_path: str,
+        decoder_path: str,
+        metric_path: str,
+        latent_dim: int | None = None,
+        input_dim: list[int] | tuple[int, ...] | None = None,
+    ) -> None:
+        """Update conf/monolith_stagec.yaml with freshly produced Stage‑A/B artifacts.
+
+        This keeps a single source of truth for standalone Stage‑C runs.
+        """
+        try:
+            from omegaconf import OmegaConf
+            monolith_cfg_path = Path("conf/monolith_stagec.yaml")
+            if not monolith_cfg_path.exists():
+                print(f"[MONOLITH] No conf/monolith_stagec.yaml found; skipping updater")
+                return
+            cfg = OmegaConf.load(monolith_cfg_path)
+            # Ensure nested keys
+            if 'model' not in cfg:
+                cfg.model = {}
+            if 'pretrained' not in cfg.model:
+                cfg.model.pretrained = {}
+            # Update paths
+            cfg.model.pretrained.encoder_path = str(encoder_path)
+            cfg.model.pretrained.decoder_path = str(decoder_path)
+            cfg.model.pretrained.metric_path = str(metric_path)
+            if latent_dim is not None:
+                cfg.model.latent_dim = int(latent_dim)
+            if input_dim is not None:
+                cfg.model.input_dim = list(input_dim)
+            OmegaConf.save(cfg, monolith_cfg_path)
+            print(f"[MONOLITH] ✅ Updated monolith config with Stage‑A/B artifacts:\n"
+                  f"  - encoder: {encoder_path}\n  - decoder: {decoder_path}\n  - metric:  {metric_path}")
+        except Exception as e:
+            print(f"[MONOLITH] ⚠️ Failed to update monolith_stagec.yaml: {e}")
     
     def run_single_experiment(self):
         """Run a single experiment with current configuration."""
@@ -825,6 +871,42 @@ class ExperimentRunner:
                 print(f"⚠️ WandB initialization failed: {e}")
                 print("Continuing without WandB logging...")
                 cfg.wandb.mode = "disabled"
+
+        # ============================================================================
+        # CENTRALIZED STAGE DATA LOOKUP - ELIMINATE ALL DUPLICATION
+        # ============================================================================
+        print("\n=== [CENTRALIZED] Stage Data Lookup ===")
+        
+        # Define architecture and latent_dim once
+        arch = cfg.model.encoder.architecture if hasattr(cfg.model, 'encoder') and cfg.model.encoder is not None else 'mlp'
+        latent_dim = cfg.model.latent_dim
+        metric_impl = cfg.experiment.stage_b.implementation
+        
+        print(f"[CENTRALIZED] Architecture: {arch}, Latent dim: {latent_dim}")
+        print(f"[CENTRALIZED] Metric implementation: {metric_impl}")
+        
+        # Find Stage A and B data ONCE at the beginning
+        stage_a_data = None
+        stage_b_data = None
+        
+        if getattr(cfg.experiment, 'run_stage_b', True) or getattr(cfg.experiment, 'run_stage_c', True):
+            print(f"[CENTRALIZED] Looking up Stage A data...")
+            stage_a_data = find_stage_a_data(cfg, arch, latent_dim)
+            if stage_a_data:
+                print(f"[CENTRALIZED] ✅ Found Stage A data: {stage_a_data['base_dir']}")
+            else:
+                print(f"[CENTRALIZED] ❌ No Stage A data found")
+        
+        if getattr(cfg.experiment, 'run_stage_c', True):
+            print(f"[CENTRALIZED] Looking up Stage B data...")
+            stage_b_data = find_stage_b_data(cfg, arch, latent_dim, metric_impl.upper())
+            if stage_b_data:
+                print(f"[CENTRALIZED] ✅ Found Stage B data: {stage_b_data['base_dir']}")
+            else:
+                print(f"[CENTRALIZED] ❌ No Stage B data found")
+        
+        print(f"[CENTRALIZED] Stage data lookup completed")
+        print("=" * 50)
 
         # Stage A: Train base model
         if getattr(cfg.experiment, 'run_stage_a', True):
@@ -1991,8 +2073,8 @@ class ExperimentRunner:
             if (metric_impl in ('rhvae', 'precision')) and data_train_path is None:
                 raise RuntimeError("Stage B requires a train dataset (data.train_path) but none was provided and automatic generation failed")
             
-            # Try to find Stage A data automatically
-            stage_a_data = find_stage_a_data(cfg, arch, latent_dim)
+            # Use centralized Stage A data (already looked up)
+            # stage_a_data is already available from centralized lookup
             
             # Fix the metric_file reference for WandB logging
             metric_file = stageB_paths['metric_path']
@@ -2065,7 +2147,7 @@ class ExperimentRunner:
                     )
                 
                 # Force 150 centroids for Stage B extraction (RHVAE implementation)
-                n_centroids_local = 150
+                n_centroids_local = 300
                 print(f"[Stage B] Overriding number of centroids to {n_centroids_local}")
                 metric_path = extract_diverse_metric(
                     model=stageB_model,
@@ -2099,7 +2181,7 @@ class ExperimentRunner:
                 
                 # Precision metric from posterior: reuse extraction with local KNN covariance -> invert
                 # Force 150 centroids for Stage B extraction (per request)
-                n_centroids_local = 150
+                n_centroids_local = 300
                 print(f"[Stage B] Overriding number of centroids to {n_centroids_local}")
                 metric_path = extract_diverse_metric(
                     model=stageB_model,
@@ -2194,7 +2276,7 @@ class ExperimentRunner:
                 'temperature': metric_temp_cfg,
                 'selected_temperature': metric_temp_selected,
                 'regularization': cfg.experiment.stage_b.regularization,
-                'n_centroids': 150,
+                'n_centroids': 300,
                 'centroid_method': cfg.experiment.stage_b.centroid_method,
                 'neighbor_mode': cfg.experiment.stage_b.neighbor_mode,
                 'knn_k': cfg.experiment.stage_b.knn_k,
@@ -2382,7 +2464,8 @@ class ExperimentRunner:
             from src.models.samplers.hmc_sampler import RHVAEVolumeElementHMCSampler
             loader = MetricLoader(device=self.device)
             # Use Stage B metric if available, otherwise fallback
-            stage_b_data_for_sampling = find_stage_b_data(cfg, arch, latent_dim, metric_impl.upper())
+            # Use centralized Stage B data (already looked up)
+            stage_b_data_for_sampling = stage_b_data
             # Define metric_file for sampling if not already defined
             if 'metric_file' not in locals():
                 metric_file = stage_b_data_for_sampling['metric_path'] if stage_b_data_for_sampling else None
@@ -2739,14 +2822,62 @@ class ExperimentRunner:
             # Get organized Stage C paths
             stageC_paths = get_stage_paths(cfg, 'C', 'RLVAE', arch, latent_dim)
             
-            # Try to find Stage A and B data automatically
-            # For Stage C, we specifically want RHVAE Stage A data, not vanilla VAE
-            stage_a_data = find_stage_a_data(cfg, arch, latent_dim)
-            stage_b_data = find_stage_b_data(cfg, arch, latent_dim, metric_impl.upper())
+            # Use centralized Stage A and B data (already looked up)
+            # stage_a_data and stage_b_data are already available from centralized lookup
+        
+        # Use enhanced component loader to reduce init phases (SINGLE LOADING)
+        if hasattr(cfg.experiment, 'initialization') and cfg.experiment.initialization.get('track_phases', False):
+            print("[ENHANCED] Using enhanced component loader to reduce init phases")
+            component_loader = EnhancedComponentLoader(cfg)
+            all_components = component_loader.load_all_components(stage_a_data, stage_b_data)
             
-            # Accept whatever Stage A data exists (RHVAE or VANILLA)
-            # For ModRLVAE, vanilla enc/dec are perfectly valid.
-            pass
+            # Update config with loaded components (NO DUPLICATE LOADING)
+            if 'encoder' in all_components and stage_a_data:
+                cfg.model.pretrained.encoder_path = str(stage_a_data['encoder_path'])
+            if 'decoder' in all_components and stage_a_data:
+                cfg.model.pretrained.decoder_path = str(stage_a_data['decoder_path'])
+            if 'metric' in all_components and stage_b_data:
+                cfg.model.pretrained.metric_path = str(stage_b_data['metric_path'])
+            
+            print(f"[ENHANCED] Loaded {len(all_components)} components in single phase")
+            
+            # Continue with Stage C training after enhanced loading
+            print(f"\n=== [Stage C] CONTINUING WITH RLVAE TRAINING ===")
+            print(f"[Stage C] Enhanced component loading completed, proceeding with model training...")
+            
+            # Create and train the RLVAE model with loaded components
+            try:
+                # Create data module
+                data_module = build_data_module(cfg.data)
+                
+                # Create model wrapper with pretrained components
+                model_wrapper = LightningRlVAETrainer(
+                    cfg,
+                    data_module=data_module
+                )
+                
+                # Create trainer
+                wandb_logger = self._setup_wandb("stage_c_enhanced")
+                trainer = self._create_trainer(wandb_logger)
+                
+                # Train the model
+                print(f"[Stage C] 🚀 Starting RLVAE training with enhanced components...")
+                trainer.fit(model_wrapper, data_module)
+                
+                print(f"[Stage C] ✅ RLVAE training completed successfully!")
+                # Reuse the trained wrapper later if needed; also avoid
+                # re-instantiation that causes metric to be loaded twice.
+                self._stage_c_model_wrapper = model_wrapper
+                
+            except Exception as e:
+                print(f"[Stage C] ❌ RLVAE training failed: {e}")
+                raise
+            # Enhanced path completes here; avoid legacy path below that
+            # would recreate the model and reload the metric a second time.
+            return
+        else:
+            # Fallback: Load components individually (legacy method)
+            print("[LEGACY] Using individual component loading")
             
             # Define metric_file for fallback cases
             metric_file = stage_b_data['metric_path'] if stage_b_data else None
@@ -2771,65 +2902,66 @@ class ExperimentRunner:
                 print(f"  - Metric: {stage_b_data['metric_path']}")
                 print(f"  - Config: {stage_b_data['config_path']}")
             
-            # Wire metric path and pretrained components into model config
-            if stage_b_data is not None:
-                # Always set the pretrained metric path (works across model variants)
-                try:
-                    self.config.model.pretrained.metric_path = str(stage_b_data['metric_path'])
-                except Exception as e:
-                    print(f"[Stage C] ⚠️ Could not set pretrained.metric_path: {e}")
-                # Try to set fixed metric path on metric block when schema supports it
-                try:
-                    if hasattr(self.config.model, 'metric') and self.config.model.metric is not None:
-                        # Only set if key exists to avoid struct errors
-                        try:
-                            if 'fixed_metric_path' in self.config.model.metric:
-                                self.config.model.metric.fixed_metric_path = str(stage_b_data['metric_path'])
-                        except Exception:
-                            pass
-                        try:
-                            if 'temperature_override' in self.config.model.metric:
-                                self.config.model.metric.temperature_override = None
-                        except Exception:
-                            pass
-                        try:
-                            # For Phase‑2 adaptability: initialize trainable net from fixed metric
-                            if 'init_from_fixed' in self.config.model.metric:
-                                self.config.model.metric.init_from_fixed = True
-                            if 'trainable' in self.config.model.metric:
-                                self.config.model.metric.trainable = True
-                            if 'architecture' in self.config.model.metric and not self.config.model.metric.architecture:
-                                self.config.model.metric.architecture = 'mlp'
-                        except Exception:
-                            pass
-                except Exception as e:
-                    # Non-fatal; different model schemas may not expose these keys
-                    print(f"[Stage C] ℹ️ Skipping metric.fixed_metric_path/init_from_fixed wiring: {e}")
-                print(f"[Stage C] ✅ Using Stage B metric: {stage_b_data['metric_path']}")
-            else:
-                # Fallback to old method
-                if metric_file is not None:
-                    self.config.model.pretrained.metric_path = str(metric_file)
-                    self.config.model.metric.fixed_metric_path = str(metric_file)
-                    # Allow metric to update during training for better temporal dynamics
-                    self.config.model.metric.init_from_fixed = False
-                    print(f"[Stage C] ⚠️ Using fallback metric: {metric_file}")
+            # Wire metric path and pretrained components into model config (LEGACY METHOD ONLY)
+            if not (hasattr(cfg.experiment, 'initialization') and cfg.experiment.initialization.get('track_phases', False)):
+                if stage_b_data is not None:
+                    # Always set the pretrained metric path (works across model variants)
+                    try:
+                        self.config.model.pretrained.metric_path = str(stage_b_data['metric_path'])
+                    except Exception as e:
+                        print(f"[Stage C] ⚠️ Could not set pretrained.metric_path: {e}")
+                    # Try to set fixed metric path on metric block when schema supports it
+                    try:
+                        if hasattr(self.config.model, 'metric') and self.config.model.metric is not None:
+                            # Only set if key exists to avoid struct errors
+                            try:
+                                if 'fixed_metric_path' in self.config.model.metric:
+                                    self.config.model.metric.fixed_metric_path = str(stage_b_data['metric_path'])
+                            except Exception:
+                                pass
+                            try:
+                                if 'temperature_override' in self.config.model.metric:
+                                    self.config.model.metric.temperature_override = None
+                            except Exception:
+                                pass
+                            try:
+                                # For Phase‑2 adaptability: initialize trainable net from fixed metric
+                                if 'init_from_fixed' in self.config.model.metric:
+                                    self.config.model.metric.init_from_fixed = True
+                                if 'trainable' in self.config.model.metric:
+                                    self.config.model.metric.trainable = True
+                                if 'architecture' in self.config.model.metric and not self.config.model.metric.architecture:
+                                    self.config.model.metric.architecture = 'mlp'
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        # Non-fatal; different model schemas may not expose these keys
+                        print(f"[Stage C] ℹ️ Skipping metric.fixed_metric_path/init_from_fixed wiring: {e}")
+                    print(f"[Stage C] ✅ Using Stage B metric: {stage_b_data['metric_path']}")
                 else:
-                    print(f"[Stage C] ❌ No metric file found!")
-                    raise ValueError("No metric file available for Stage C")
-            
-            if stage_a_data is not None:
-                self.config.model.pretrained.encoder_path = str(stage_a_data['encoder_path'])
-                self.config.model.pretrained.decoder_path = str(stage_a_data['decoder_path'])
-                print(f"[Stage C] ✅ Using Stage A encoder/decoder:")
-                print(f"  - Encoder: {stage_a_data['encoder_path']}")
-                print(f"  - Decoder: {stage_a_data['decoder_path']}")
-            elif 'encoder' in comp_paths:
-                self.config.model.pretrained.encoder_path = comp_paths['encoder']
-                self.config.model.pretrained.decoder_path = comp_paths['decoder']
-                print(f"[Stage C] ⚠️ Using fallback encoder/decoder: {comp_paths['encoder']}")
-            else:
-                print(f"[Stage C] ❌ No encoder/decoder found!")
+                    # Fallback to old method
+                    if metric_file is not None:
+                        self.config.model.pretrained.metric_path = str(metric_file)
+                        self.config.model.metric.fixed_metric_path = str(metric_file)
+                        # Allow metric to update during training for better temporal dynamics
+                        self.config.model.metric.init_from_fixed = False
+                        print(f"[Stage C] ⚠️ Using fallback metric: {metric_file}")
+                    else:
+                        print(f"[Stage C] ❌ No metric file found!")
+                        raise ValueError("No metric file available for Stage C")
+                
+                if stage_a_data is not None:
+                    self.config.model.pretrained.encoder_path = str(stage_a_data['encoder_path'])
+                    self.config.model.pretrained.decoder_path = str(stage_a_data['decoder_path'])
+                    print(f"[Stage C] ✅ Using Stage A encoder/decoder:")
+                    print(f"  - Encoder: {stage_a_data['encoder_path']}")
+                    print(f"  - Decoder: {stage_a_data['decoder_path']}")
+                elif 'encoder' in comp_paths:
+                    self.config.model.pretrained.encoder_path = comp_paths['encoder']
+                    self.config.model.pretrained.decoder_path = comp_paths['decoder']
+                    print(f"[Stage C] ⚠️ Using fallback encoder/decoder: {comp_paths['encoder']}")
+                else:
+                    print(f"[Stage C] ❌ No encoder/decoder found!")
             
             print(f"[Stage C] Final config paths:")
             print(f"  - Encoder: {self.config.model.pretrained.encoder_path}")
@@ -2883,6 +3015,18 @@ class ExperimentRunner:
                     print(f"  - ⚠️ Could not verify Stage A config: {e}")
             
             print(f"=== [Stage C] END COMPONENT DEBUG ===\n")
+
+            # Keep monolith Stage‑C config in sync with latest artifacts
+            try:
+                self._update_monolith_stagec_config(
+                    encoder_path=self.config.model.pretrained.encoder_path,
+                    decoder_path=self.config.model.pretrained.decoder_path,
+                    metric_path=self.config.model.pretrained.metric_path,
+                    latent_dim=int(self.config.model.latent_dim),
+                    input_dim=list(self.config.model.input_dim),
+                )
+            except Exception as e:
+                print(f"[Stage C] ⚠️ Monolith config sync failed: {e}")
             # Ensure latent_dim matches the metric from Stage B
             try:
                 metric_file_to_check = stage_b_data['metric_path'] if stage_b_data else (metric_file if metric_file is not None else None)
@@ -3147,16 +3291,16 @@ class ExperimentRunner:
             # ============================================================================
             try:
                 # Optimized RHMC defaults for better μ alignment
-                rh_steps = 4
-                rh_eps = 0.02
-                rh_alpha = 0.20
+                rh_steps = 0
+                rh_eps = 0.
+                rh_alpha = 0.
                 safeties = {
                     'max_momentum_norm': 3.0,
                     'max_velocity_norm': 1.0,
                     'max_position_step': 0.5,
                     'max_position_norm': 8.0,
                 }
-                kl_eval = 'mu'
+                kl_eval = 'z'
                 kl_norm = False
                 kl_norm_mode = 'none'
                 mu_l2_w = 0.5
@@ -3357,7 +3501,10 @@ class ExperimentRunner:
                 dm = build_data_module(cfg.data)
                 dm.setup('fit', cfg.training)
                 vl = dm.val_dataloader()
-                model_wrapper = LightningRlVAETrainer(cfg, data_module=dm)
+                # Reuse trained wrapper if available to avoid reloading metric
+                model_wrapper = getattr(self, '_stage_c_model_wrapper', None)
+                if model_wrapper is None:
+                    model_wrapper = LightningRlVAETrainer(cfg, data_module=dm)
                 model = model_wrapper.model.to(self.device)
                 model.eval()
                 mus = []
@@ -3560,14 +3707,17 @@ class ExperimentRunner:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             full_run_name = f"{run_name}_{timestamp}"
         
-        wandb_logger = WandbLogger(
+        entity = getattr(self.config.wandb, 'entity', None)
+        kwargs = dict(
             project=self.config.wandb.project,
-            entity=self.config.wandb.entity,
             name=full_run_name,
             mode=self.config.wandb.mode,
             tags=self.config.wandb.get('tags', []),
             config=OmegaConf.to_container(self.config, resolve=True)
         )
+        if entity is not None:
+            kwargs['entity'] = entity
+        wandb_logger = WandbLogger(**kwargs)
         
         return wandb_logger
     
@@ -3595,21 +3745,24 @@ class ExperimentRunner:
         callbacks.append(checkpoint)
         
         # Create trainer with new config structure
+        tt = self.config.training.trainer
         trainer_kwargs = {
-            'max_epochs': self.config.training.trainer.max_epochs,
-            'accelerator': self.config.training.trainer.accelerator,
-            'devices': self.config.training.trainer.devices,
-            'strategy': self.config.training.trainer.strategy,
-            'precision': self.config.training.trainer.precision,
-            'log_every_n_steps': self.config.training.trainer.log_every_n_steps,
-            'val_check_interval': self.config.training.trainer.val_check_interval,
-            'num_sanity_val_steps': self.config.training.trainer.num_sanity_val_steps,
-            'enable_progress_bar': self.config.training.trainer.enable_progress_bar,
-            'enable_model_summary': self.config.training.trainer.enable_model_summary,
-            'deterministic': self.config.training.trainer.deterministic,
+            'max_epochs': getattr(tt, 'max_epochs', 3),
+            'accelerator': getattr(tt, 'accelerator', 'auto'),
+            'devices': getattr(tt, 'devices', 1),
+            'precision': getattr(tt, 'precision', '16-mixed'),
+            'log_every_n_steps': getattr(tt, 'log_every_n_steps', 10),
+            'val_check_interval': getattr(tt, 'val_check_interval', 1.0),
+            'num_sanity_val_steps': getattr(tt, 'num_sanity_val_steps', 0),
+            'enable_progress_bar': getattr(tt, 'enable_progress_bar', True),
+            'enable_model_summary': getattr(tt, 'enable_model_summary', True),
+            'deterministic': getattr(tt, 'deterministic', False),
             'logger': wandb_logger,
             'callbacks': callbacks,
         }
+        strategy = getattr(tt, 'strategy', None)
+        if strategy is not None:
+            trainer_kwargs['strategy'] = strategy
         
         trainer = L.Trainer(**trainer_kwargs)
         
