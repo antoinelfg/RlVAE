@@ -365,13 +365,24 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             self._loss_created_traced = True
         
         # 🚀 NEW: Initialize modular flow manager (replace the one from parent)
+        # Optional flow safety settings from config.flow
+        _flow_cfg = self.config.get('flow', {}) if hasattr(self.config, 'get') else {}
+        flow_logvar_clip = float(_flow_cfg.get('logvar_clip', 8.0))
+        flow_scale_act = str(_flow_cfg.get('scale_activation', 'tanh'))
+        flow_sanitize = bool(_flow_cfg.get('sanitize_outputs', True))
+        flow_clamp_logdet = float(_flow_cfg.get('clamp_logdet', 1e6))
+
         self.flow_manager = FlowManager(
             latent_dim=self.config.latent_dim,
             n_flows=self.config.n_flows,
             flow_hidden_size=self.config.flow_hidden_size,
             flow_n_blocks=self.config.flow_n_blocks,
             flow_n_hidden=self.config.flow_n_hidden,
-            device=self.device
+            device=self.device,
+            logvar_clip=flow_logvar_clip,
+            scale_activation=flow_scale_act,
+            sanitize_outputs=flow_sanitize,
+            clamp_logdet=flow_clamp_logdet,
         )
 
         # 🚀 NEW: Initialize posterior sampler and override base method to use component

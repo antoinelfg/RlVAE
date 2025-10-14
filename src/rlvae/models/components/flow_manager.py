@@ -9,9 +9,21 @@ import torch
 import torch.nn as nn
 from typing import List, Optional, Dict, Any
 from pythae.models.normalizing_flows.iaf import IAF, IAFConfig
+try:
+    # Prefer the safer, locally-wrapped IAF if available
+    from .safe_iaf import SafeIAF as _IAFImpl
+    _HAS_SAFE_IAF = True
+except Exception:
+    _IAFImpl = IAF
+    _HAS_SAFE_IAF = False
 
 class FlowManager(nn.Module):
-    def __init__(self, latent_dim: int, n_flows: int = 8, flow_hidden_size: int = 256, flow_n_blocks: int = 2, flow_n_hidden: int = 1, device: Optional[torch.device] = None):
+    def __init__(self, latent_dim: int, n_flows: int = 8, flow_hidden_size: int = 256, flow_n_blocks: int = 2, flow_n_hidden: int = 1, device: Optional[torch.device] = None,
+                 # Stabilization options
+                 logvar_clip: float = 8.0,
+                 scale_activation: str = 'tanh',
+                 sanitize_outputs: bool = True,
+                 clamp_logdet: float = 1e6):
         super().__init__()
         self.latent_dim = latent_dim
         self.n_flows = n_flows
@@ -19,6 +31,11 @@ class FlowManager(nn.Module):
         self.flow_n_blocks = flow_n_blocks
         self.flow_n_hidden = flow_n_hidden
         self.device = device or torch.device('cpu')
+        # Safety knobs
+        self._logvar_clip = float(logvar_clip)
+        self._scale_activation = str(scale_activation)
+        self._sanitize_outputs = bool(sanitize_outputs)
+        self._clamp_logdet = float(clamp_logdet)
         self.flows = nn.ModuleList()
         for i in range(n_flows):
             config = IAFConfig(
@@ -27,7 +44,17 @@ class FlowManager(nn.Module):
                 n_blocks=flow_n_blocks,
                 n_hidden=flow_n_hidden,
             )
-            flow = IAF(config)
+            # Use SafeIAF when available, otherwise fall back to vanilla IAF
+            if _HAS_SAFE_IAF:
+                flow = _IAFImpl(
+                    config,
+                    logvar_clip=self._logvar_clip,
+                    scale_activation=self._scale_activation,
+                    sanitize_outputs=self._sanitize_outputs,
+                    clamp_logdet=self._clamp_logdet,
+                )
+            else:
+                flow = IAF(config)
             self.flows.append(flow)
         self.to(self.device)
 
@@ -68,6 +95,12 @@ class FlowManager(nn.Module):
             flow_result = flow(z_sequence[t-1])
             z_t = flow_result.out
             log_det_jac = flow_result.log_abs_det_jac
+            # Final safety net in case upstream flow returns non-finite values
+            if self._sanitize_outputs:
+                z_t = torch.nan_to_num(z_t, nan=0.0, posinf=1e6, neginf=-1e6)
+                log_det_jac = torch.nan_to_num(log_det_jac, nan=0.0, posinf=self._clamp_logdet, neginf=-self._clamp_logdet)
+                if not torch.isfinite(log_det_jac).all():
+                    log_det_jac = torch.clamp(log_det_jac, min=-self._clamp_logdet, max=self._clamp_logdet)
             
             # Store results
             z_sequence[t] = z_t

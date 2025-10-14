@@ -262,6 +262,8 @@ class LossManager(nn.Module):
         
         # Sum log determinants across flows
         total_log_det = sum(log_det_jacobians)
+        # Sanitize before reduction to avoid NaN propagation from a single outlier
+        total_log_det = torch.nan_to_num(total_log_det, nan=0.0, posinf=1e6, neginf=-1e6)
         loss = torch.mean(total_log_det).abs()  # Ensure positive loss
         if not torch.isfinite(loss):
             print("⚠️ Flow loss is not finite! Clamping to 0.0.")
