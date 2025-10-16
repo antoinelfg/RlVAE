@@ -61,27 +61,53 @@ pip install -r requirements.txt
 
 #### Three-Stage Pipeline (Recommended)
 ```bash
-# Full pipeline with RHVAE metric and RHMC sampling
-python run_experiment.py experiment=rlvae_three_stage_pipeline \
-    metric=rhvae sampling=rhmc_default
+# Full pipeline with RHMC posterior and modular architecture
+python run_experiment.py experiment=rlvae_three_stage_long_rhmc_modular
 
-# Pipeline with precision metric (no sampling)
-python run_experiment.py experiment=rlvae_three_stage_pipeline \
-    metric=precision sampling.enabled=false
+# Custom latent dimension and epochs
+python run_experiment.py experiment=rlvae_three_stage_long_rhmc_modular \
+    settings.model.latent_dim=4 settings.training.strategy.max_epochs=100
 
-# Custom configuration
-python run_experiment.py experiment=rlvae_three_stage_pipeline \
-    metric=rhvae sampling=rhmc_default \
-    model.latent_dim=32 training.max_epochs=100
+# Different visualization level
+python run_experiment.py experiment=rlvae_three_stage_long_rhmc_modular \
+    settings.visualization.level=minimal
 ```
 
-#### Single Model Training
+#### Model Configuration
 ```bash
-# Quick development run (20 epochs, small data)
-python run_experiment.py experiment=single_run training=quick model=mlp_rlvae
+# Use riemannian RHMC VAE model
+python run_experiment.py model=riemannian_rhmc_vae
 
-# Production CNN training (50 epochs, full data)
-python run_experiment.py experiment=single_run training=full_data model=cnn_rlvae
+# Use standard riemannian flow VAE
+python run_experiment.py model=riemannian_flow_vae
+```
+
+#### Training Configuration
+```bash
+# Quick development run
+python run_experiment.py settings.training.strategy.max_epochs=20
+
+# Full data training
+python run_experiment.py training=full_data
+
+# Custom learning rate and batch size
+python run_experiment.py settings.training.optimizer.lr=1e-3 \
+    settings.data.common.batch_size=32
+```
+
+#### Visualization Configuration
+```bash
+# Minimal visualization (for sweeps)
+python run_experiment.py visualization=minimal
+
+# Standard visualization
+python run_experiment.py visualization=standard
+
+# Full visualization (publication quality)
+python run_experiment.py visualization=full
+
+# Three-stage optimized (recommended)
+python run_experiment.py visualization=three_stage_optimized
 ```
 
 #### Hyperparameter Optimization
@@ -126,52 +152,64 @@ model:
 
 ## 🔧 Configuration System (Hydra)
 
+### Unified Settings Structure
+The configuration system uses a unified `settings.*` structure for all parameters:
+
+```bash
+# All parameters are under settings.* namespace
+python run_experiment.py settings.model.latent_dim=4
+python run_experiment.py settings.training.optimizer.lr=1e-3
+python run_experiment.py settings.data.common.batch_size=32
+python run_experiment.py settings.visualization.level=minimal
+```
+
 ### Experiment Types
 ```bash
-# Three-stage pipeline (recommended)
-python run_experiment.py experiment=rlvae_three_stage_pipeline
+# Three-stage pipeline with RHMC (recommended)
+python run_experiment.py experiment=rlvae_three_stage_long_rhmc_modular
 
-# Two-stage pipeline (legacy)
-python run_experiment.py experiment=global_vanilla_rlvae_pipeline
-
-# Single experiments
-python run_experiment.py experiment=single_run
+# Default configuration
+python run_experiment.py
 ```
 
 ### Model Selection
 ```bash
-# Choose model architecture
-python run_experiment.py model=vanilla_vae      # Vanilla VAE baseline
-python run_experiment.py model=mlp_rlvae        # MLP Riemannian VAE
-python run_experiment.py model=cnn_rlvae        # CNN Riemannian VAE
-python run_experiment.py model=resnet_rlvae     # ResNet Riemannian VAE
+# Riemannian RHMC VAE (recommended)
+python run_experiment.py model=riemannian_rhmc_vae
+
+# Standard riemannian flow VAE
+python run_experiment.py model=riemannian_flow_vae
 ```
 
 ### Training Configurations
 ```bash
 # Development (fast iteration)
-python run_experiment.py training=quick         # 20 epochs, small data
+python run_experiment.py settings.training.strategy.max_epochs=20
 
-# Standard research
-python run_experiment.py training=default       # 100 epochs, balanced
+# Full data training
+python run_experiment.py training=full_data
 
-# Production
-python run_experiment.py training=full_data     # 50 epochs, full dataset
+# Custom training parameters
+python run_experiment.py settings.training.optimizer.lr=1e-3 \
+    settings.training.strategy.max_epochs=100
 ```
 
 ### Parameter Overrides
 ```bash
 # Architecture parameters
-python run_experiment.py model.latent_dim=64 model.n_flows=12
+python run_experiment.py settings.model.latent_dim=4 settings.model.n_flows=12
 
 # Training parameters  
-python run_experiment.py training.optimizer.lr=0.001 training.data.batch_size=32
+python run_experiment.py settings.training.optimizer.lr=0.001 \
+    settings.data.common.batch_size=32
 
-# Riemannian parameters
-python run_experiment.py model.riemannian_beta=10.0 model.sampling.method=geodesic
+# RHMC parameters
+python run_experiment.py settings.model.posterior.rhmc_steps=8 \
+    settings.model.posterior.rhmc_step_size=0.01
 
 # Visualization
-python run_experiment.py visualization=full visualization.frequency=5
+python run_experiment.py settings.visualization.level=full \
+    settings.visualization.frequencies.basic=3
 ```
 
 ## 📁 Project Structure
@@ -245,16 +283,19 @@ RlVAE/
 ### Visualization Levels
 ```bash
 # Development: minimal overhead
-python run_experiment.py visualization=minimal    # Basic plots every 5 epochs
+python run_experiment.py settings.visualization.level=minimal    # Basic plots every 5 epochs
 
 # Research: balanced analysis
-python run_experiment.py visualization=standard   # Manifold analysis every 3 epochs
+python run_experiment.py settings.visualization.level=standard   # Manifold analysis every 3 epochs
 
 # Publication: comprehensive diagnostics  
-python run_experiment.py visualization=full       # All modules every epoch
+python run_experiment.py settings.visualization.level=full       # All modules every epoch
+
+# Three-stage optimized (recommended)
+python run_experiment.py settings.visualization.level=three_stage_optimized
 
 # Hyperparameter sweeps: efficiency focused
-python run_experiment.py visualization=final_only # Complete analysis at end only
+python run_experiment.py settings.visualization.level=final_only # Complete analysis at end only
 ```
 
 ## 🚀 Hyperparameter Optimization System
