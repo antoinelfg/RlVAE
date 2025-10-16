@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 from typing import Dict, Any, Optional, List
 from pathlib import Path
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 import wandb
 from contextlib import nullcontext
 
@@ -57,6 +57,10 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
     
     def __init__(self, config: DictConfig):
         """Initialize from Hydra configuration with all modular components."""
+        config = OmegaConf.create(OmegaConf.to_container(config, resolve=True))
+        # Allow passing a full training config; extract model subsection if needed.
+        if not hasattr(config, 'latent_dim') and hasattr(config, 'model'):
+            config = OmegaConf.create(OmegaConf.to_container(config.model, resolve=True))
         # Ensure metric attributes exist before any parent/loader call paths
         # that might reference them.
         self.modular_metric = None
@@ -65,28 +69,22 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         print("[DEBUG] model.metric config at model init:", config.get('metric', {}))
         # Check if n_flows was explicitly set by checking if it's NOT the default auto value
         # Default auto value would be sequence_length - 1, so if it's different, user set it
-        if hasattr(config, 'sequence_length'):
-            expected_auto_value = config.sequence_length - 1
-            current_n_flows = getattr(config, 'n_flows', None)
-            
-            # If n_flows is different from auto value, user explicitly set it
-            if current_n_flows is not None and current_n_flows != expected_auto_value:
-                print(f"[USER] Keeping user-specified n_flows = {current_n_flows} (auto would be {expected_auto_value})")
+        n_flows = getattr(config, 'n_flows', None)
+        sequence_length = getattr(config, 'sequence_length', None)
+        if sequence_length is not None:
+            expected_auto_value = max(0, int(sequence_length) - 1)
+            if n_flows is None:
+                n_flows = expected_auto_value
+                print(f"[AUTO] Setting n_flows = sequence_length - 1 = {n_flows}")
+            elif int(n_flows) != expected_auto_value:
+                print(f"[USER] Keeping user-specified n_flows = {n_flows} (auto would be {expected_auto_value})")
             else:
-                # Auto-set to sequence_length - 1
-                config.n_flows = expected_auto_value
-                print(f"[AUTO] Setting n_flows = sequence_length - 1 = {config.n_flows}")
-        elif hasattr(config, 'model') and hasattr(config.model, 'sequence_length'):
-            expected_auto_value = config.model.sequence_length - 1
-            current_n_flows = getattr(config.model, 'n_flows', None)
-            
-            if current_n_flows is not None and current_n_flows != expected_auto_value:
-                print(f"[USER] Keeping user-specified model.n_flows = {current_n_flows} (auto would be {expected_auto_value})")
-            else:
-                config.model.n_flows = expected_auto_value
-                print(f"[AUTO] Setting model.n_flows = model.sequence_length - 1 = {config.model.n_flows}")
+                print(f"[AUTO] Using n_flows = {n_flows} (matches sequence_length - 1)")
         else:
-            print(f"[USER] Keeping n_flows = {getattr(config, 'n_flows', 'unknown')} (no sequence_length found)")
+            print(f"[USER] Keeping n_flows = {n_flows if n_flows is not None else 'unknown'} (no sequence_length found)")
+        if n_flows is None:
+            n_flows = 0
+        config = OmegaConf.merge(config, {"n_flows": int(n_flows)})
         # Extract core parameters
         # Map flow params to the original API (flow_hidden_dims)
         try:
@@ -365,24 +363,13 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             self._loss_created_traced = True
         
         # 🚀 NEW: Initialize modular flow manager (replace the one from parent)
-        # Optional flow safety settings from config.flow
-        _flow_cfg = self.config.get('flow', {}) if hasattr(self.config, 'get') else {}
-        flow_logvar_clip = float(_flow_cfg.get('logvar_clip', 8.0))
-        flow_scale_act = str(_flow_cfg.get('scale_activation', 'tanh'))
-        flow_sanitize = bool(_flow_cfg.get('sanitize_outputs', True))
-        flow_clamp_logdet = float(_flow_cfg.get('clamp_logdet', 1e6))
-
         self.flow_manager = FlowManager(
             latent_dim=self.config.latent_dim,
             n_flows=self.config.n_flows,
             flow_hidden_size=self.config.flow_hidden_size,
             flow_n_blocks=self.config.flow_n_blocks,
             flow_n_hidden=self.config.flow_n_hidden,
-            device=self.device,
-            logvar_clip=flow_logvar_clip,
-            scale_activation=flow_scale_act,
-            sanitize_outputs=flow_sanitize,
-            clamp_logdet=flow_clamp_logdet,
+            device=self.device
         )
 
         # 🚀 NEW: Initialize posterior sampler and override base method to use component
@@ -789,10 +776,21 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             for k in (
                 'rhmc_steps', 'rhmc_step_size', 'rhmc_alpha', 'rhmc_eps_reg',
                 'max_momentum_norm', 'max_velocity_norm', 'max_position_step', 'max_position_norm',
-                'min_cov_eig', 'eps_regularization', 'use_factorized_G_mu'
+                'min_cov_eig', 'eps_regularization', 'use_factorized_G_mu', 'kl_prior_mode'
             ):
                 if hasattr(self.config, k):
                     rhmc_config[k] = getattr(self.config, k)
+            if 'kl_prior_mode' not in rhmc_config:
+                try:
+                    mode = None
+                    if hasattr(self.config, 'kl_prior_mode'):
+                        mode = getattr(self.config, 'kl_prior_mode')
+                    elif hasattr(self, 'config_resolved'):
+                        mode = self.config_resolved.get('kl_prior_mode')
+                    if mode is not None:
+                        rhmc_config['kl_prior_mode'] = str(mode)
+                except Exception:
+                    pass
             print(f"[RHMC CONFIG] Creating RHMC posterior with config: {rhmc_config}")
             self.posterior_sampler_rhmc = RiemannianRHMCPosterior(self, rhmc_config)
             # Enforce config on instance in case sampler sets internal defaults
@@ -1876,27 +1874,27 @@ class ModelFactory:
     @staticmethod
     def create_comparison_suite(config: DictConfig) -> Dict[str, ModularRiemannianFlowVAE]:
         """Create a suite of models for comparison."""
+        base_model_cfg = OmegaConf.create(OmegaConf.to_container(config.model, resolve=True))
         if hasattr(config.experiment, 'models'):
             models = {}
             for model_name in config.experiment.models:
-                # Create config for this model variant
-                model_config = config.model.copy()
-                
+                model_config = OmegaConf.create(OmegaConf.to_container(base_model_cfg, resolve=True))
                 # Apply model-specific overrides
                 if model_name == 'vanilla_vae':
-                    model_config.n_flows = 0
-                    model_config.riemannian_beta = 0.0
-                    model_config.posterior.type = 'gaussian'
-                    model_config.sampling.use_riemannian = False
-                    model_config.sampling.method = 'standard'
-                    model_config.loop.mode = 'open'
-                    model_config.loop.penalty = 0.0
+                    overrides = {
+                        "n_flows": 0,
+                        "riemannian_beta": 0.0,
+                        "posterior": {"type": 'gaussian'},
+                        "sampling": {"use_riemannian": False, "method": 'standard'},
+                        "loop": {"mode": 'open', "penalty": 0.0},
+                    }
+                    model_config = OmegaConf.merge(model_config, overrides)
                 
                 models[model_name] = ModularRiemannianFlowVAE(model_config)
             
             return models
         else:
-            return {'main': ModularRiemannianFlowVAE(config.model)}
+            return {'main': ModularRiemannianFlowVAE(base_model_cfg)}
 
 
 class MetricsCollector:

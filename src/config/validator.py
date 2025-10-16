@@ -6,11 +6,13 @@ Validates and normalizes configurations before model creation to prevent
 configuration sync errors and ensure consistent parameter handling.
 """
 
-import torch
-from typing import Dict, Any, Optional, Union, List, Tuple
+from copy import deepcopy
+from typing import Dict, Any, Union, List
 from omegaconf import DictConfig, OmegaConf
 import warnings
 from dataclasses import dataclass
+
+from .settings_views import build_model_config_from_settings
 
 
 @dataclass
@@ -95,69 +97,66 @@ class ConfigValidator:
         Returns:
             ValidationResult with validation status and normalized config
         """
-        errors = []
-        warnings_list = []
+        errors: List[str] = []
+        warnings_list: List[str] = []
         
-        # Convert to DictConfig if needed
-        if isinstance(config, dict):
-            config = OmegaConf.create(config)
-        elif not isinstance(config, DictConfig):
-            try:
-                config = OmegaConf.create(dict(config))
-            except Exception as e:
-                errors.append(f"Cannot convert config to DictConfig: {e}")
-                return ValidationResult(False, config, errors, warnings_list)
-        
-        # Make a copy to avoid modifying original
-        config = OmegaConf.create(config)
+        # Normalize to a detached python dict for mutation-free processing
+        try:
+            if isinstance(config, DictConfig):
+                config_dict = deepcopy(OmegaConf.to_container(config, resolve=True, enum_to_str=True))
+            else:
+                config_dict = deepcopy(dict(config))
+        except Exception as e:
+            errors.append(f"Cannot materialize config: {e}")
+            return ValidationResult(False, OmegaConf.create({}), errors, warnings_list)
         
         # Check required parameters
         required = cls.REQUIRED_PARAMS.get(model_type, cls.REQUIRED_PARAMS['base'])
         for param in required:
-            if param not in config or config[param] is None:
+            if param not in config_dict or config_dict[param] is None:
                 errors.append(f"Required parameter '{param}' is missing")
         
         # Add defaults for missing parameters
         for param, default_value in cls.DEFAULTS.items():
-            if param not in config or config[param] is None:
-                # Handle struct mode for parameter assignment
-                original_struct = OmegaConf.is_struct(config)
-                OmegaConf.set_struct(config, False)
-                config[param] = default_value
-                OmegaConf.set_struct(config, original_struct)
+            if param not in config_dict or config_dict[param] is None:
+                config_dict[param] = deepcopy(default_value)
                 warnings_list.append(f"Using default value for '{param}': {default_value}")
         
         # Validate parameter types
         for param, expected_type in cls.PARAM_TYPES.items():
-            if param in config and config[param] is not None:
-                if not isinstance(config[param], expected_type):
+            if param in config_dict and config_dict[param] is not None:
+                value = config_dict[param]
+                if not isinstance(value, expected_type):
                     try:
                         # Try to convert
                         if expected_type == int:
-                            config[param] = int(config[param])
+                            config_dict[param] = int(value)
                         elif expected_type == float:
-                            config[param] = float(config[param])
+                            config_dict[param] = float(value)
                         elif expected_type == str:
-                            config[param] = str(config[param])
+                            config_dict[param] = str(value)
                         else:
-                            errors.append(f"Parameter '{param}' has wrong type. Expected {expected_type}, got {type(config[param])}")
+                            errors.append(f"Parameter '{param}' has wrong type. Expected {expected_type}, got {type(value)}")
                     except (ValueError, TypeError):
                         errors.append(f"Cannot convert parameter '{param}' to {expected_type}")
         
         # Validate enum values
         for param, valid_values in cls.VALID_VALUES.items():
-            if param in config and config[param] not in valid_values:
-                errors.append(f"Parameter '{param}' has invalid value '{config[param]}'. Valid values: {valid_values}")
+            if param in config_dict and config_dict[param] not in valid_values:
+                errors.append(f"Parameter '{param}' has invalid value '{config_dict[param]}'. Valid values: {valid_values}")
+        
+        # Normalize specific parameters prior to DictConfig reconstruction
+        config_dict = cls._normalize_parameters(config_dict)
+        
+        # Rebuild DictConfig for downstream checks
+        config_cfg = OmegaConf.create(config_dict)
         
         # Cross-parameter validation
-        errors.extend(cls._validate_cross_params(config))
-        warnings_list.extend(cls._check_cross_param_warnings(config))
-        
-        # Normalize specific parameters
-        config = cls._normalize_parameters(config)
+        errors.extend(cls._validate_cross_params(config_cfg))
+        warnings_list.extend(cls._check_cross_param_warnings(config_cfg))
         
         is_valid = len(errors) == 0
-        return ValidationResult(is_valid, config, errors, warnings_list)
+        return ValidationResult(is_valid, config_cfg, errors, warnings_list)
     
     @classmethod
     def _validate_cross_params(cls, config: DictConfig) -> List[str]:
@@ -226,30 +225,32 @@ class ConfigValidator:
         return warnings_list
     
     @classmethod
-    def _normalize_parameters(cls, config: DictConfig) -> DictConfig:
+    def _normalize_parameters(cls, config_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize parameter formats."""
         # Ensure input_dim is tuple
-        if 'input_dim' in config:
-            if isinstance(config.input_dim, list):
-                config.input_dim = tuple(config.input_dim)
-            elif isinstance(config.input_dim, int):
-                config.input_dim = (config.input_dim,)
+        if 'input_dim' in config_dict:
+            input_dim = config_dict['input_dim']
+            if isinstance(input_dim, list):
+                config_dict['input_dim'] = tuple(input_dim)
+            elif isinstance(input_dim, int):
+                config_dict['input_dim'] = (input_dim,)
         
         # Ensure posterior configuration is properly structured
-        if 'posterior_type' in config and 'posterior' not in config:
-            config.posterior = {'type': config.posterior_type}
-        elif 'posterior' in config and isinstance(config.posterior, str):
-            config.posterior = {'type': config.posterior}
+        if 'posterior_type' in config_dict and 'posterior' not in config_dict:
+            config_dict['posterior'] = {'type': config_dict['posterior_type']}
+        elif 'posterior' in config_dict and isinstance(config_dict['posterior'], str):
+            config_dict['posterior'] = {'type': config_dict['posterior']}
         
         # Ensure metric configuration exists for Riemannian models
-        if config.get('posterior_type') in ['riemannian_metric', 'riemannian_rhmc']:
-            if 'metric' not in config:
-                config.metric = {
-                    'temperature': config.get('temperature', 0.1),
-                    'regularization': config.get('regularization', 0.01)
+        posterior_type = config_dict.get('posterior_type')
+        if posterior_type in ['riemannian_metric', 'riemannian_rhmc']:
+            if 'metric' not in config_dict:
+                config_dict['metric'] = {
+                    'temperature': config_dict.get('temperature', 0.1),
+                    'regularization': config_dict.get('regularization', 0.01)
                 }
         
-        return config
+        return config_dict
 
 
 def validate_model_config(config: Union[DictConfig, Dict[str, Any]], 
@@ -293,3 +294,11 @@ def ensure_valid_config(config: Union[DictConfig, Dict[str, Any]],
         warnings.warn(warning)
     
     return result.config
+
+
+def validate_model_settings(settings: DictConfig, model_type: str = 'rlvae') -> ValidationResult:
+    """
+    Validate a unified `settings` tree by materializing its model view first.
+    """
+    model_cfg = build_model_config_from_settings(settings)
+    return validate_model_config(model_cfg, model_type)

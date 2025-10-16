@@ -1270,29 +1270,7 @@ Timesteps: {n_obs}"""
                 ax.legend()
                 ax.grid(True, alpha=0.3)
                 
-                # Add analysis summary
-                summary_text = f"""Enhanced KL Analysis Summary:
-• Total Steps: {epoch}
-• Prior Samples: {n_prior_samples} (RHMC - Full Manifold Exploration)
-• Posterior Samples: {len(z_posterior_flat)} (Metric-Aware - Local Around μ)
-• Final Beta: {getattr(self.model, 'riemannian_beta', 1.0):.3f}
-• Working RHMC: RHVAEVolumeElementHMCSampler
-• Color Scaling: log₁₀(det(G⁻¹)) range [{det_log.min():.3f}, {det_log.max():.3f}]
-• Real Manifold: Working gradient visualization
-• No Gradient Errors: Using proven sampler
-• RHMC Parameters: mcmc_steps=200, n_lf=30, eps_lf=0.001 (for prior sampling)
-• FIXED: Same PCA projection for manifold and samples
-• FIXED: Different sampling methods (correct approach)
-• Gradient Levels: {len(levels)} levels for smooth visualization
-• 🔴 RED: RHMC prior (full manifold exploration - correct)
-• 🔵 BLUE: Metric-aware posterior (local around μ - correct)
-• 🟢 GREEN: Encoder means μ (centers for posterior)
-• ✅ THEORETICALLY CORRECT: Different methods for different purposes
-• ✅ FIXED: Proper scaling (0.1x) ensures tight clustering around μ"""
-                
-                ax.text(0.02, 0.02, summary_text, transform=ax.transAxes, 
-                       fontsize=8, verticalalignment='bottom',
-                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
                 
                 plt.tight_layout()
                 
@@ -1302,7 +1280,7 @@ Timesteps: {n_obs}"""
                 
                 if self.should_log_to_wandb() and saved_file:
                     wandb.log({
-                        f"enhanced_kl/visualization_epoch_{epoch:03d}": wandb.Image(
+                        f"enhanced_kl/visualization": wandb.Image(
                             saved_file, 
                             caption=f"Enhanced KL Visualization: UNIFIED RHMC Sampling (Epoch {epoch})"
                         )

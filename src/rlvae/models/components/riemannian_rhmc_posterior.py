@@ -117,7 +117,13 @@ class RiemannianRHMCPosterior(nn.Module):
                 return default
         self.rhmc_steps = int(_cfg_get('rhmc_steps', 1))
         self.rhmc_step_size = float(_cfg_get('rhmc_step_size', 5e-3))
-        self.rhmc_alpha = float(_cfg_get('rhmc_alpha', 1e-2))
+        raw_alpha = float(_cfg_get('rhmc_alpha', 1e-2))
+        if not math.isfinite(raw_alpha) or raw_alpha <= 0.0:
+            fallback_alpha = getattr(model, 'posterior_local_alpha', 0.5)
+            self.rhmc_alpha = float(fallback_alpha)
+            print(f"[RHMC INIT] α<=0 detected ({raw_alpha}); using fallback {self.rhmc_alpha}")
+        else:
+            self.rhmc_alpha = raw_alpha
         self.eps_reg = float(_cfg_get('rhmc_eps_reg', _cfg_get('eps_regularization', 1e-3)))
 
         # Numerical guards
@@ -130,6 +136,16 @@ class RiemannianRHMCPosterior(nn.Module):
         self.max_position_norm = float(_cfg_get('max_position_norm', 4.0))
         # Keep factorized path disabled by default
         self.use_factorized_G_mu = False
+        # Prior mode (affects log p computation under Monte-Carlo KL)
+        prior_mode_cfg = _cfg_get('kl_prior_mode', _cfg_get('riemannian_prior_mode', 'volume_gaussian'))
+        try:
+            self.kl_prior_mode = str(prior_mode_cfg).lower() if prior_mode_cfg is not None else 'volume_gaussian'
+        except Exception:
+            self.kl_prior_mode = 'volume_gaussian'
+        if self.kl_prior_mode not in {'volume_gaussian', 'uniform', 'gaussian'}:
+            print(f"[RHMC INIT] ⚠️ Unknown kl_prior_mode='{self.kl_prior_mode}', falling back to 'volume_gaussian'")
+            self.kl_prior_mode = 'volume_gaussian'
+        self.uniform_prior_log_norm = float(_cfg_get('uniform_prior_log_norm', 0.0))
 
         # Default return behaviour
         self.default_return_initial = True
@@ -373,6 +389,7 @@ class RiemannianRHMCPosterior(nn.Module):
                     except Exception:
                         pass
                     return alpha
+                # Treat zero or negative alpha as a signal to fall back downstream
             except Exception:
                 pass
         current_epoch = getattr(model, '_current_epoch', None)
@@ -387,6 +404,7 @@ class RiemannianRHMCPosterior(nn.Module):
                     except Exception:
                         pass
                     return alpha
+                # Guard against ramps returning 0 when disabled
             except Exception:
                 pass
 
@@ -410,7 +428,22 @@ class RiemannianRHMCPosterior(nn.Module):
                     return alpha
             except Exception:
                 pass
-        return max(self.rhmc_alpha, 1e-6)
+        fallbacks = [
+            getattr(model, 'posterior_local_alpha', None),
+            getattr(self, 'rhmc_alpha', None),
+            getattr(model, 'rhmc_alpha_default', None),
+        ]
+        for cand in fallbacks:
+            if cand is None:
+                continue
+            try:
+                alpha = float(cand)
+                if math.isfinite(alpha) and alpha > 0:
+                    return alpha
+            except Exception:
+                continue
+        # Final safety: small positive epsilon
+        return 1e-3
 
     def _get_inverse_metric(self, pts: torch.Tensor) -> torch.Tensor:
         """Fetch Ĝ⁻¹(pts) with symmetry and fallback safeguards."""
@@ -604,16 +637,33 @@ class RiemannianRHMCPosterior(nn.Module):
             G_z32 = G_z.float() if G_z.dtype in (torch.float16, torch.bfloat16) else G_z
             sign, log_det_G = torch.slogdet(G_z32)
             
-            # Volume term + Gaussian prior + normalization
             d = z.shape[-1]
             z_norm_sq = torch.sum(z ** 2, dim=-1)
-            log_p = 0.5 * log_det_G - 0.5 * z_norm_sq - 0.5 * d * math.log(2 * math.pi)
+            log_det_term = 0.5 * log_det_G.to(z_norm_sq.dtype)
+            gaussian_term = -0.5 * z_norm_sq.to(log_det_term.dtype) - 0.5 * float(d) * math.log(2 * math.pi)
+
+            mode = getattr(self, 'kl_prior_mode', 'volume_gaussian')
+            if mode in ('volume_gaussian', 'gaussian'):
+                log_p = log_det_term + gaussian_term
+            elif mode == 'uniform':
+                log_p = log_det_term + float(self.uniform_prior_log_norm)
+            else:
+                # Fallback: behave like volume_gaussian for unknown modes
+                log_p = log_det_term + gaussian_term
             
             return log_p
             
         except Exception as e:
             # Fallback: standard Gaussian prior (no volume term)
             d = z.shape[-1]
+            mode = getattr(self, 'kl_prior_mode', 'volume_gaussian')
+            if mode == 'uniform':
+                return torch.full(
+                    (z.shape[0],),
+                    float(self.uniform_prior_log_norm),
+                    device=z.device,
+                    dtype=z.dtype,
+                )
             z_norm_sq = torch.sum(z ** 2, dim=-1)
             return -0.5 * z_norm_sq - 0.5 * d * math.log(2 * math.pi)
     

@@ -1,4 +1,4 @@
-from src.enhanced_component_loader import EnhancedComponentLoader
+#!/usr/bin/env python3
 """
 RlVAE Experiment Runner
 ======================
@@ -29,7 +29,6 @@ Usage Examples:
 
 import os
 import sys
-import math
 from pathlib import Path
 
 # Add src to path
@@ -71,128 +70,89 @@ from visualizations.manager import VisualizationManager
 class ExperimentRunner:
     """Main experiment runner with Hydra configuration."""
     
-    @staticmethod
-    def _set_config_value(cfg: DictConfig, path: str, value: Any) -> None:
-        """Update a configuration value and keep settings.* in sync."""
-        OmegaConf.update(cfg, path, value, force_add=True)
-        if hasattr(cfg, 'settings'):
-            root, *rest = path.split('.', 1)
-            if hasattr(cfg.settings, root):
-                settings_path = f"settings.{root}"
-                if rest:
-                    settings_path = f"{settings_path}.{rest[0]}"
-                OmegaConf.update(cfg, settings_path, value, force_add=True)
-
-    @staticmethod
-    def _set_config_value_if_missing(cfg: DictConfig, path: str, value: Any) -> bool:
-        """
-        Update a configuration value only when it is missing or None so that
-        user-provided overrides (e.g., in the main mega config) take precedence.
+    def __init__(self, config: DictConfig):
+        self.config = config
+        self.output_dir = Path(config.output_dir)
+        self.results = {}
         
-        Returns:
-            bool: True if the value was written, False otherwise.
-        """
+        # --- AUTOMATION: Ensure model.input_dim always matches data shape ---
+        if (
+            hasattr(self.config, 'data') and
+            hasattr(self.config.data, 'channels') and
+            hasattr(self.config.data, 'image_size') and
+            isinstance(self.config.data.image_size, (list, tuple)) and
+            len(self.config.data.image_size) == 2
+        ):
+            # Handle struct mode for input_dim assignment
+            try:
+                from omegaconf import OmegaConf
+                original_struct = OmegaConf.is_struct(self.config.model)
+                OmegaConf.set_struct(self.config.model, False)
+                self.config.model.input_dim = [
+                    self.config.data.channels,
+                    self.config.data.image_size[0],
+                    self.config.data.image_size[1]
+                ]
+                OmegaConf.set_struct(self.config.model, original_struct)
+                print(f"[INIT] ✅ Set model.input_dim = {self.config.model.input_dim}")
+            except Exception as e:
+                print(f"[INIT] ⚠️ Failed to set model.input_dim: {e}")
+                # Fallback: try to resolve interpolations
+                try:
+                    OmegaConf.resolve(self.config)
+                    print(f"[INIT] ✅ Resolved interpolations, model.input_dim = {self.config.model.input_dim}")
+                except Exception as e2:
+                    print(f"[INIT] ⚠️ Failed to resolve interpolations: {e2}")
+        # --- AUTOMATION: Allow experiment-level model overrides to propagate globally ---
         try:
-            if OmegaConf.is_missing(cfg, path):
-                ExperimentRunner._set_config_value(cfg, path, value)
-                return True
+            exp_cfg = getattr(self.config, 'experiment', None)
+            if exp_cfg is not None and hasattr(exp_cfg, 'model') and exp_cfg.model is not None:
+                # Latent dim override
+                try:
+                    ld_override = getattr(exp_cfg.model, 'latent_dim', None)
+                    if ld_override is not None:
+                        self.config.model.latent_dim = int(ld_override)
+                        if hasattr(self.config, 'training') and hasattr(self.config.training, 'model'):
+                            self.config.training.model.latent_dim = int(ld_override)
+                except Exception:
+                    pass
+                # Metric freeze/temperature overrides
+                try:
+                    m_override = getattr(exp_cfg.model, 'metric', None)
+                    if m_override is not None and hasattr(self.config.model, 'metric') and self.config.model.metric is not None:
+                        if hasattr(m_override, 'trainable') and m_override.trainable is not None:
+                            self.config.model.metric.trainable = bool(m_override.trainable)
+                        if hasattr(m_override, 'init_from_fixed') and m_override.init_from_fixed is not None:
+                            self.config.model.metric.init_from_fixed = bool(m_override.init_from_fixed)
+                        if hasattr(m_override, 'temperature_override'):
+                            # May be None (to use persisted temperature)
+                            self.config.model.metric.temperature_override = m_override.temperature_override
+                except Exception:
+                    pass
         except Exception:
             pass
-        try:
-            current = OmegaConf.select(cfg, path)
-        except Exception:
-            current = None
-        if current is None:
-            ExperimentRunner._set_config_value(cfg, path, value)
-            return True
-        # Ensure compatibility mirrors exist even when we didn't mutate the value.
-        if hasattr(cfg, 'settings'):
-            root, *rest = path.split('.', 1)
-            if hasattr(cfg.settings, root):
-                settings_path = f"settings.{root}"
-                if rest:
-                    settings_path = f"{settings_path}.{rest[0]}"
-                try:
-                    OmegaConf.select(cfg, settings_path)
-                except Exception:
-                    # Populate the mirror with the current value without overriding.
-                    try:
-                        cloned = OmegaConf.to_container(current, resolve=False)
-                    except Exception:
-                        cloned = current
-                    OmegaConf.update(cfg, settings_path, cloned, force_add=True)
-        return False
-
-    def _ensure_training_aliases(self, config: Optional[DictConfig] = None) -> None:
-        """Ensure settings.training.* mirrors exist even in single-stage runs."""
-        cfg = config if config is not None else self.config
-        if cfg is None or not hasattr(cfg, 'training') or not hasattr(cfg, 'settings'):
-            return
-        try:
-            training_settings = getattr(cfg.settings, 'training')
-        except Exception:
-            training_settings = None
-        if training_settings is None:
-            OmegaConf.update(cfg, "settings.training", {}, force_add=True)
-        alias_keys = (
-            'trainer',
-            'optimizer',
-            'scheduler',
-            'early_stopping',
-            'logging',
-            'monitoring',
-        )
-        for key in alias_keys:
-            try:
-                cfg_value = getattr(cfg.training, key)
-            except Exception:
-                continue
-            if cfg_value is None:
-                continue
-            settings_path = f"settings.training.{key}"
-            try:
-                existing = OmegaConf.select(cfg, settings_path)
-                if existing is not None:
-                    continue
-            except Exception:
-                pass
-            try:
-                cloned = OmegaConf.to_container(cfg_value, resolve=False)
-            except Exception:
-                cloned = cfg_value
-            OmegaConf.update(cfg, settings_path, cloned, force_add=True)
-
-    def __init__(self, config: DictConfig):
-        # Keep a reference to the original Hydra config for display, but operate on
-        # a detached copy so that subsequent mutations do not leak back to Hydra.
-        self.original_config = config
-        self.config = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
-        self.output_dir = Path(self.config.output_dir)
-        self.results = {}
-
-        # Configuration is expected to be fully resolved (single source of truth
-        # in settings.*). Avoid mutating it here to keep determinism.
-
+        # ---------------------------------------------------------------
+        
         # Setup device
-        if self.config.device == "auto":
+        if config.device == "auto":
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
-            self.device = torch.device(self.config.device)
-
+            self.device = torch.device(config.device)
+        
         print(f"🚀 RlVAE Experiment Runner")
         try:
-            exp_name = getattr(self.config, 'experiment_name', None)
-            if exp_name is None and hasattr(self.config, 'experiment'):
-                exp_name = getattr(self.config.experiment, 'name', 'unnamed')
+            exp_name = getattr(config, 'experiment_name', None)
+            if exp_name is None and hasattr(config, 'experiment'):
+                exp_name = getattr(config.experiment, 'name', 'unnamed')
         except Exception:
             exp_name = 'unnamed'
         print(f"📅 Experiment: {exp_name}")
         print(f"💻 Device: {self.device}")
         print(f"📁 Output: {self.output_dir}")
-
+        
         # Set comprehensive random seed for reproducibility
-        seed = self.config.get('seed', 42)
-        experiment_type = self.config.get('experiment_type', 'research')
+        seed = config.get('seed', 42)
+        experiment_type = config.get('experiment_type', 'research')
         configure_for_experiment(seed, experiment_type, self.device)
         print(f"🎲 Comprehensive seeding configured (seed: {seed})")
     
@@ -280,9 +240,6 @@ class ExperimentRunner:
     def run_single_experiment(self):
         """Run a single experiment with current configuration."""
         
-        # Ensure alias mirrors exist (important when running single stages)
-        self._ensure_training_aliases()
-
         # Initialize wandb
         wandb_logger = self._setup_wandb("single_run")
         
@@ -336,9 +293,6 @@ class ExperimentRunner:
             
             # Create model-specific config
             model_config = self._create_model_config(model_name)
-
-            # Ensure aliases for each model config as well
-            self._ensure_training_aliases(model_config)
             
             # Setup wandb for this model
             wandb_logger = self._setup_wandb(f"comparison_{model_name}")
@@ -430,15 +384,7 @@ class ExperimentRunner:
                 raise FileNotFoundError("Missing pretrained components in config.pretrained for skipped Stage 1")
             component_paths = {'encoder': encoder_path, 'decoder': decoder_path, 'metric': metric_path}
         else:
-            stage1_cfg = OmegaConf.merge(
-                OmegaConf.create({
-                    'architecture': self.config.settings.training.stage_overrides.stage_a.architecture,
-                    'latent_dim': self.config.settings.training.stage_overrides.stage_a.latent_dim,
-                    'epochs': self.config.settings.training.stage_overrides.stage_a.epochs,
-                    'batch_size': self.config.settings.training.stage_overrides.stage_a.batch_size
-                }),
-                self.config.experiment.stage_a if hasattr(self.config.experiment, 'stage_a') else {}
-            )
+            stage1_cfg = self.config.experiment.stage1
             print("\n=== [Pipeline] Stage 1: Vanilla VAE + Diverse Metric ===")
             architecture = getattr(stage1_cfg, 'architecture', 'mlp') if hasattr(stage1_cfg, 'architecture') else 'mlp'
             latent_dim = getattr(stage1_cfg, 'latent_dim', 16) if hasattr(stage1_cfg, 'latent_dim') else 16
@@ -448,17 +394,7 @@ class ExperimentRunner:
             preset = getattr(stage1_cfg, 'preset', 'balanced') if hasattr(stage1_cfg, 'preset') else 'balanced'
             n_heatmaps = getattr(stage1_cfg, 'n_heatmaps', 6) if hasattr(stage1_cfg, 'n_heatmaps') else 6
             data_config_name = getattr(stage1_cfg, 'data', 'cyclic_sprites')
-            data_presets = {
-                'cyclic_sprites': {
-                    'train_path': 'data/processed/Sprites_train_cyclic.pt',
-                    'test_path': 'data/processed/Sprites_test_cyclic.pt'
-                },
-                'ellipse_sequences': {
-                    'train_path': getattr(self.config.data, 'train_path', None),
-                    'test_path': getattr(self.config.data, 'test_path', None)
-                }
-            }
-            data_cfg = data_presets.get(data_config_name, data_presets['cyclic_sprites'])
+            data_cfg = self.config.data if data_config_name == self.config.data.get('name', data_config_name) else hydra.compose(config_name=data_config_name, overrides=[]).data
             train_data_path = data_cfg.get('train_path', 'data/processed/Sprites_train_cyclic.pt')
             test_data_path = data_cfg.get('test_path', 'data/processed/Sprites_test_cyclic.pt')
             print(f"[Stage 1] Using train data: {train_data_path}")
@@ -470,17 +406,22 @@ class ExperimentRunner:
             val_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
 
             # --- MANUAL PATCH: Set model.sequence_length and n_flows from dataset (ALWAYS RUN) ---
+            from omegaconf import OmegaConf
+            OmegaConf.set_struct(self.config.model, False)
             import torch
             raw_data = torch.load(self.config.data.train_path, map_location='cpu')
             if raw_data.ndim >= 2:
                 detected_seq_len = raw_data.shape[1]
             else:
                 detected_seq_len = 1
-            self._set_config_value(self.config, "model.sequence_length", detected_seq_len)
-            self._set_config_value(self.config, "model.n_flows", detected_seq_len - 1)
-            self._set_config_value(stage_a_base, "model.sequence_length", detected_seq_len)
-            self._set_config_value(stage_a_base, "model.n_flows", detected_seq_len - 1)
-            print(f"[PATCH] Stage A auto sequence_length={detected_seq_len}, n_flows={detected_seq_len - 1}")
+            self.config.model.sequence_length = detected_seq_len
+            self.config.model.n_flows = detected_seq_len - 1
+            print(f"[PATCH] Set self.config.model.sequence_length = {detected_seq_len}")
+            print(f"[PATCH] Set self.config.model.n_flows = {detected_seq_len - 1}")
+            assert self.config.model.n_flows == self.config.model.sequence_length - 1, (
+                f"[CONFIG ERROR] n_flows ({self.config.model.n_flows}) != sequence_length - 1 ({self.config.model.sequence_length - 1})! "
+                "Check your config overrides."
+            )
             # Ensure input_dim is set from data config for Stage 1 (robust automation)
             input_dim = [self.config.data.channels, self.config.data.image_size[0], self.config.data.image_size[1]]
             model = create_model(architecture, input_dim=tuple(input_dim), latent_dim=latent_dim).to(self.device)
@@ -684,9 +625,9 @@ class ExperimentRunner:
         # --- Stage 2: RLVAE Training ---
         print("\n=== [Pipeline] Stage 2: RLVAE Training ===")
         # Update config for pretrained paths
-        self._set_config_value(self.config, "model.pretrained.encoder_path", component_paths['encoder'])
-        self._set_config_value(self.config, "model.pretrained.decoder_path", component_paths['decoder'])
-        self._set_config_value(self.config, "model.pretrained.metric_path", metric_path)
+        self.config.model.pretrained.encoder_path = component_paths['encoder']
+        self.config.model.pretrained.decoder_path = component_paths['decoder']
+        self.config.model.pretrained.metric_path = metric_path
         # Ensure latent_dim is set from stage2 config if present
         # Resolve all interpolations (e.g., oc.decode expressions) before accessing Stage 2 values
         try:
@@ -696,10 +637,10 @@ class ExperimentRunner:
         stage2_cfg = self.config.experiment.stage2
         latent_dim2 = getattr(stage2_cfg, 'latent_dim', None)
         if latent_dim2 is not None:
-            self._set_config_value(self.config, "model.latent_dim", latent_dim2)
+            self.config.model.latent_dim = latent_dim2
         # --- PATCH: Ensure model.riemannian_beta is set from experiment.stage2 ---
         if hasattr(self.config, 'experiment') and hasattr(self.config.experiment, 'stage2') and hasattr(self.config.experiment.stage2, 'riemannian_beta'):
-            self._set_config_value(self.config, "model.riemannian_beta", self.config.experiment.stage2.riemannian_beta)
+            self.config.model.riemannian_beta = self.config.experiment.stage2.riemannian_beta
             print(f"[PATCH] Set self.config.model.riemannian_beta = {self.config.model.riemannian_beta}")
         # --- PATCH: Ensure model.n_flows is set from experiment.stage2 ---
         if hasattr(self.config, 'experiment') and hasattr(self.config.experiment, 'stage2') and hasattr(self.config.experiment.stage2, 'n_flows'):
@@ -720,14 +661,14 @@ class ExperimentRunner:
                         print(f"[PATCH] Coerced stage2.n_flows string to int: {n_flows_val}")
                     except Exception:
                         pass
-            self._set_config_value(self.config, "model.n_flows", n_flows_val)
+            self.config.model.n_flows = n_flows_val
             print(f"[PATCH] Set self.config.model.n_flows = {self.config.model.n_flows}")
         # Ensure input_dim is set from data config for Stage 2 (robust automation)
-        self._set_config_value(self.config, "model.input_dim", [
+        self.config.model.input_dim = [
             self.config.data.channels,
             self.config.data.image_size[0],
             self.config.data.image_size[1]
-        ])
+        ]
         # Ensure visualization level respects CLI overrides; only apply stage2 default if no CLI override
         visualization_level2 = getattr(stage2_cfg, 'visualization', None)
         cli_overrides_visualization = False
@@ -742,7 +683,12 @@ class ExperimentRunner:
         except Exception:
             pass
         if visualization_level2 is not None and not cli_overrides_visualization:
-            self._set_config_value(self.config, "visualization.level", visualization_level2)
+            if hasattr(self.config, 'visualization') and hasattr(self.config.visualization, 'level'):
+                self.config.visualization.level = visualization_level2
+            elif hasattr(self.config, 'visualization') and isinstance(self.config.visualization, dict):
+                self.config.visualization['level'] = visualization_level2
+            else:
+                self.config.visualization = {'level': visualization_level2}
         elif cli_overrides_visualization:
             print("[PATCH] Respecting CLI visualization override; not applying stage2.visualization")
         # === PATCH: Ensure evaluation config is present for Stage 2 ===
@@ -754,17 +700,19 @@ class ExperimentRunner:
             self.config.evaluation = eval_cfg
         # === END PATCH ===
         # --- FINAL PATCH: Set model.sequence_length and n_flows right before Stage 2 model creation ---
+        from omegaconf import OmegaConf
+        OmegaConf.set_struct(self.config.model, False)  # <-- must be first!
         import torch
         raw_data = torch.load(self.config.data.train_path, map_location='cpu')
         if raw_data.ndim >= 2:
             detected_seq_len = raw_data.shape[1]
         else:
             detected_seq_len = 1
-        self._set_config_value(self.config, "model.sequence_length", detected_seq_len)
-
+        self.config.model.sequence_length = detected_seq_len
+        
         # CRITICAL FIX: Only override n_flows if not explicitly set in stage2 config
         if not (hasattr(self.config, 'experiment') and hasattr(self.config.experiment, 'stage2') and hasattr(self.config.experiment.stage2, 'n_flows')):
-            self._set_config_value(self.config, "model.n_flows", detected_seq_len - 1)
+            self.config.model.n_flows = detected_seq_len - 1
             print(f"[FINAL PATCH] Auto-set self.config.model.n_flows = {detected_seq_len - 1}")
         else:
             print(f"[FINAL PATCH] Keeping user-specified self.config.model.n_flows = {self.config.model.n_flows}")
@@ -776,11 +724,11 @@ class ExperimentRunner:
         print("[FINAL PATCH] Model config before creation:")
         print(OmegaConf.to_yaml(self.config.model))
         # Ensure input_dim is set from data config for Stage 2 (robust automation)
-        self._set_config_value(self.config, "model.input_dim", [
+        self.config.model.input_dim = [
             self.config.data.channels,
             self.config.data.image_size[0],
             self.config.data.image_size[1]
-        ])
+        ]
         # Ensure visualization level respects CLI overrides; only apply stage2 default if no CLI override
         visualization_level2 = getattr(stage2_cfg, 'visualization', None)
         cli_overrides_visualization = False
@@ -922,50 +870,10 @@ class ExperimentRunner:
             except Exception as e:
                 print(f"⚠️ WandB initialization failed: {e}")
                 print("Continuing without WandB logging...")
-                self._set_config_value(self.config, "wandb.mode", "disabled")
-                cfg = self.config
-
-        # ============================================================================
-        # CENTRALIZED STAGE DATA LOOKUP - ELIMINATE ALL DUPLICATION
-        # ============================================================================
-        print("\n=== [CENTRALIZED] Stage Data Lookup ===")
-        
-        # Define architecture and latent_dim once
-        arch = cfg.model.encoder.architecture if hasattr(cfg.model, 'encoder') and cfg.model.encoder is not None else 'mlp'
-        latent_dim = cfg.model.latent_dim
-        metric_impl = cfg.experiment.stage_b.implementation
-        
-        print(f"[CENTRALIZED] Architecture: {arch}, Latent dim: {latent_dim}")
-        print(f"[CENTRALIZED] Metric implementation: {metric_impl}")
-        
-        # Find Stage A and B data ONCE at the beginning
-        stage_a_data = None
-        stage_b_data = None
-        
-        if getattr(cfg.experiment, 'run_stage_b', True) or getattr(cfg.experiment, 'run_stage_c', True):
-            print(f"[CENTRALIZED] Looking up Stage A data...")
-            stage_a_data = find_stage_a_data(cfg, arch, latent_dim)
-            if stage_a_data:
-                print(f"[CENTRALIZED] ✅ Found Stage A data: {stage_a_data['base_dir']}")
-            else:
-                print(f"[CENTRALIZED] ❌ No Stage A data found")
-        
-        if getattr(cfg.experiment, 'run_stage_c', True):
-            print(f"[CENTRALIZED] Looking up Stage B data...")
-            stage_b_data = find_stage_b_data(cfg, arch, latent_dim, metric_impl.upper())
-            if stage_b_data:
-                print(f"[CENTRALIZED] ✅ Found Stage B data: {stage_b_data['base_dir']}")
-            else:
-                print(f"[CENTRALIZED] ❌ No Stage B data found")
-        
-        print(f"[CENTRALIZED] Stage data lookup completed")
-        print("=" * 50)
+                cfg.wandb.mode = "disabled"
 
         # Stage A: Train base model
         if getattr(cfg.experiment, 'run_stage_a', True):
-            stage_a_base = self.config
-            self.config = OmegaConf.create(OmegaConf.to_container(stage_a_base, resolve=False))
-            cfg = self.config
             model_choice = str(getattr(cfg.experiment.stage_a, 'model', 'vanilla_vae')).lower()
             # Set defaults if not specified
             arch = getattr(cfg.model.encoder, 'architecture', 'mlp')
@@ -1466,9 +1374,6 @@ class ExperimentRunner:
                 torch.save(vanilla.state_dict(), stageA_paths['model_path'])
                 
                 # Save Stage A configuration
-                beta_value = getattr(cfg.experiment.stage_a, 'beta', None)
-                if beta_value is None:
-                    beta_value = getattr(self.config.settings.model.losses, 'beta', None)
                 stageA_config = {
                     'stage': 'A',
                     'model_type': 'VANILLA',
@@ -1476,7 +1381,7 @@ class ExperimentRunner:
                     'latent_dim': latent_dim,
                     'epochs': cfg.experiment.stage_a.epochs,
                     'lr': cfg.experiment.stage_a.lr,
-                    'beta': beta_value,
+                    'beta': cfg.experiment.stage_a.beta,
                     'timestamp': datetime.now().isoformat()
                 }
                 with open(stageA_paths['config_path'], 'w') as f:
@@ -1498,43 +1403,10 @@ class ExperimentRunner:
                     except Exception as e:
                         print(f"[Stage A] ⚠️ Artifact logging failed: {e}")
                     # keep single run open
-            self.config = stage_a_base
-            cfg = self.config
         else:
-            # Stage A was skipped (e.g., running Stage C only). Reuse centralized lookup
-            # results to populate the pretrained paths so downstream code can load the
-            # correct encoder/decoder automatically.
-            if stage_a_data is not None:
-                enc_path = str(stage_a_data['encoder_path'])
-                dec_path = str(stage_a_data['decoder_path'])
-                # Populate compatibility mirrors only when they have not been overridden already.
-                ExperimentRunner._set_config_value_if_missing(self.config, "pretrained.encoder_path", enc_path)
-                ExperimentRunner._set_config_value_if_missing(self.config, "pretrained.decoder_path", dec_path)
-                ExperimentRunner._set_config_value_if_missing(self.config, "settings.model.pretrained.encoder_path", enc_path)
-                ExperimentRunner._set_config_value_if_missing(self.config, "settings.model.pretrained.decoder_path", dec_path)
-                ExperimentRunner._set_config_value_if_missing(self.config, "model.pretrained.encoder_path", enc_path)
-                ExperimentRunner._set_config_value_if_missing(self.config, "model.pretrained.decoder_path", dec_path)
-
-            pretrained_section = getattr(cfg, 'pretrained', None)
-            encoder_path = getattr(pretrained_section, 'encoder_path', None) if pretrained_section is not None else None
-            decoder_path = getattr(pretrained_section, 'decoder_path', None) if pretrained_section is not None else None
-
-            if encoder_path is None or decoder_path is None:
-                missing = []
-                if encoder_path is None:
-                    missing.append("encoder_path")
-                if decoder_path is None:
-                    missing.append("decoder_path")
-                msg = ", ".join(missing)
-                raise RuntimeError(
-                    f"Stage A artifacts are required when skipping Stage A, but missing: {msg}. "
-                    "Either run Stage A first or provide --overrides pretrained.encoder_path=... "
-                    "and pretrained.decoder_path=...."
-                )
-
             comp_paths = {
-                'encoder': encoder_path,
-                'decoder': decoder_path
+                'encoder': cfg.pretrained.encoder_path,
+                'decoder': cfg.pretrained.decoder_path
             }
 
         def _log_stage_b_wandb_visuals(metric_state, stageB_model, sample_tensor, data_train_path, canonical_arch, latent_dim, metric_save_path=None, extended_visuals=False):
@@ -2103,9 +1975,6 @@ class ExperimentRunner:
 
         # Stage B: Metric learning at t=0
         if getattr(cfg.experiment, 'run_stage_b', True):
-            stage_b_base = self.config
-            self.config = OmegaConf.create(OmegaConf.to_container(stage_b_base, resolve=False))
-            cfg = self.config
             print("\n=== [Stage B] Metric learning at t=0 ===")
             arch = cfg.model.encoder.architecture
             latent_dim = cfg.model.latent_dim
@@ -2168,8 +2037,8 @@ class ExperimentRunner:
             if (metric_impl in ('rhvae', 'precision')) and data_train_path is None:
                 raise RuntimeError("Stage B requires a train dataset (data.train_path) but none was provided and automatic generation failed")
             
-            # Use centralized Stage A data (already looked up)
-            # stage_a_data is already available from centralized lookup
+            # Try to find Stage A data automatically
+            stage_a_data = find_stage_a_data(cfg, arch, latent_dim)
             
             # Fix the metric_file reference for WandB logging
             metric_file = stageB_paths['metric_path']
@@ -2242,7 +2111,7 @@ class ExperimentRunner:
                     )
                 
                 # Force 150 centroids for Stage B extraction (RHVAE implementation)
-                n_centroids_local = 300
+                n_centroids_local = 150
                 print(f"[Stage B] Overriding number of centroids to {n_centroids_local}")
                 metric_path = extract_diverse_metric(
                     model=stageB_model,
@@ -2276,7 +2145,7 @@ class ExperimentRunner:
                 
                 # Precision metric from posterior: reuse extraction with local KNN covariance -> invert
                 # Force 150 centroids for Stage B extraction (per request)
-                n_centroids_local = 300
+                n_centroids_local = 150
                 print(f"[Stage B] Overriding number of centroids to {n_centroids_local}")
                 metric_path = extract_diverse_metric(
                     model=stageB_model,
@@ -2371,7 +2240,7 @@ class ExperimentRunner:
                 'temperature': metric_temp_cfg,
                 'selected_temperature': metric_temp_selected,
                 'regularization': cfg.experiment.stage_b.regularization,
-                'n_centroids': 300,
+                'n_centroids': 150,
                 'centroid_method': cfg.experiment.stage_b.centroid_method,
                 'neighbor_mode': cfg.experiment.stage_b.neighbor_mode,
                 'knn_k': cfg.experiment.stage_b.knn_k,
@@ -2559,8 +2428,7 @@ class ExperimentRunner:
             from src.models.samplers.hmc_sampler import RHVAEVolumeElementHMCSampler
             loader = MetricLoader(device=self.device)
             # Use Stage B metric if available, otherwise fallback
-            # Use centralized Stage B data (already looked up)
-            stage_b_data_for_sampling = stage_b_data
+            stage_b_data_for_sampling = find_stage_b_data(cfg, arch, latent_dim, metric_impl.upper())
             # Define metric_file for sampling if not already defined
             if 'metric_file' not in locals():
                 metric_file = stage_b_data_for_sampling['metric_path'] if stage_b_data_for_sampling else None
@@ -2685,19 +2553,8 @@ class ExperimentRunner:
                 beta_zero=1.0
             )
             samples = rhmc.sample(n_samples=1024)
-            metric_dir = getattr(cfg.checkpoint, "metric_dir", None)
-            if not metric_dir:
-                metric_dir = getattr(cfg.checkpoint, "stageB_dir", None)
-            if not metric_dir:
-                metric_dir = getattr(cfg.checkpoint, "dir", None)
-            if not metric_dir:
-                metric_dir = getattr(cfg.settings.pipeline.outputs, "stage_b_dir", None)
-            if metric_dir is None:
-                raise RuntimeError("Unable to determine target directory for RHMC samples (checkpoint.metric_dir/stageB_dir/dir missing)")
-            metric_dir_path = Path(metric_dir)
-            metric_dir_path.mkdir(parents=True, exist_ok=True)
-            torch.save({'samples': samples.detach().cpu()}, metric_dir_path / cfg.checkpoint.rhmc_samples)
-            print(f"[Sampling] Saved RHMC samples to {metric_dir_path / cfg.checkpoint.rhmc_samples}")
+            torch.save({'samples': samples.detach().cpu()}, Path(cfg.checkpoint.metric_dir) / cfg.checkpoint.rhmc_samples)
+            print(f"[Sampling] Saved RHMC samples to {Path(cfg.checkpoint.metric_dir) / cfg.checkpoint.rhmc_samples}")
             # (Disabled raw z overlay by request; PCA overlays logged below)
 
             # PCA(2) visualization on manifold t=0 with RHMC overlay and reconstructions
@@ -2916,14 +2773,8 @@ class ExperimentRunner:
             except Exception as e:
                 print(f"[Stage B] ⚠️ PCA RHMC overlay failed: {e}")
 
-            self.config = stage_b_base
-            cfg = self.config
-
         # Stage C: RLVAE
         if getattr(cfg.experiment, 'run_stage_c', True):
-            stage_c_base = self.config
-            self.config = OmegaConf.create(OmegaConf.to_container(stage_c_base, resolve=False))
-            cfg = self.config
             print("\n=== [Stage C] RLVAE training ===")
             
             # Define architecture and latent_dim for Stage C
@@ -2934,62 +2785,14 @@ class ExperimentRunner:
             # Get organized Stage C paths
             stageC_paths = get_stage_paths(cfg, 'C', 'RLVAE', arch, latent_dim)
             
-            # Use centralized Stage A and B data (already looked up)
-            # stage_a_data and stage_b_data are already available from centralized lookup
-        
-        # Use enhanced component loader to reduce init phases (SINGLE LOADING)
-        if hasattr(cfg.experiment, 'initialization') and cfg.experiment.initialization.get('track_phases', False):
-            print("[ENHANCED] Using enhanced component loader to reduce init phases")
-            component_loader = EnhancedComponentLoader(cfg)
-            all_components = component_loader.load_all_components(stage_a_data, stage_b_data)
+            # Try to find Stage A and B data automatically
+            # For Stage C, we specifically want RHVAE Stage A data, not vanilla VAE
+            stage_a_data = find_stage_a_data(cfg, arch, latent_dim)
+            stage_b_data = find_stage_b_data(cfg, arch, latent_dim, metric_impl.upper())
             
-            # Update config with loaded components (NO DUPLICATE LOADING)
-            if 'encoder' in all_components and stage_a_data:
-                self._set_config_value(cfg, "model.pretrained.encoder_path", str(stage_a_data['encoder_path']))
-            if 'decoder' in all_components and stage_a_data:
-                self._set_config_value(cfg, "model.pretrained.decoder_path", str(stage_a_data['decoder_path']))
-            if 'metric' in all_components and stage_b_data:
-                self._set_config_value(cfg, "model.pretrained.metric_path", str(stage_b_data['metric_path']))
-            
-            print(f"[ENHANCED] Loaded {len(all_components)} components in single phase")
-            
-            # Continue with Stage C training after enhanced loading
-            print(f"\n=== [Stage C] CONTINUING WITH RLVAE TRAINING ===")
-            print(f"[Stage C] Enhanced component loading completed, proceeding with model training...")
-            
-            # Create and train the RLVAE model with loaded components
-            try:
-                # Create data module
-                data_module = build_data_module(cfg.data)
-                
-                # Create model wrapper with pretrained components
-                model_wrapper = LightningRlVAETrainer(
-                    cfg,
-                    data_module=data_module
-                )
-                
-                # Create trainer
-                wandb_logger = self._setup_wandb("stage_c_enhanced")
-                trainer = self._create_trainer(wandb_logger)
-                
-                # Train the model
-                print(f"[Stage C] 🚀 Starting RLVAE training with enhanced components...")
-                trainer.fit(model_wrapper, data_module)
-                
-                print(f"[Stage C] ✅ RLVAE training completed successfully!")
-                # Reuse the trained wrapper later if needed; also avoid
-                # re-instantiation that causes metric to be loaded twice.
-                self._stage_c_model_wrapper = model_wrapper
-                
-            except Exception as e:
-                print(f"[Stage C] ❌ RLVAE training failed: {e}")
-                raise
-            # Enhanced path completes here; avoid legacy path below that
-            # would recreate the model and reload the metric a second time.
-            return
-        else:
-            # Fallback: Load components individually (legacy method)
-            print("[LEGACY] Using individual component loading")
+            # Accept whatever Stage A data exists (RHVAE or VANILLA)
+            # For ModRLVAE, vanilla enc/dec are perfectly valid.
+            pass
             
             # Define metric_file for fallback cases
             metric_file = stage_b_data['metric_path'] if stage_b_data else None
@@ -3014,66 +2817,65 @@ class ExperimentRunner:
                 print(f"  - Metric: {stage_b_data['metric_path']}")
                 print(f"  - Config: {stage_b_data['config_path']}")
             
-            # Wire metric path and pretrained components into model config (LEGACY METHOD ONLY)
-            if not (hasattr(cfg.experiment, 'initialization') and cfg.experiment.initialization.get('track_phases', False)):
-                if stage_b_data is not None:
-                    # Always set the pretrained metric path (works across model variants)
-                    try:
-                        self._set_config_value_if_missing(self.config, "model.pretrained.metric_path", str(stage_b_data['metric_path']))
-                    except Exception as e:
-                        print(f"[Stage C] ⚠️ Could not set pretrained.metric_path: {e}")
-                    # Try to set fixed metric path on metric block when schema supports it
-                    try:
-                        if hasattr(self.config.model, 'metric') and self.config.model.metric is not None:
-                            # Only set if key exists to avoid struct errors
-                            try:
-                                if 'fixed_metric_path' in self.config.model.metric:
-                                    self._set_config_value_if_missing(self.config, "model.metric.fixed_metric_path", str(stage_b_data['metric_path']))
-                            except Exception:
-                                pass
-                            try:
-                                if 'temperature_override' in self.config.model.metric:
-                                    self._set_config_value_if_missing(self.config, "model.metric.temperature_override", None)
-                            except Exception:
-                                pass
-                            try:
-                                # For Phase‑2 adaptability: initialize trainable net from fixed metric
-                                if 'init_from_fixed' in self.config.model.metric:
-                                    self._set_config_value_if_missing(self.config, "model.metric.init_from_fixed", True)
-                                if 'trainable' in self.config.model.metric:
-                                    self._set_config_value_if_missing(self.config, "model.metric.trainable", True)
-                                if 'architecture' in self.config.model.metric and not self.config.model.metric.architecture:
-                                    self._set_config_value_if_missing(self.config, "model.metric.architecture", 'mlp')
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        # Non-fatal; different model schemas may not expose these keys
-                        print(f"[Stage C] ℹ️ Skipping metric.fixed_metric_path/init_from_fixed wiring: {e}")
-                    print(f"[Stage C] ✅ Using Stage B metric: {stage_b_data['metric_path']}")
+            # Wire metric path and pretrained components into model config
+            if stage_b_data is not None:
+                # Always set the pretrained metric path (works across model variants)
+                try:
+                    self.config.model.pretrained.metric_path = str(stage_b_data['metric_path'])
+                except Exception as e:
+                    print(f"[Stage C] ⚠️ Could not set pretrained.metric_path: {e}")
+                # Try to set fixed metric path on metric block when schema supports it
+                try:
+                    if hasattr(self.config.model, 'metric') and self.config.model.metric is not None:
+                        # Only set if key exists to avoid struct errors
+                        try:
+                            if 'fixed_metric_path' in self.config.model.metric:
+                                self.config.model.metric.fixed_metric_path = str(stage_b_data['metric_path'])
+                        except Exception:
+                            pass
+                        try:
+                            if 'temperature_override' in self.config.model.metric:
+                                self.config.model.metric.temperature_override = None
+                        except Exception:
+                            pass
+                        try:
+                            # For Phase‑2 adaptability: initialize trainable net from fixed metric
+                            if 'init_from_fixed' in self.config.model.metric:
+                                self.config.model.metric.init_from_fixed = True
+                            if 'trainable' in self.config.model.metric:
+                                self.config.model.metric.trainable = True
+                            if 'architecture' in self.config.model.metric and not self.config.model.metric.architecture:
+                                self.config.model.metric.architecture = 'mlp'
+                        except Exception:
+                            pass
+                except Exception as e:
+                    # Non-fatal; different model schemas may not expose these keys
+                    print(f"[Stage C] ℹ️ Skipping metric.fixed_metric_path/init_from_fixed wiring: {e}")
+                print(f"[Stage C] ✅ Using Stage B metric: {stage_b_data['metric_path']}")
+            else:
+                # Fallback to old method
+                if metric_file is not None:
+                    self.config.model.pretrained.metric_path = str(metric_file)
+                    self.config.model.metric.fixed_metric_path = str(metric_file)
+                    # Allow metric to update during training for better temporal dynamics
+                    self.config.model.metric.init_from_fixed = False
+                    print(f"[Stage C] ⚠️ Using fallback metric: {metric_file}")
                 else:
-                    # Fallback to old method
-                    if metric_file is not None:
-                        self._set_config_value_if_missing(self.config, "model.pretrained.metric_path", str(metric_file))
-                        self._set_config_value_if_missing(self.config, "model.metric.fixed_metric_path", str(metric_file))
-                        # Allow metric to update during training for better temporal dynamics
-                        self._set_config_value_if_missing(self.config, "model.metric.init_from_fixed", False)
-                        print(f"[Stage C] ⚠️ Using fallback metric: {metric_file}")
-                    else:
-                        print(f"[Stage C] ❌ No metric file found!")
-                        raise ValueError("No metric file available for Stage C")
-                
-                if stage_a_data is not None:
-                    self._set_config_value_if_missing(self.config, "model.pretrained.encoder_path", str(stage_a_data['encoder_path']))
-                    self._set_config_value_if_missing(self.config, "model.pretrained.decoder_path", str(stage_a_data['decoder_path']))
-                    print(f"[Stage C] ✅ Using Stage A encoder/decoder:")
-                    print(f"  - Encoder: {stage_a_data['encoder_path']}")
-                    print(f"  - Decoder: {stage_a_data['decoder_path']}")
-                elif 'encoder' in comp_paths:
-                    self._set_config_value_if_missing(self.config, "model.pretrained.encoder_path", comp_paths['encoder'])
-                    self._set_config_value_if_missing(self.config, "model.pretrained.decoder_path", comp_paths['decoder'])
-                    print(f"[Stage C] ⚠️ Using fallback encoder/decoder: {comp_paths['encoder']}")
-                else:
-                    print(f"[Stage C] ❌ No encoder/decoder found!")
+                    print(f"[Stage C] ❌ No metric file found!")
+                    raise ValueError("No metric file available for Stage C")
+            
+            if stage_a_data is not None:
+                self.config.model.pretrained.encoder_path = str(stage_a_data['encoder_path'])
+                self.config.model.pretrained.decoder_path = str(stage_a_data['decoder_path'])
+                print(f"[Stage C] ✅ Using Stage A encoder/decoder:")
+                print(f"  - Encoder: {stage_a_data['encoder_path']}")
+                print(f"  - Decoder: {stage_a_data['decoder_path']}")
+            elif 'encoder' in comp_paths:
+                self.config.model.pretrained.encoder_path = comp_paths['encoder']
+                self.config.model.pretrained.decoder_path = comp_paths['decoder']
+                print(f"[Stage C] ⚠️ Using fallback encoder/decoder: {comp_paths['encoder']}")
+            else:
+                print(f"[Stage C] ❌ No encoder/decoder found!")
             
             print(f"[Stage C] Final config paths:")
             print(f"  - Encoder: {self.config.model.pretrained.encoder_path}")
@@ -3117,9 +2919,9 @@ class ExperimentRunner:
                         print(f"  - ⚠️ MISMATCH DETECTED! Stage A and Stage C have different architecture/latent_dim!")
                         print(f"  - Forcing Stage C to use Stage A parameters...")
                         # Force Stage C to use Stage A's architecture and latent_dim
-                        self._set_config_value_if_missing(self.config, "model.encoder.architecture", stage_a_arch)
-                        self._set_config_value_if_missing(self.config, "model.decoder.architecture", stage_a_arch)
-                        self._set_config_value_if_missing(self.config, "model.latent_dim", stage_a_ld)
+                        self.config.model.encoder.architecture = stage_a_arch
+                        self.config.model.decoder.architecture = stage_a_arch
+                        self.config.model.latent_dim = stage_a_ld
                         print(f"  - ✅ Updated Stage C config to match Stage A")
                     else:
                         print(f"  - ✅ Architecture and latent_dim match between Stage A and Stage C")
@@ -3152,55 +2954,63 @@ class ExperimentRunner:
                     elif M_ is not None and M_.ndim == 3:
                         ld = int(M_.shape[-1])
                 if ld is not None:
-                    self._set_config_value_if_missing(self.config, "model.latent_dim", int(ld))
+                    self.config.model.latent_dim = int(ld)
                     print(f"[Stage C] Set model.latent_dim = {self.config.model.latent_dim} from Stage A metric")
                 # Fallback: read encoder/decoder paths from metric payload if not already set
                 try:
                     if not getattr(self.config.model.pretrained, 'encoder_path', None):
                         enc_p = state_metric.get('encoder_path', None)
                         if enc_p:
-                            self._set_config_value_if_missing(self.config, "model.pretrained.encoder_path", enc_p)
+                            self.config.model.pretrained.encoder_path = enc_p
                     if not getattr(self.config.model.pretrained, 'decoder_path', None):
                         dec_p = state_metric.get('decoder_path', None)
                         if dec_p:
-                            self._set_config_value_if_missing(self.config, "model.pretrained.decoder_path", dec_p)
+                            self.config.model.pretrained.decoder_path = dec_p
                 except Exception:
                     pass
             except Exception as e:
                 print(f"[Stage C] ⚠️ Could not set latent_dim from metric: {e}")
             # Epoch override
-            self._set_config_value_if_missing(self.config, "training.trainer.max_epochs", cfg.experiment.stage_c.epochs)
+            self.config.training.trainer.max_epochs = cfg.experiment.stage_c.epochs
 
             # Apply Stage C model overrides (posterior/KL parameters etc.)
             try:
                 sc = cfg.experiment.stage_c
                 # Propagate riemannian_beta if provided at stage level
                 if hasattr(sc, 'riemannian_beta') and sc.riemannian_beta is not None:
-                    self._set_config_value_if_missing(self.config, "model.riemannian_beta", float(sc.riemannian_beta))
+                    self.config.model.riemannian_beta = float(sc.riemannian_beta)
                 # Propagate sampling method if present
                 if hasattr(sc, 'sampling') and sc.sampling is not None and hasattr(sc.sampling, 'method'):
-                    self._set_config_value_if_missing(self.config, "model.sampling.method", sc.sampling.method)
+                    if not hasattr(self.config.model, 'sampling'):
+                        self.config.model.sampling = {}
+                    self.config.model.sampling.method = sc.sampling.method
                 # Generic overrides map (applied to model fields)
                 if hasattr(sc, 'overrides') and sc.overrides is not None:
                     for k, v in sc.overrides.items():
                         try:
-                            self._set_config_value_if_missing(self.config, f"model.{k}", v)
+                            setattr(self.config.model, k, v)
                         except Exception:
                             # Non‑fatal for structured configs
                             pass
                 # Force n_flows if provided at stage C level
                 try:
                     if hasattr(sc, 'n_flows') and sc.n_flows is not None:
-                        self._set_config_value_if_missing(self.config, "model.n_flows", int(sc.n_flows))
+                        self.config.model.n_flows = int(sc.n_flows)
                 except Exception:
                     pass
                 # Merge any training overrides declared inside experiment.stage_c (e.g., metric alternation)
                 try:
                     if hasattr(sc, 'training') and sc.training is not None:
                         # Shallow merge metric_alternation
-                        if hasattr(sc.training, 'metric_alternation'):
+                        tr = getattr(self.config, 'training', None)
+                        if tr is not None and hasattr(sc.training, 'metric_alternation'):
+                            if not hasattr(tr, 'metric_alternation'):
+                                tr.metric_alternation = {}
                             for k, v in sc.training.metric_alternation.items():
-                                self._set_config_value_if_missing(self.config, f"training.metric_alternation.{k}", v)
+                                try:
+                                    tr.metric_alternation[k] = v
+                                except Exception:
+                                    pass
                 except Exception as e:
                     print(f"[Stage C] ⚠️ Failed to merge training overrides: {e}")
             except Exception as e:
@@ -3209,7 +3019,7 @@ class ExperimentRunner:
             # Use fully modular Stage C (ModRLVAE) - respect existing target if set
             try:
                 if not hasattr(self.config.model, '_target_') or not self.config.model._target_:
-                    self._set_config_value_if_missing(self.config, "model._target_", 'rlvae.models.modular_rlvae.ModularRiemannianFlowVAE')
+                    self.config.model._target_ = 'rlvae.models.modular_rlvae.ModularRiemannianFlowVAE'
                 else:
                     print(f"[Stage C] Using existing model target: {self.config.model._target_}")
             except Exception:
@@ -3217,14 +3027,19 @@ class ExperimentRunner:
 
             # Resolve input_dim interpolations before model creation
             try:
+                from omegaconf import OmegaConf
                 if (hasattr(self.config, 'data') and 
                     hasattr(self.config.data, 'channels') and 
                     hasattr(self.config.data, 'image_size')):
-                    self._set_config_value_if_missing(self.config, "model.input_dim", [
+                    
+                    original_struct = OmegaConf.is_struct(self.config.model)
+                    OmegaConf.set_struct(self.config.model, False)
+                    self.config.model.input_dim = [
                         self.config.data.channels,
                         self.config.data.image_size[0],
                         self.config.data.image_size[1]
-                    ])
+                    ]
+                    OmegaConf.set_struct(self.config.model, original_struct)
                     print(f"[Stage C] ✅ Resolved input_dim = {self.config.model.input_dim}")
             except Exception as e:
                 print(f"[Stage C] ⚠️ Failed to resolve input_dim: {e}")
@@ -3234,45 +3049,57 @@ class ExperimentRunner:
                 # Preserve posterior type from config - DON'T override it!
                 # If posterior.type is not set, default to 'riemannian_metric'
                 if hasattr(self.config.model, 'posterior') and self.config.model.posterior is not None:
-                    if not getattr(self.config.model.posterior, 'type', None):
-                        self._set_config_value_if_missing(self.config, "model.posterior.type", 'riemannian_metric')
-                else:
-                    self._set_config_value_if_missing(self.config, "model.posterior.type", 'riemannian_metric')
-                self._set_config_value_if_missing(self.config, "model.posterior_type", getattr(self.config.model.posterior, 'type', 'riemannian_metric'))
+                    try:
+                        if 'type' in self.config.model.posterior:
+                            # Keep the configured posterior type (riemannian_metric, riemannian_rhmc, etc.)
+                            pass  # Don't override!
+                        else:
+                            # Only set default if not already configured
+                            self.config.model.posterior.type = 'riemannian_metric'
+                    except Exception:
+                        pass
+                # Sync top-level posterior_type with posterior.type
+                try:
+                    if hasattr(self.config.model, 'posterior') and hasattr(self.config.model.posterior, 'type'):
+                        self.config.model.posterior_type = self.config.model.posterior.type
+                    elif 'posterior_type' not in self.config.model:
+                        self.config.model.posterior_type = 'riemannian_metric'
+                except Exception:
+                    pass
                 # Sequence length and flows for modular temporal dynamics
                 try:
                     seq_len = int(getattr(self.config.data, 'sequence_length', 0))
                     if seq_len > 0:
                         # Prefer sequence_length; ModRLVAE auto-derives n_flows = seq_len - 1 when n_flows missing
-                        self._set_config_value_if_missing(self.config, "model.sequence_length", seq_len)
-                        self._set_config_value_if_missing(self.config, "model.n_flows", max(0, seq_len - 1))
+                        self.config.model.sequence_length = seq_len
+                        self.config.model.n_flows = max(0, seq_len - 1)
                 except Exception:
                     pass
                 try:
                     if 'riemannian_kl_mode' in self.config.model and (self.config.model.riemannian_kl_mode is None or self.config.model.riemannian_kl_mode == ''):
-                        self._set_config_value_if_missing(self.config, "model.riemannian_kl_mode", 'sample_logq_logp')
+                        self.config.model.riemannian_kl_mode = 'sample_logq_logp'
                 except Exception:
                     pass
                 try:
                     if 'riemannian_beta' in self.config.model and (self.config.model.riemannian_beta is None):
-                        self._set_config_value_if_missing(self.config, "model.riemannian_beta", 1.0)
+                        self.config.model.riemannian_beta = 32.0  # Use optimized value for better μ alignment
                 except Exception:
                     pass
                 # Ensure temporal reconstruction is enabled for RLVAE
                 try:
                     if 'reconstruction_mode' in self.config.model:
-                        self._set_config_value_if_missing(self.config, "model.reconstruction_mode", 'all')
+                        self.config.model.reconstruction_mode = 'all'
                 except Exception:
                     pass
                 # Ensure temporal dynamics are properly configured
                 try:
                     if 'encode_all_timesteps_if_no_flows' in self.config.model:
-                        self._set_config_value_if_missing(self.config, "model.encode_all_timesteps_if_no_flows", True)
+                        self.config.model.encode_all_timesteps_if_no_flows = True
                 except Exception:
                     pass
                 try:
                     if 'kl_over_all_timesteps_if_flows' in self.config.model:
-                        self._set_config_value_if_missing(self.config, "model.kl_over_all_timesteps_if_flows", False)
+                        self.config.model.kl_over_all_timesteps_if_flows = False  # KL only on z₀ (t=0)
                 except Exception:
                     pass
             except Exception:
@@ -3286,13 +3113,13 @@ class ExperimentRunner:
                 # Get the intended posterior type from experiment config (highest priority)
                 intended_posterior_type = None
                 
-                # Priority 1: already-resolved model.posterior.type (includes mega config overrides)
-                if hasattr(self.config.model, 'posterior'):
-                    intended_posterior_type = getattr(self.config.model.posterior, 'type', None)
-                
-                # Priority 2: explicit experiment.model overrides (e.g., stage configs)
-                if intended_posterior_type is None and hasattr(cfg.experiment, 'model') and hasattr(cfg.experiment.model, 'posterior'):
+                # Priority 1: experiment.model.posterior.type (from experiment yaml)
+                if hasattr(cfg.experiment, 'model') and hasattr(cfg.experiment.model, 'posterior'):
                     intended_posterior_type = getattr(cfg.experiment.model.posterior, 'type', None)
+                
+                # Priority 2: model.posterior.type (from model config)
+                if intended_posterior_type is None and hasattr(self.config.model, 'posterior'):
+                    intended_posterior_type = getattr(self.config.model.posterior, 'type', None)
                 
                 # Priority 3: experiment.model.posterior_type (alternative location)
                 if intended_posterior_type is None and hasattr(cfg.experiment, 'model'):
@@ -3301,13 +3128,71 @@ class ExperimentRunner:
                 # If we found an intended type, sync it EVERYWHERE to prevent overrides
                 if intended_posterior_type is not None and intended_posterior_type != '':
                     print(f"[Stage C] 🔒 Forcing posterior type sync: '{intended_posterior_type}'")
-                    for path in [
-                        "model.posterior.type",
-                        "model.posterior_type",
-                        "training.model.posterior.type",
-                        "training.model.posterior_type",
-                    ]:
-                        self._set_config_value(self.config, path, intended_posterior_type)
+                    
+                    # Sync to model.posterior.type
+                    try:
+                        if hasattr(self.config.model, 'posterior'):
+                            self.config.model.posterior.type = intended_posterior_type
+                        else:
+                            from omegaconf import DictConfig
+                            self.config.model.posterior = DictConfig({'type': intended_posterior_type})
+                    except Exception as e:
+                        print(f"[Stage C] ⚠️ Could not set model.posterior.type: {e}")
+                    
+                    # Sync to model.posterior_type (top-level)
+                    try:
+                        # Temporarily disable struct mode to allow setting new keys
+                        original_struct = OmegaConf.is_struct(self.config.model)
+                        OmegaConf.set_struct(self.config.model, False)
+                        self.config.model.posterior_type = intended_posterior_type
+                        OmegaConf.set_struct(self.config.model, original_struct)
+                    except Exception as e:
+                        print(f"[Stage C] ⚠️ Could not set model.posterior_type: {e}")
+                        print(f"    full_key: model.posterior_type")
+                        print(f"    object_type={type(self.config.model)}")
+                    
+                    # Sync to training.model.posterior.type
+                    try:
+                        if hasattr(self.config.training, 'model'):
+                            original_struct = OmegaConf.is_struct(self.config.training.model)
+                            OmegaConf.set_struct(self.config.training.model, False)
+                            if hasattr(self.config.training.model, 'posterior'):
+                                self.config.training.model.posterior.type = intended_posterior_type
+                            else:
+                                from omegaconf import DictConfig
+                                self.config.training.model.posterior = DictConfig({'type': intended_posterior_type})
+                            OmegaConf.set_struct(self.config.training.model, original_struct)
+                        else:
+                            original_struct = OmegaConf.is_struct(self.config.training)
+                            OmegaConf.set_struct(self.config.training, False)
+                            from omegaconf import DictConfig
+                            self.config.training.model = DictConfig({
+                                'posterior': DictConfig({'type': intended_posterior_type})
+                            })
+                            OmegaConf.set_struct(self.config.training, original_struct)
+                    except Exception as e:
+                        print(f"[Stage C] ⚠️ Could not set training.model.posterior.type: {e}")
+                        print(f"    full_key: training.model.posterior.type")
+                        print(f"    object_type={type(self.config.training.model) if hasattr(self.config.training, 'model') else 'no model'}")
+                    
+                    # Sync to training.model.posterior_type (top-level)
+                    try:
+                        if hasattr(self.config.training, 'model'):
+                            original_struct = OmegaConf.is_struct(self.config.training.model)
+                            OmegaConf.set_struct(self.config.training.model, False)
+                            self.config.training.model.posterior_type = intended_posterior_type
+                            OmegaConf.set_struct(self.config.training.model, original_struct)
+                        else:
+                            original_struct = OmegaConf.is_struct(self.config.training)
+                            OmegaConf.set_struct(self.config.training, False)
+                            from omegaconf import DictConfig
+                            self.config.training.model = DictConfig({'posterior_type': intended_posterior_type})
+                            OmegaConf.set_struct(self.config.training, original_struct)
+                    except Exception as e:
+                        print(f"[Stage C] ⚠️ Could not set training.model.posterior_type: {e}")
+                        print(f"    full_key: training.model.posterior_type")
+                        print(f"    object_type={type(self.config.training.model) if hasattr(self.config.training, 'model') else 'no model'}")
+                    
                     print(f"[Stage C] ✅ Posterior type synced to all config locations")
                 else:
                     print(f"[Stage C] ⚠️ No posterior type found in experiment config, using defaults")
@@ -3319,91 +3204,79 @@ class ExperimentRunner:
             # CRITICAL: Force-sync RHMC params and KL toggles across config locations
             # ============================================================================
             try:
-                posterior_cfg = getattr(self.config.model, 'posterior', None)
-                def _posterior_get(attr, fallback=None):
-                    if posterior_cfg is not None and hasattr(posterior_cfg, attr):
-                        return getattr(posterior_cfg, attr)
-                    return fallback
+                # Optimized RHMC defaults for better μ alignment
+                rh_steps = 4
+                rh_eps = 0.02
+                rh_alpha = 0.20
+                safeties = {
+                    'max_momentum_norm': 3.0,
+                    'max_velocity_norm': 1.0,
+                    'max_position_step': 0.5,
+                    'max_position_norm': 8.0,
+                }
+                kl_eval = 'mu'
+                kl_norm = False
+                kl_norm_mode = 'none'
+                mu_l2_w = 0.5
 
-                def _positive_or(default_value, fallback_value):
+                from omegaconf import OmegaConf, DictConfig
+                def _set_safe(cfg_obj, setter):
+                    struct = OmegaConf.is_struct(cfg_obj)
+                    OmegaConf.set_struct(cfg_obj, False)
                     try:
-                        if default_value is None:
-                            raise ValueError
-                        value = float(default_value)
-                        if not math.isfinite(value) or value <= 0.0:
-                            raise ValueError
-                        return value
-                    except Exception:
-                        return fallback_value
+                        setter()
+                    finally:
+                        OmegaConf.set_struct(cfg_obj, struct)
 
-                rh_steps = _posterior_get('rhmc_steps', getattr(self.config.model, 'rhmc_steps', 4))
-                try:
-                    rh_steps = int(rh_steps)
-                except Exception:
-                    rh_steps = 0
+                # model.posterior
+                if hasattr(self.config.model, 'posterior') and self.config.model.posterior is not None:
+                    def set_model_posterior():
+                        self.config.model.posterior.rhmc_steps = rh_steps
+                        self.config.model.posterior.rhmc_step_size = rh_eps
+                        self.config.model.posterior.rhmc_alpha = rh_alpha
+                        self.config.model.posterior.rhmc_eps_reg = getattr(self.config.model.posterior, 'rhmc_eps_reg', 1e-4)
+                        for k, v in safeties.items():
+                            setattr(self.config.model.posterior, k, v)
+                    _set_safe(self.config.model.posterior, set_model_posterior)
+                else:
+                    _set_safe(self.config.model, lambda: setattr(self.config.model, 'posterior', DictConfig({
+                        'rhmc_steps': rh_steps, 'rhmc_step_size': rh_eps, 'rhmc_alpha': rh_alpha, 'rhmc_eps_reg': 1e-4, **safeties
+                    })))
 
-                rh_eps = _posterior_get('rhmc_step_size', getattr(self.config.model, 'rhmc_step_size', 0.02))
-                try:
-                    rh_eps = float(rh_eps)
-                except Exception:
-                    rh_eps = 0.02
-                rh_alpha = _positive_or(
-                    _posterior_get('rhmc_alpha', getattr(self.config.model, 'rhmc_alpha', None)),
-                    getattr(self.config.model, 'posterior_local_alpha', 0.5)
-                )
-                rh_eps_reg = _positive_or(
-                    _posterior_get('rhmc_eps_reg', getattr(self.config.model, 'rhmc_eps_reg', None)),
-                    1e-4
-                )
-                safeties = {}
-                for key, default in (
-                    ('max_momentum_norm', 3.0),
-                    ('max_velocity_norm', 1.0),
-                    ('max_position_step', 0.5),
-                    ('max_position_norm', 8.0),
-                ):
-                    val = _posterior_get(key, default)
-                    try:
-                        safeties[key] = float(val)
-                    except Exception:
-                        safeties[key] = float(default)
-                kl_eval = getattr(self.config.model, 'kl_metric_eval_point', 'z')
-                kl_norm = getattr(self.config.model, 'kl_use_metric_normalization', False)
-                kl_norm_mode = getattr(self.config.model, 'kl_metric_norm_mode', 'none')
-                try:
-                    mu_l2_w = float(getattr(self.config.model, 'mu_l2_weight', 0.0))
-                except Exception:
-                    mu_l2_w = 0.0
+                # model top-level duplicates
+                def set_model_top():
+                    self.config.model.rhmc_steps = rh_steps
+                    self.config.model.rhmc_step_size = rh_eps
+                    self.config.model.rhmc_alpha = rh_alpha
+                    self.config.model.rhmc_eps_reg = getattr(self.config.model, 'rhmc_eps_reg', 1e-4)
+                _set_safe(self.config.model, set_model_top)
 
-                # Mirror into posterior config mirrors
-                self._set_config_value_if_missing(self.config, "model.posterior.rhmc_steps", rh_steps)
-                self._set_config_value_if_missing(self.config, "model.posterior.rhmc_step_size", rh_eps)
-                self._set_config_value_if_missing(self.config, "model.posterior.rhmc_alpha", rh_alpha)
-                self._set_config_value_if_missing(self.config, "model.posterior.rhmc_eps_reg", rh_eps_reg)
-                for k, v in safeties.items():
-                    self._set_config_value_if_missing(self.config, f"model.posterior.{k}", v)
+                # KL toggles at model level
+                def set_model_kl():
+                    self.config.model.kl_metric_eval_point = kl_eval
+                    self.config.model.kl_use_metric_normalization = kl_norm
+                    self.config.model.kl_metric_norm_mode = kl_norm_mode
+                    self.config.model.mu_l2_weight = mu_l2_w
+                _set_safe(self.config.model, set_model_kl)
 
-                # Top-level mirrors expected by downstream code
-                self._set_config_value_if_missing(self.config, "model.rhmc_steps", rh_steps)
-                self._set_config_value_if_missing(self.config, "model.rhmc_step_size", rh_eps)
-                self._set_config_value_if_missing(self.config, "model.rhmc_alpha", rh_alpha)
-                self._set_config_value_if_missing(self.config, "model.rhmc_eps_reg", rh_eps_reg)
-                self._set_config_value_if_missing(self.config, "model.kl_metric_eval_point", kl_eval)
-                self._set_config_value_if_missing(self.config, "model.kl_use_metric_normalization", kl_norm)
-                self._set_config_value_if_missing(self.config, "model.kl_metric_norm_mode", kl_norm_mode)
-                self._set_config_value_if_missing(self.config, "model.mu_l2_weight", mu_l2_w)
+                # training model mirror
+                if hasattr(self.config, 'training'):
+                    if not hasattr(self.config.training, 'model') or self.config.training.model is None:
+                        _set_safe(self.config.training, lambda: setattr(self.config.training, 'model', DictConfig({})))
+                    def set_training_model():
+                        if not hasattr(self.config.training.model, 'posterior') or self.config.training.model.posterior is None:
+                            self.config.training.model.posterior = DictConfig({})
+                        self.config.training.model.posterior.rhmc_steps = rh_steps
+                        self.config.training.model.posterior.rhmc_step_size = rh_eps
+                        self.config.training.model.posterior.rhmc_alpha = rh_alpha
+                        self.config.training.model.posterior.rhmc_eps_reg = getattr(self.config.model, 'rhmc_eps_reg', 1e-4)
+                        self.config.training.model.kl_metric_eval_point = kl_eval
+                        self.config.training.model.kl_use_metric_normalization = kl_norm
+                        self.config.training.model.kl_metric_norm_mode = kl_norm_mode
+                        self.config.training.model.mu_l2_weight = mu_l2_w
+                    _set_safe(self.config.training.model, set_training_model)
 
-                # Training mirrors (Lightning Trainer expects them)
-                self._set_config_value_if_missing(self.config, "training.model.posterior.rhmc_steps", rh_steps)
-                self._set_config_value_if_missing(self.config, "training.model.posterior.rhmc_step_size", rh_eps)
-                self._set_config_value_if_missing(self.config, "training.model.posterior.rhmc_alpha", rh_alpha)
-                self._set_config_value_if_missing(self.config, "training.model.posterior.rhmc_eps_reg", rh_eps_reg)
-                self._set_config_value_if_missing(self.config, "training.model.kl_metric_eval_point", kl_eval)
-                self._set_config_value_if_missing(self.config, "training.model.kl_use_metric_normalization", kl_norm)
-                self._set_config_value_if_missing(self.config, "training.model.kl_metric_norm_mode", kl_norm_mode)
-                self._set_config_value_if_missing(self.config, "training.model.mu_l2_weight", mu_l2_w)
-
-                print(f"[Stage C] 🔒 Synced RHMC params (steps={rh_steps}, step_size={rh_eps}, alpha={rh_alpha}) and KL settings (eval={kl_eval}, norm={kl_norm}, mode={kl_norm_mode}, mu_l2={mu_l2_w})")
+                print(f"[Stage C] 🔒 Enforced RHMC (steps={rh_steps}, eps={rh_eps}, alpha={rh_alpha}) and KL (eval={kl_eval}, norm={kl_norm}, mode={kl_norm_mode}, mu_l2={mu_l2_w})")
             except Exception as e:
                 print(f"[Stage C] ⚠️ Error during RHMC/KL enforcement: {e}")
 
@@ -3417,10 +3290,26 @@ class ExperimentRunner:
                 
                 print(f"[Stage C] 🔧 Enforcing flows count: sequence_length={seq_len} → n_flows={correct_n_flows}")
                 
-                self._set_config_value_if_missing(self.config, "model.sequence_length", seq_len)
-                self._set_config_value_if_missing(self.config, "model.n_flows", correct_n_flows)
-                self._set_config_value_if_missing(self.config, "training.model.n_flows", correct_n_flows)
-                print(f"[Stage C] ✅ Also synced training.model.n_flows = {correct_n_flows}")
+                # Set in model config using struct=False to handle missing keys
+                try:
+                    original_struct = OmegaConf.is_struct(self.config.model)
+                    OmegaConf.set_struct(self.config.model, False)
+                    self.config.model.sequence_length = seq_len
+                    self.config.model.n_flows = correct_n_flows
+                    OmegaConf.set_struct(self.config.model, original_struct)
+                except Exception as e:
+                    print(f"[Stage C] ⚠️ Could not set model.sequence_length/n_flows: {e}")
+                
+                # Also set in training config if it exists
+                try:
+                    if hasattr(self.config.training, 'model'):
+                        original_struct = OmegaConf.is_struct(self.config.training.model)
+                        OmegaConf.set_struct(self.config.training.model, False)
+                        self.config.training.model.n_flows = correct_n_flows
+                        OmegaConf.set_struct(self.config.training.model, original_struct)
+                        print(f"[Stage C] ✅ Also synced training.model.n_flows = {correct_n_flows}")
+                except Exception as e:
+                    print(f"[Stage C] ⚠️ Could not sync training.model.n_flows: {e}")
                     
             except Exception as e:
                 print(f"[Stage C] ⚠️ Error during flows count enforcement: {e}")
@@ -3461,29 +3350,46 @@ class ExperimentRunner:
             print(f"  - kl_over_all_timesteps_if_flows: False (KL only on z₀)")
             # Respect CLI overrides: only set defaults if not provided
             # Posterior type default (do not override if already set)
-            current_post = getattr(self.config.model.posterior, 'type', None) if hasattr(self.config.model, 'posterior') else None
-            if current_post in (None, ""):
-                self._set_config_value_if_missing(self.config, "model.posterior.type", 'riem_hmc')
-
             try:
-                level = str(getattr(self.config.visualization, 'level', 'standard')).lower()
+                current_post = getattr(self.config.model.posterior, 'type', None) if hasattr(self.config.model, 'posterior') else None
+                if current_post in (None, ""):
+                    self.config.model.posterior.type = 'riem_hmc'
             except Exception:
-                level = 'standard'
-            if level == 'none':
-                print("[Stage C] Visualization level 'none' detected; skipping default overrides")
-            else:
-                self._set_config_value_if_missing(self.config, "visualization.level", level or 'standard')
-                self._set_config_value_if_missing(self.config, "visualization.enable_basic", True)
-                self._set_config_value_if_missing(self.config, "visualization.enable_manifold", True)
-                self._set_config_value_if_missing(self.config, "visualization.basic_frequency", max(1, int(getattr(self.config.visualization, 'basic_frequency', 5))))
-                self._set_config_value_if_missing(self.config, "visualization.manifold_frequency", max(1, int(getattr(self.config.visualization, 'manifold_frequency', 10))))
+                pass
+            # Visualization defaults: do not override when level is 'none'
+            try:
+                vis = getattr(self.config, 'visualization', None)
+                if vis is None:
+                    self.config.visualization.level = 'standard'
+                    self.config.visualization.enable_basic = True
+                    self.config.visualization.enable_manifold = True
+                else:
+                    level = str(getattr(self.config.visualization, 'level', 'standard')).lower()
+                    if level != 'none':
+                        # Keep user's level, only ensure sane frequencies
+                        self.config.visualization.enable_basic = True
+                        self.config.visualization.enable_manifold = True
+                # Ensure positive frequencies if present
+                self.config.visualization.basic_frequency = max(1, int(getattr(self.config.visualization, 'basic_frequency', 5)))
+                self.config.visualization.manifold_frequency = max(1, int(getattr(self.config.visualization, 'manifold_frequency', 10)))
+            except Exception:
+                pass
             # Disable heavy evaluation during quick Stage C to keep pipeline fast and clean
-            self._set_config_value_if_missing(self.config, "evaluation.enabled", False)
-            self._set_config_value_if_missing(self.config, "evaluation.generation.enabled", False)
-            self._set_config_value_if_missing(self.config, "evaluation.fid.enabled", False)
-            self._set_config_value_if_missing(self.config, "evaluation.inference.enabled", False)
-            self._set_config_value_if_missing(self.config, "evaluation.reconstruction.enabled", False)
-            print("[Stage C] Evaluation disabled for modular Stage C (clean, fast run)")
+            try:
+                if hasattr(self.config, 'evaluation') and self.config.evaluation is not None:
+                    self.config.evaluation.enabled = False
+                    # Also avoid generator init via evaluation
+                    if hasattr(self.config.evaluation, 'generation'):
+                        self.config.evaluation.generation.enabled = False
+                    if hasattr(self.config.evaluation, 'fid'):
+                        self.config.evaluation.fid.enabled = False
+                    if hasattr(self.config.evaluation, 'inference'):
+                        self.config.evaluation.inference.enabled = False
+                    if hasattr(self.config.evaluation, 'reconstruction'):
+                        self.config.evaluation.reconstruction.enabled = False
+                    print("[Stage C] Evaluation disabled for modular Stage C (clean, fast run)")
+            except Exception:
+                pass
 
             # Link Stage B metric as an input artifact for provenance
             if cfg.wandb.mode != "disabled" and getattr(cfg.wandb, 'artifacts', {}).get('enabled', False):
@@ -3509,10 +3415,7 @@ class ExperimentRunner:
                 dm = build_data_module(cfg.data)
                 dm.setup('fit', cfg.training)
                 vl = dm.val_dataloader()
-                # Reuse trained wrapper if available to avoid reloading metric
-                model_wrapper = getattr(self, '_stage_c_model_wrapper', None)
-                if model_wrapper is None:
-                    model_wrapper = LightningRlVAETrainer(cfg, data_module=dm)
+                model_wrapper = LightningRlVAETrainer(cfg, data_module=dm)
                 model = model_wrapper.model.to(self.device)
                 model.eval()
                 mus = []
@@ -3672,10 +3575,6 @@ class ExperimentRunner:
                     # keep run open
                 except Exception as e:
                     print(f"[SUMMARY] ⚠️ WandB summary logging failed: {e}")
-
-            # Restore base configuration after Stage C
-            self.config = stage_c_base
-            cfg = self.config
     
     def _create_model_config(self, model_name: str) -> DictConfig:
         """Create configuration for a specific model variant."""

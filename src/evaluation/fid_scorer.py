@@ -69,8 +69,12 @@ class InceptionFeatureExtractor(nn.Module):
         Returns:
             features: Inception features [batch_size, 2048]
         """
-        # Ensure input is in correct format
-        if x.dim() != 4 or x.size(1) != 3:
+        # Ensure input is in correct format; if grayscale, repeat to 3 channels
+        if x.dim() != 4:
+            raise ValueError(f"Expected input shape [B, C, H, W], got {x.shape}")
+        if x.size(1) == 1:
+            x = x.repeat(1, 3, 1, 1)
+        elif x.size(1) != 3:
             raise ValueError(f"Expected input shape [B, 3, H, W], got {x.shape}")
         
         # Preprocess

@@ -160,7 +160,7 @@ class LossManager(nn.Module):
             except Exception:
                 pass
             # Choose evaluation point for metric: 'z' (samples) or 'mu' (means)
-            eval_pts = z_samples if self.kl_metric_eval_point == 'z' else mu
+            eval_pts = z_samples if self.kl_metric_eval_point == 'z' else 'mu'
             print(f"[KL DEBUG] Using eval_pts: {self.kl_metric_eval_point} -> shape {eval_pts.shape}, mean {eval_pts.mean().item():.4f}, std {eval_pts.std().item():.4f}")
             # Compute inverse metric tensor at chosen points (G̃ = G^{-1})
             if hasattr(metric_tensor, 'compute_inverse_metric'):
@@ -262,8 +262,6 @@ class LossManager(nn.Module):
         
         # Sum log determinants across flows
         total_log_det = sum(log_det_jacobians)
-        # Sanitize before reduction to avoid NaN propagation from a single outlier
-        total_log_det = torch.nan_to_num(total_log_det, nan=0.0, posinf=1e6, neginf=-1e6)
         loss = torch.mean(total_log_det).abs()  # Ensure positive loss
         if not torch.isfinite(loss):
             print("⚠️ Flow loss is not finite! Clamping to 0.0.")

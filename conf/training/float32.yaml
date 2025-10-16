@@ -1,8 +1,0 @@
-# @package training
-
-# Inherit the default training config and only override precision.
-defaults:
-  - default
-
-trainer:
-  precision: 32-true

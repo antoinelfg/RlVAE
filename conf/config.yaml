@@ -1,54 +1,432 @@
-# @package _global_
-
-# Main configuration for RlVAE experiments
 defaults:
-  - model: riemannian_flow_vae
-  - training: full_data
-  - data: cyclic_sprites
-  - visualization: minimal
-  - evaluation: default
-  - metric: rhvae
-  - sampling: rhmc_default
-  - checkpoint: default
-  - experiment: single_run
   - _self_
 
-# Experiment metadata
-experiment_name: "rlvae_comparison"
-project_name: "rlvae-hyperparameter-optimization"
-description: "Systematic comparison of Riemannian geometry effects on VAE latent spaces with hyperparameter optimization"
-
-# Global settings
-seed: 42
-experiment_type: "research"  # research (full determinism) or production (performance)
-device: "auto"  # auto, cpu, cuda
-output_dir: "outputs"
-wandb:
-  project: "rlvae-three-stage-visuals"
-  entity: null  # your wandb entity
-  mode: "online"  # online, offline, disabled
-  tags: []
-  group: null
-  pipeline_mode: per_stage  # per_stage|single|both
-  artifacts:
-    enabled: true
-    namespace: rlvae
-    # default aliases used when logging artifacts per stage
-    aliases:
-      stage_a_latest: stageA_latest
-      stage_b_latest: stageB_latest
-      stage_c_latest: stageC_latest
-
-# Hydra settings
+# =============================================================
+# Hydra runtime configuration
+# =============================================================
 hydra:
   run:
-    dir: "${output_dir}/${experiment_name}/${now:%Y-%m-%d_%H-%M-%S}"
+    dir: "${output.run_dir}"
   sweep:
-    dir: "${output_dir}/${experiment_name}/sweep_${now:%Y-%m-%d_%H-%M-%S}"
+    dir: "${output.sweep_dir}"
     subdir: "${hydra.job.num}"
 
-# Pretrained model/component paths (set to null by default)
-pretrained:
-  encoder_path: null
-  decoder_path: null
-  metric_path: null 
+# =============================================================
+# Global metadata, output and logging
+# =============================================================
+global:
+  project_name: rlvae-hyperparameter-optimization
+  experiment_name: rlvae_three_stage_long_rhmc_modular
+  description: >-
+    Long training with Modular RLVAE and riemannian_rhmc posterior
+    (200 epochs A & C)
+  mode: train        # train | validate | test | inference
+  seed: 42
+  device: auto       # auto | cpu | cuda
+  reproducibility:
+    deterministic: false
+    cudnn_benchmark: true
+    allow_tf32: true
+
+output:
+  base_dir: outputs
+  run_dir: "${output.base_dir}/${global.experiment_name}/${now:%Y-%m-%d_%H-%M-%S}"
+  sweep_dir: "${output.base_dir}/${global.experiment_name}/sweep_${now:%Y-%m-%d_%H-%M-%S}"
+
+wandb:
+  enabled: true
+  mode: online         # online | offline | disabled
+  project: rlvae-three-stage-visuals
+  entity: null
+  group: null
+  tags:
+    - long_training
+    - rhmc_posterior
+    - modular_rlvae
+  notes: null
+  save_code: true
+  log_artifacts: true
+
+# Backward-compatible top-level aliases
+device: ${global.device}
+seed: ${global.seed}
+output_dir: ${output.base_dir}
+
+# =============================================================
+# Unified settings tree (authoritative values)
+# =============================================================
+settings:
+  data:
+    dataset: ellipse_sequences
+    common:
+      channels: 1
+      sequence_length: 8
+      image_size: [64, 64]
+      batch_size: 64
+      num_workers: 4
+      pin_memory: true
+      shuffle: true
+      seed: 42
+      splits:
+        train: 0.8
+        val: 0.1
+        test: 0.1
+    ellipse_sequences:
+      min_radius: 8
+      max_radius: 20
+      min_eccentricity: 0.0
+      max_eccentricity: 0.9
+      fix_center: true
+      fix_theta: true
+      fix_intensity: true
+      keep_major_axis_constant: true
+      keep_area_constant: false
+      center_jitter: 4
+      antialias: true
+      outline_only: false
+      outline_width: 2
+      supersample_factor: 4
+    cyclic_sprites: {}
+    colored_circles: {}
+
+  preprocessing:
+    normalization: standard
+    cache_dir: null
+    use_cached: false
+
+  model:
+    type: modular_rlvae
+    target: rlvae.models.modular_rlvae.ModularRiemannianFlowVAE
+    latent_dim: 2
+    n_flows: 7
+    epsilon: 1.0e-6
+
+    encoder:
+      architecture: mlp
+      hidden_layers: [256, 256]
+      activation: relu
+      dropout: 0.0
+
+    decoder:
+      architecture: mlp
+      hidden_layers: [256, 256]
+      activation: relu
+
+    flows:
+      hidden_size: 256
+      n_blocks: 2
+      n_hidden: 1
+      safe_mode: false
+
+    losses:
+      beta: 1.0
+      riemannian_beta: 1.0
+      flow_weight: 1.0
+      loop_penalty_weight: 0.0
+      mu_l2_weight: 0
+      kl_prior_mode: volume_gaussian
+      kl_metric_eval_point: z
+      kl_use_metric_normalization: false
+      kl_metric_norm_mode: none
+
+    posterior:
+      type: riemannian_rhmc
+      rhmc_steps: 4
+      rhmc_step_size: 0.02
+      rhmc_alpha: 0.2
+      rhmc_eps_reg: 1.0e-4
+      max_momentum_norm: 3.0
+      max_velocity_norm: 1.0
+      max_position_step: 0.5
+      max_position_norm: 0.0
+      posterior_local_alpha: 0.5
+      posterior_alpha_ramp_enabled: false
+      maha_clip: 3.0
+      cov_norm_mode: geomean
+      rhmc_kl_mode: mc
+      rhmc_kl_source: z0
+      rhmc_kl_jacobian: false
+
+    metric:
+      path: metric_T0.7_scaled.pt
+      trainable: false
+      init_from_fixed: true
+      temperature_override: 0.3
+      regularization_override: null
+      regularization_weight: 0.0
+      update_frequency: null
+
+    loop:
+      mode: open
+      enforce_closed_last_frame: false
+
+    sampling:
+      method: posterior_hmc
+      use_riemannian: true
+
+    pretrained:
+      encoder_path: null
+      decoder_path: null
+      metric_path: null
+
+  training:
+    strategy:
+      max_epochs: 200
+      gradient_clip_val: 1.0
+      precision: 16-mixed
+      accelerator: gpu
+      devices: 1
+      accumulate_grad_batches: 1
+      log_every_n_steps: 5
+      val_check_interval: 0.5
+      num_sanity_val_steps: 2
+      progress_bar: true
+      model_summary: true
+
+    optimizer:
+      name: adam
+      lr: 2.0e-4
+      weight_decay: 1.0e-4
+      betas: [0.9, 0.999]
+
+    scheduler:
+      name: reduce_on_plateau
+      mode: min
+      factor: 0.8
+      patience: 5
+      min_lr: 1.0e-7
+      cooldown: 0
+      threshold: 1.0e-2
+
+    early_stopping:
+      enabled: false
+      patience: 20
+      monitor: val_loss
+      mode: min
+      min_delta: 0.0
+
+    logging:
+      save_top_k: 3
+      monitor: val_loss
+      mode: min
+      metric_logging: true
+
+    monitoring:
+      enhanced_kl:
+        enabled: false
+
+    stage_overrides:
+      stage_a:
+        enabled: true
+        epochs: 100
+        lr: 1.0e-4
+        batch_size: 64
+        architecture: mlp
+        latent_dim: 2
+      stage_b:
+        enabled: true
+        implementation: rhvae
+        n_centroids: 300
+        temperature: 0.5
+        regularization: 0.01
+        centroid_method: kmedoids
+        neighbor_mode: global
+        knn_k: 300
+        use_timestep: 0
+        standardize_latents: false
+      stage_c:
+        enabled: true
+        epochs: 200
+        lr: 2.0e-4
+        riemannian_beta: 1.0
+        allow_metric_updates: false
+        update_metric_during_training: false
+
+  pipeline:
+    mode: three_stage
+    run_stage_a: true
+    run_stage_b: true
+    run_stage_c: true
+    run_sampling: true
+    resume_from:
+      stage_a_checkpoint: null
+      stage_b_bundle: null
+      stage_c_checkpoint: null
+    outputs:
+      stage_a_dir: "${output.base_dir}/stageA"
+      stage_b_dir: "${output.base_dir}/stageB"
+      stage_c_dir: "${output.base_dir}/stageC"
+      metric_file: "metric_t${settings.model.metric.temperature_override}.pt"
+      rhmc_samples_file: "rhmc_samples_t0.pt"
+
+  evaluation:
+    enabled: true
+    frequency: every_epoch
+    fid:
+      enabled: false
+      batch_size: 50
+      inception_batch_size: 64
+      n_generated_samples: 1000
+      n_real_samples: 1000
+      cache_real_stats: true
+      cache_dir: data/fid_cache
+    generation:
+      enabled: false
+      methods: [prior, reconstruction]
+      n_samples_per_method: 100
+    inference:
+      enabled: false
+      n_sequences: 8
+    benchmarking:
+      enabled: false
+
+  visualization:
+    level: three_stage_optimized
+    enable_basic: true
+    enable_dynamics: true
+    enable_flow_analysis: true
+    enable_manifold: true
+    enable_interactive: false
+    max_sequences: 32
+    save_local: true
+    log_to_wandb: true
+    frequencies:
+      basic: 5
+      dynamics: 10
+      flow: 10
+      manifold: 10
+      interactive: 20
+    ellipse_specific:
+      highlight_t0_frames: true
+      latent_2d_focus: true
+      color_by_parameters: true
+
+  sampling:
+    enabled: true
+    method: rhmc
+    n_steps: 100
+    n_leapfrog: 50
+    step_size: 0.001
+    temperature: 1.0
+    prior: volume_gaussian
+    log_acceptance_rate: true
+    log_energy: true
+
+  generation:
+    enabled: false
+    prior_samples: 64
+    traversals: []
+
+  checkpoint:
+    save: true
+    load: false
+    dir: "${output.base_dir}/checkpoints"
+    stageA_dir: "${settings.pipeline.outputs.stage_a_dir}"
+    stageB_dir: "${settings.pipeline.outputs.stage_b_dir}"
+    stageC_dir: "${settings.pipeline.outputs.stage_c_dir}"
+    stageA_model: "stageA_vae.pt"
+    metric_file: "${settings.pipeline.outputs.metric_file}"
+    rhmc_samples: "${settings.pipeline.outputs.rhmc_samples_file}"
+
+  debug:
+    verbose: false
+    print_shapes: false
+    profiler: none
+    strict_mode: false
+    trace: false
+
+# =============================================================
+# Compatibility views (legacy paths used by existing code)
+# =============================================================
+data:
+  dataset: ${settings.data.dataset}
+  name: ${settings.data.dataset}
+  channels: ${settings.data.common.channels}
+  image_size: ${settings.data.common.image_size}
+  sequence_length: ${settings.data.common.sequence_length}
+  batch_size: ${settings.data.common.batch_size}
+  num_workers: 0 #${settings.data.common.num_workers}
+  pin_memory: ${settings.data.common.pin_memory}
+  shuffle: ${settings.data.common.shuffle}
+  train_ratio: ${settings.data.common.splits.train}
+  val_ratio: ${settings.data.common.splits.val}
+  test_ratio: ${settings.data.common.splits.test}
+  seed: ${settings.data.common.seed}
+  min_radius: ${settings.data.ellipse_sequences.min_radius}
+  max_radius: ${settings.data.ellipse_sequences.max_radius}
+  min_eccentricity: ${settings.data.ellipse_sequences.min_eccentricity}
+  max_eccentricity: ${settings.data.ellipse_sequences.max_eccentricity}
+  fix_center: ${settings.data.ellipse_sequences.fix_center}
+  fix_theta: ${settings.data.ellipse_sequences.fix_theta}
+  fix_intensity: ${settings.data.ellipse_sequences.fix_intensity}
+  keep_major_axis_constant: ${settings.data.ellipse_sequences.keep_major_axis_constant}
+  keep_area_constant: ${settings.data.ellipse_sequences.keep_area_constant}
+  center_jitter: ${settings.data.ellipse_sequences.center_jitter}
+  antialias: ${settings.data.ellipse_sequences.antialias}
+  outline_only: ${settings.data.ellipse_sequences.outline_only}
+  outline_width: ${settings.data.ellipse_sequences.outline_width}
+  supersample_factor: ${settings.data.ellipse_sequences.supersample_factor}
+
+model:
+  _target_: ${settings.model.target}
+  latent_dim: ${settings.model.latent_dim}
+  n_flows: ${settings.model.n_flows}
+  flow_hidden_size: ${settings.model.flows.hidden_size}
+  flow_n_blocks: ${settings.model.flows.n_blocks}
+  flow_n_hidden: ${settings.model.flows.n_hidden}
+  epsilon: ${settings.model.epsilon}
+  beta: ${settings.model.losses.beta}
+  riemannian_beta: ${settings.model.losses.riemannian_beta}
+  mu_l2_weight: ${settings.model.losses.mu_l2_weight}
+  kl_prior_mode: ${settings.model.losses.kl_prior_mode}
+  kl_metric_eval_point: ${settings.model.losses.kl_metric_eval_point}
+  kl_use_metric_normalization: ${settings.model.losses.kl_use_metric_normalization}
+  kl_metric_norm_mode: ${settings.model.losses.kl_metric_norm_mode}
+  sampling: ${settings.model.sampling}
+  loop:
+    mode: ${settings.model.loop.mode}
+    penalty: ${settings.model.losses.loop_penalty_weight}
+  metric: ${settings.model.metric}
+  posterior: ${settings.model.posterior}
+  encoder: ${settings.model.encoder}
+  decoder: ${settings.model.decoder}
+  pretrained: ${settings.model.pretrained}
+  input_dim:
+    - ${settings.data.common.channels}
+    - ${settings.data.common.image_size[0]}
+    - ${settings.data.common.image_size[1]}
+  rhmc_kl_mode: ${settings.model.posterior.rhmc_kl_mode}
+  rhmc_kl_source: ${settings.model.posterior.rhmc_kl_source}
+  rhmc_kl_jacobian: ${settings.model.posterior.rhmc_kl_jacobian}
+
+training:
+  trainer: ${settings.training.strategy}
+  optimizer: ${settings.training.optimizer}
+  scheduler: ${settings.training.scheduler}
+  early_stopping: ${settings.training.early_stopping}
+  logging: ${settings.training.logging}
+  monitoring: ${settings.training.monitoring}
+  stage_overrides: ${settings.training.stage_overrides}
+
+pipeline: ${settings.pipeline}
+evaluation: ${settings.evaluation}
+visualization: ${settings.visualization}
+sampling: ${settings.sampling}
+generation: ${settings.generation}
+checkpoint: ${settings.checkpoint}
+debug: ${settings.debug}
+
+experiment:
+  type: ${settings.pipeline.mode}
+  name: ${global.experiment_name}
+  description: ${global.description}
+  run_stage_a: ${settings.pipeline.run_stage_a}
+  run_stage_b: ${settings.pipeline.run_stage_b}
+  run_stage_c: ${settings.pipeline.run_stage_c}
+  run_sampling: ${settings.pipeline.run_sampling}
+  stage_a: ${settings.training.stage_overrides.stage_a}
+  stage_b: ${settings.training.stage_overrides.stage_b}
+  stage_c: ${settings.training.stage_overrides.stage_c}
+  sampling: ${settings.pipeline}
+  checkpoint: ${settings.checkpoint}
+  wandb: ${wandb}

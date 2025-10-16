@@ -1,0 +1,54 @@
+# @package _global_
+
+# Main configuration for RlVAE experiments
+defaults:
+  - model: riemannian_flow_vae
+  - training: full_data
+  - data: cyclic_sprites
+  - visualization: minimal
+  - evaluation: default
+  - metric: rhvae
+  - sampling: rhmc_default
+  - checkpoint: default
+  - experiment: single_run
+  - _self_
+
+# Experiment metadata
+experiment_name: "rlvae_comparison"
+project_name: "rlvae-hyperparameter-optimization"
+description: "Systematic comparison of Riemannian geometry effects on VAE latent spaces with hyperparameter optimization"
+
+# Global settings
+seed: 42
+experiment_type: "research"  # research (full determinism) or production (performance)
+device: "auto"  # auto, cpu, cuda
+output_dir: "outputs"
+wandb:
+  project: "rlvae-three-stage-visuals"
+  entity: null  # your wandb entity
+  mode: "online"  # online, offline, disabled
+  tags: []
+  group: null
+  pipeline_mode: per_stage  # per_stage|single|both
+  artifacts:
+    enabled: true
+    namespace: rlvae
+    # default aliases used when logging artifacts per stage
+    aliases:
+      stage_a_latest: stageA_latest
+      stage_b_latest: stageB_latest
+      stage_c_latest: stageC_latest
+
+# Hydra settings
+hydra:
+  run:
+    dir: "${output_dir}/${experiment_name}/${now:%Y-%m-%d_%H-%M-%S}"
+  sweep:
+    dir: "${output_dir}/${experiment_name}/sweep_${now:%Y-%m-%d_%H-%M-%S}"
+    subdir: "${hydra.job.num}"
+
+# Pretrained model/component paths (set to null by default)
+pretrained:
+  encoder_path: null
+  decoder_path: null
+  metric_path: null 

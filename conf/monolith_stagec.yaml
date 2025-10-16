@@ -1,0 +1,92 @@
+monolith: true
+experiment:
+  type: monolith
+  name: monolith_stagec_run
+seed: 42
+device: auto
+output_dir: outputs
+wandb:
+  mode: online
+  project: rlvae-monolith
+  run_name_template: monolith_${experiment.name}_${data.name}_ld${model.latent_dim}
+data:
+  name: ellipse_sequences
+  channels: 1
+  image_size:
+  - 64
+  - 64
+  sequence_length: 8
+  seq_len: 8
+  batch_size: 64
+  num_workers: 4
+  pin_memory: true
+model:
+  _target_: rlvae.models.modular_rlvae.ModularRiemannianFlowVAE
+  input_dim:
+  - 1
+  - 64
+  - 64
+  latent_dim: 2
+  sequence_length: 8
+  n_flows: 7
+  flow_hidden_size: 64
+  flow_n_blocks: 2
+  flow_n_hidden: 1
+  posterior_type: riemannian_rhmc
+  posterior:
+    type: riemannian_rhmc
+    rhmc_steps: 2
+    rhmc_step_size: 0.01
+    rhmc_alpha: 0.1
+    rhmc_eps_reg: 0.0001
+  beta: 1.0
+  riemannian_beta: 32.0
+  kl_metric_eval_point: mu
+  kl_use_metric_normalization: false
+  kl_metric_norm_mode: none
+  mu_l2_weight: 0.5
+  rhmc_kl_mode: mc
+  rhmc_kl_source: z0
+  rhmc_kl_jacobian: false
+  encoder:
+    architecture: mlp_gray
+  decoder:
+    architecture: mlp_gray
+  loop:
+    mode: open
+    penalty: 0.0
+  metric:
+    trainable: false
+    temperature_override: null
+    regularization_override: null
+  pretrained:
+    encoder_path: outputs/stages/A_VANILLA_MLP_2_SPRITES/encoder_diverse_mlp_ld2_20251016_115412.pt
+    decoder_path: outputs/stages/A_VANILLA_MLP_2_SPRITES/decoder_diverse_mlp_ld2_20251016_115412.pt
+    metric_path: outputs/stages/B_RHVAE_MLP_2_SPRITES/metric.pt
+training:
+  trainer:
+    max_epochs: 3
+    accelerator: gpu
+    devices: 1
+    precision: 16-mixed
+    enable_progress_bar: true
+    enable_model_summary: true
+    deterministic: false
+  optimizer:
+    name: adam
+    lr: 0.001
+    weight_decay: 0.0001
+  logging:
+    log_every_n_steps: 10
+    save_top_k: 1
+    monitor: val_loss
+    mode: min
+  visualization:
+    frequency: 1
+    level: minimal
+visualization:
+  level: minimal
+  frequency: 1
+  enable_basic: true
+  enable_manifold: false
+  enable_interactive: false

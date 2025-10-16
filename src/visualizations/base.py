@@ -117,10 +117,14 @@ class BaseVisualization:
         
         batch_size, n_obs, latent_dim = z_seq.shape
         z_flat = z_seq.reshape(-1, latent_dim).cpu().numpy()
+        max_components = min(latent_dim, z_flat.shape[0])
+        if max_components <= 0:
+            raise ValueError("PCA requires at least one component and one sample.")
+        use_components = max(1, min(n_components, max_components))
         
-        pca = PCA(n_components=n_components)
+        pca = PCA(n_components=use_components)
         z_pca = pca.fit_transform(z_flat)
-        z_pca_seq = z_pca.reshape(batch_size, n_obs, n_components)
+        z_pca_seq = z_pca.reshape(batch_size, n_obs, use_components)
         
         return z_pca_seq, pca
         
