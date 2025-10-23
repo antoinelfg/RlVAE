@@ -8,6 +8,8 @@ Advanced Plotly-based interactive visualizations:
 - Animated metric evolution
 """
 
+from typing import Dict, List, Optional, Sequence, Tuple
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -131,6 +133,387 @@ class InteractiveVisualizations(BaseVisualization):
             return self.model.flow_manager.flows
         else:
             return None
+
+    # ------------------------------------------------------------------
+    # Shared helpers for interactive visualizations
+    # ------------------------------------------------------------------
+
+    def _extract_flow_tensor(self, flow_result: object) -> torch.Tensor:
+        """Normalize heterogeneous flow outputs to a plain tensor."""
+        if isinstance(flow_result, tuple):
+            flow_result = flow_result[0]
+
+        for attr in ("out", "sample", "z"):
+            attr_val = getattr(flow_result, attr, None)
+            if isinstance(attr_val, torch.Tensor):
+                return self._ensure_tensor_on_device(attr_val)
+
+        if isinstance(flow_result, torch.Tensor):
+            return self._ensure_tensor_on_device(flow_result)
+
+        raise TypeError(
+            "Flow modules must return a tensor, tuple whose first element is a tensor, "
+            "or an object exposing `.out`, `.sample`, or `.z`."
+        )
+
+    def _symmetrize_matrices(self, matrices: torch.Tensor) -> torch.Tensor:
+        """Ensure matrices are symmetric by averaging with their transpose."""
+        return 0.5 * (matrices + matrices.transpose(-1, -2))
+
+    def _evaluate_metric_inverse(self, points: torch.Tensor) -> torch.Tensor:
+        """Evaluate G^{-1} at given latent points, falling back to G if needed."""
+        points = self._ensure_tensor_on_device(points.float())
+
+        with torch.no_grad():
+            if hasattr(self.model, "G_inv") and callable(self.model.G_inv):
+                G_inv = self.model.G_inv(points)
+                G_inv = self._ensure_tensor_on_device(G_inv)
+            elif hasattr(self.model, "G") and callable(self.model.G):
+                G = self.model.G(points)
+                G = self._ensure_tensor_on_device(G)
+                if G.dim() == 2:
+                    G = G.unsqueeze(0).expand(points.shape[0], -1, -1)
+                try:
+                    G_inv = torch.linalg.inv(G)
+                except RuntimeError:
+                    G_inv = torch.linalg.pinv(G)
+            else:
+                raise AttributeError("Model must expose `G_inv` or `G` to evaluate the metric tensor.")
+
+        if G_inv.dim() == 2:
+            G_inv = G_inv.unsqueeze(0).expand(points.shape[0], -1, -1)
+
+        identity = torch.eye(G_inv.shape[-1], device=G_inv.device, dtype=G_inv.dtype)
+        G_inv = self._symmetrize_matrices(G_inv) + 1e-6 * identity
+        return G_inv.float()
+
+    def _evaluate_metric(self, points: torch.Tensor) -> torch.Tensor:
+        """Evaluate G at given latent points, falling back to G^{-1} if needed."""
+        points = self._ensure_tensor_on_device(points.float())
+
+        with torch.no_grad():
+            if hasattr(self.model, "G") and callable(self.model.G):
+                G = self.model.G(points)
+                G = self._ensure_tensor_on_device(G)
+            elif hasattr(self.model, "G_inv") and callable(self.model.G_inv):
+                G_inv = self.model.G_inv(points)
+                G_inv = self._ensure_tensor_on_device(G_inv)
+                if G_inv.dim() == 2:
+                    G_inv = G_inv.unsqueeze(0).expand(points.shape[0], -1, -1)
+                try:
+                    G = torch.linalg.inv(G_inv)
+                except RuntimeError:
+                    G = torch.linalg.pinv(G_inv)
+            else:
+                raise AttributeError("Model must expose `G` or `G_inv` to evaluate the metric tensor.")
+
+        if G.dim() == 2:
+            G = G.unsqueeze(0).expand(points.shape[0], -1, -1)
+
+        identity = torch.eye(G.shape[-1], device=G.device, dtype=G.dtype)
+        G = self._symmetrize_matrices(G) + 1e-6 * identity
+        return G.float()
+
+    def _log10_det(self, matrices: torch.Tensor) -> torch.Tensor:
+        """Compute log10(det(M)) with numerical safeguards."""
+        if matrices.dim() == 2:
+            matrices = matrices.unsqueeze(0)
+        matrices = self._symmetrize_matrices(matrices)
+        sign, logdet = torch.linalg.slogdet(matrices)
+        logdet = torch.where(sign <= 0, torch.full_like(logdet, float('-inf')), logdet)
+        return logdet / np.log(10.0)
+
+    def _safe_logdet(self, matrices: torch.Tensor) -> torch.Tensor:
+        """Return natural log(det(M)) with safeguards for SPD matrices."""
+        if matrices.dim() == 2:
+            matrices = matrices.unsqueeze(0)
+        matrices = self._symmetrize_matrices(matrices)
+        sign, logdet = torch.linalg.slogdet(matrices)
+        logdet = torch.where(sign <= 0, torch.full_like(logdet, float('-inf')), logdet)
+        return logdet
+
+    def _prepare_pca_grid(
+        self,
+        pca,
+        z_pca_seq: np.ndarray,
+        grid_resolution: int = 40,
+        padding: float = 0.15,
+        extra_points_pca: Optional[np.ndarray] = None,
+    ) -> Dict[str, np.ndarray]:
+        """Generate a PCA-aligned grid and latent coordinates for background fields."""
+        if z_pca_seq.shape[-1] < 2:
+            raise ValueError("PCA sequence must have at least 2 components for visualization.")
+
+        flattened = z_pca_seq.reshape(-1, z_pca_seq.shape[-1])
+        if extra_points_pca is not None and extra_points_pca.size > 0:
+            flattened = np.concatenate([flattened, np.asarray(extra_points_pca)], axis=0)
+
+        x_vals = flattened[:, 0]
+        y_vals = flattened[:, 1]
+        x_span = x_vals.max() - x_vals.min()
+        y_span = y_vals.max() - y_vals.min()
+
+        if x_span <= 0:
+            x_span = 1.0
+        if y_span <= 0:
+            y_span = 1.0
+
+        x_min = x_vals.min() - padding * x_span
+        x_max = x_vals.max() + padding * x_span
+        y_min = y_vals.min() - padding * y_span
+        y_max = y_vals.max() + padding * y_span
+
+        gx = np.linspace(x_min, x_max, grid_resolution)
+        gy = np.linspace(y_min, y_max, grid_resolution)
+        XX, YY = np.meshgrid(gx, gy)
+        grid_points_pca = np.column_stack([XX.reshape(-1), YY.reshape(-1)])
+
+        latent_grid = pca.inverse_transform(grid_points_pca)
+        latent_grid_tensor = torch.tensor(latent_grid, dtype=torch.float32, device=self.device)
+
+        return {
+            "gx": gx,
+            "gy": gy,
+            "XX": XX,
+            "YY": YY,
+            "grid_points_pca": grid_points_pca,
+            "latent_grid": latent_grid_tensor,
+        }
+
+    def _extract_latent_sequence(self, forward_out) -> Optional[torch.Tensor]:
+        """Best-effort extraction of latent trajectories from various forward outputs."""
+        if forward_out is None:
+            return None
+
+        keys = [
+            "latent_samples",
+            "z",
+            "samples",
+            "latents",
+        ]
+
+        if isinstance(forward_out, dict):
+            for key in keys:
+                if key in forward_out:
+                    value = forward_out[key]
+                    if isinstance(value, torch.Tensor):
+                        return self._ensure_tensor_on_device(value.float())
+        else:
+            for key in keys:
+                if hasattr(forward_out, key):
+                    value = getattr(forward_out, key)
+                    if isinstance(value, torch.Tensor):
+                        return self._ensure_tensor_on_device(value.float())
+
+        return None
+
+    def _apply_interactive_theme(
+        self,
+        fig,
+        *,
+        background: str = "rgba(0,0,0,0)",
+        legend_bg: str = "rgba(255,255,255,0.88)",
+        font_color: str = "#1f2127",
+    ) -> None:
+        """Apply a light, unobtrusive theme so content stands out on W&B's white canvas."""
+        fig.update_layout(
+            paper_bgcolor=background,
+            plot_bgcolor=background,
+            font=dict(color=font_color)
+        )
+
+        fig.update_layout(
+            legend=dict(
+                bgcolor=legend_bg,
+                bordercolor="rgba(0,0,0,0.25)",
+                borderwidth=1,
+                font=dict(color=font_color)
+            )
+        )
+
+        fig.update_coloraxes(colorbar=dict(
+            bgcolor=legend_bg,
+            bordercolor="rgba(0,0,0,0.25)",
+            borderwidth=1,
+            tickfont=dict(color=font_color),
+            title=dict(font=dict(color=font_color))
+        ))
+
+        fig.update_xaxes(
+            color=font_color,
+            gridcolor="rgba(0,0,0,0.08)",
+            zerolinecolor="rgba(0,0,0,0.12)"
+        )
+        fig.update_yaxes(
+            color=font_color,
+            gridcolor="rgba(0,0,0,0.08)",
+            zerolinecolor="rgba(0,0,0,0.12)"
+        )
+
+        for slider in getattr(fig.layout, "sliders", []) or []:
+            slider.bgcolor = "rgba(255,255,255,0.85)"
+            slider.activebgcolor = "rgba(31,119,180,0.4)"
+            if slider.font is None:
+                slider.font = dict(color=font_color)
+            else:
+                slider.font.color = font_color
+            if slider.currentvalue and slider.currentvalue.font:
+                slider.currentvalue.font.color = font_color
+            elif slider.currentvalue:
+                slider.currentvalue.font = dict(color=font_color)
+
+    def _apply_flow_with_jacobian(
+        self,
+        flow: nn.Module,
+        points: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Apply a flow to points and return outputs and local Jacobians."""
+        points = self._ensure_tensor_on_device(points).detach()
+        n_points, latent_dim = points.shape
+
+        if n_points > 1500:
+            print("⚠️ Large point cloud for Jacobian computation; consider reducing grid resolution.")
+
+        outputs = []
+        jacobians = []
+
+        flow = flow.to(self.device)
+        was_training = getattr(flow, "training", False)
+        flow.eval()
+
+        with torch.enable_grad():
+            for i in range(n_points):
+                single_point = points[i].clone().detach().requires_grad_(True)
+
+                def single_flow(inp: torch.Tensor) -> torch.Tensor:
+                    out = flow(inp.unsqueeze(0))
+                    return self._extract_flow_tensor(out).squeeze(0)
+
+                out_vec = single_flow(single_point)
+                jac = torch.autograd.functional.jacobian(
+                    single_flow,
+                    single_point,
+                    create_graph=False,
+                )
+
+                outputs.append(out_vec.detach())
+                jacobians.append(jac.detach())
+
+        if was_training:
+            flow.train()
+
+        outputs_tensor = torch.stack(outputs, dim=0).to(self.device)
+        jacobians_tensor = torch.stack(jacobians, dim=0).to(self.device)
+        return outputs_tensor, jacobians_tensor
+
+    def _compute_metric_flow_evolution(
+        self,
+        base_points: torch.Tensor,
+        flows: Sequence[nn.Module],
+        max_steps: Optional[int] = None,
+    ) -> Dict[str, List[torch.Tensor]]:
+        """Track metric/precision evolution through flows with diagnostic statistics."""
+
+        base_points = self._ensure_tensor_on_device(base_points.float())
+        n_points, latent_dim = base_points.shape
+        steps = len(flows) if max_steps is None else min(len(flows), max_steps)
+
+        identity = torch.eye(latent_dim, device=self.device, dtype=base_points.dtype)
+        identity_batch = identity.unsqueeze(0).expand(n_points, -1, -1)
+        eps_eye = 1e-6 * identity
+
+        positions: List[torch.Tensor] = [base_points.detach()]
+        metrics: List[torch.Tensor] = []
+        precisions: List[torch.Tensor] = []
+        logdet_metrics10: List[torch.Tensor] = []
+        logdet_precisions10: List[torch.Tensor] = []
+        spd_errors: List[torch.Tensor] = []
+        det_residuals: List[torch.Tensor] = []
+        jacobians_total: List[torch.Tensor] = [identity_batch.clone()]
+        jacobians_step: List[torch.Tensor] = []
+        logabsdet_jacobian_total: List[torch.Tensor] = [torch.zeros(n_points, device=self.device)]
+
+        current_points = base_points
+        cumulative_jacobian = identity_batch.clone()
+
+        # Step 0 (no flow applied yet)
+        metric_current = self._evaluate_metric(current_points)
+        precision_current = torch.linalg.inv(metric_current)
+        precision_current = self._symmetrize_matrices(precision_current) + eps_eye
+        metric_current = torch.linalg.inv(precision_current)
+        metric_current = self._symmetrize_matrices(metric_current)
+
+        metrics.append(metric_current.detach())
+        precisions.append(precision_current.detach())
+        logdet_metrics10.append(self._log10_det(metric_current).detach())
+        logdet_precisions10.append(self._log10_det(precision_current).detach())
+        spd_errors.append(
+            torch.linalg.norm(
+                torch.matmul(metric_current, precision_current) - identity_batch,
+                dim=(1, 2)
+            ).detach()
+        )
+        det_residuals.append(torch.zeros(n_points, device=self.device))
+
+        for idx in range(steps):
+            flow = flows[idx]
+            outputs, jac_step = self._apply_flow_with_jacobian(flow, current_points)
+            jacobians_step.append(jac_step.detach())
+
+            cumulative_jacobian = torch.matmul(jac_step, cumulative_jacobian)
+            jacobians_total.append(cumulative_jacobian.detach())
+
+            sign_total, logdet_total = torch.linalg.slogdet(cumulative_jacobian)
+            logdet_total = torch.where(sign_total <= 0, torch.full_like(logdet_total, float('inf')), logdet_total)
+            logabsdet_jacobian_total.append(logdet_total.detach())
+
+            current_points = outputs.detach()
+            positions.append(current_points)
+
+            metric_native = self._evaluate_metric(current_points)
+            precision_native = torch.linalg.inv(metric_native)
+            precision_native = self._symmetrize_matrices(precision_native) + eps_eye
+            metric_native = torch.linalg.inv(precision_native)
+            metric_native = self._symmetrize_matrices(metric_native)
+
+            # Pull metric back to current coordinate system using cumulative Jacobian
+            precision_y = torch.matmul(
+                cumulative_jacobian,
+                torch.matmul(precision_native, cumulative_jacobian.transpose(1, 2))
+            )
+            precision_y = self._symmetrize_matrices(precision_y) + eps_eye
+            metric_y = torch.linalg.inv(precision_y)
+            metric_y = self._symmetrize_matrices(metric_y)
+
+            metrics.append(metric_y.detach())
+            precisions.append(precision_y.detach())
+            logdet_metrics10.append(self._log10_det(metric_y).detach())
+            logdet_precisions10.append(self._log10_det(precision_y).detach())
+
+            spd_errors.append(
+                torch.linalg.norm(
+                    torch.matmul(metric_y, precision_y) - identity_batch,
+                    dim=(1, 2)
+                ).detach()
+            )
+
+            native_log = self._safe_logdet(metric_native)
+            pulled_log = self._safe_logdet(metric_y)
+            det_residual = torch.abs(pulled_log - (native_log - 2.0 * logdet_total))
+            det_residuals.append(det_residual.detach())
+
+        return {
+            "positions": positions,
+            "metrics": metrics,
+            "precisions": precisions,
+            "logdet_metric10": logdet_metrics10,
+            "logdet_precision10": logdet_precisions10,
+            "spd_errors": spd_errors,
+            "determinant_residuals": det_residuals,
+            "jacobians_total": jacobians_total,
+            "jacobians_step": jacobians_step,
+            "logabsdet_jacobian_total": logabsdet_jacobian_total,
+        }
     
     def create_geodesic_sliders(self, x_sample: torch.Tensor, epoch: int):
         """Create interactive geodesic slider visualizations with timestep evolution."""
@@ -148,34 +531,308 @@ class InteractiveVisualizations(BaseVisualization):
             return
             
         try:
-            # Ensure entire model is on correct device
             self._ensure_model_on_device()
-            
             self.model.eval()
+
             with torch.no_grad():
-                result = self.model_forward(x_sample)
-                z_seq = result['latent_samples'] if isinstance(result, dict) else result.z  # [batch_size, n_obs, latent_dim]
-                
-                batch_size, n_obs, latent_dim = z_seq.shape
-                
-                # Create PCA projection 
+                forward_out = self.model_forward(x_sample)
+                z_seq = self._extract_latent_sequence(forward_out)
+
+                if z_seq is None:
+                    print("⚠️ Could not extract latent sequence for geodesic slider")
+                    return
+
                 z_pca_seq, pca = self._prepare_pca_data(z_seq, n_components=2)
-                
-                # Create smaller grid for better performance
-                x_min, x_max = z_pca_seq[:, :, 0].min() - 0.5, z_pca_seq[:, :, 0].max() + 0.5
-                y_min, y_max = z_pca_seq[:, :, 1].min() - 0.5, z_pca_seq[:, :, 1].max() + 0.5
-                nx, ny = 30, 30  # Smaller grid for better performance
-                xx, yy = np.meshgrid(np.linspace(x_min, x_max, nx), np.linspace(y_min, y_max, ny))
-                
-                # Create interactive slider visualization
-                self._create_interactive_geodesic_slider(z_seq, z_pca_seq, xx, yy, pca, epoch)
-                
+
+            flows = self._get_flows()
+            grid_info = self._prepare_pca_grid(pca, z_pca_seq, grid_resolution=32, padding=0.18)
+
+            self._create_interactive_geodesic_slider(
+                z_pca_seq=z_pca_seq,
+                pca=pca,
+                flows=list(flows) if flows is not None else [],
+                grid_info=grid_info,
+                epoch=epoch,
+            )
+
         except Exception as e:
             print(f"⚠️ Geodesic slider visualization failed: {e}")
             import traceback
             traceback.print_exc()
         
         self.model.train()
+
+    def create_rhmc_flow_slider(
+        self,
+        x_sample: torch.Tensor,
+        epoch: int,
+        n_paths: int = 15
+    ) -> None:
+        """Interactive slider showing RHMC flow trajectories with pushed-forward metrics."""
+        if not PLOTLY_AVAILABLE:
+            print("⚠️ Plotly not available - skipping RHMC flow slider")
+            return
+
+        flows_seq = self._get_flows()
+        if flows_seq is None or len(flows_seq) == 0:
+            print("⚠️ No flows available for RHMC slider visualization")
+            return
+
+        flows = list(flows_seq)
+        print(f"🎚️ Creating RHMC flow slider for epoch {epoch}")
+
+        try:
+            self._ensure_model_on_device()
+            self.model.eval()
+
+            with torch.no_grad():
+                enc_out = self.model.encoder(x_sample[:, 0])
+                if hasattr(enc_out, "embedding"):
+                    mu = enc_out.embedding
+                elif hasattr(enc_out, "mu"):
+                    mu = enc_out.mu
+                elif isinstance(enc_out, dict) and "mu" in enc_out:
+                    mu = enc_out["mu"]
+                else:
+                    print("⚠️ Could not extract encoder means for RHMC slider")
+                    return
+
+                forward_out = self.model_forward(x_sample)
+                z_seq = self._extract_latent_sequence(forward_out)
+
+                if z_seq is None:
+                    print("⚠️ Could not extract latent sequence for PCA projection")
+                    return
+
+                z_pca_seq, pca = self._prepare_pca_data(z_seq, n_components=2)
+
+            mu = self._ensure_tensor_on_device(mu.float())
+            latent_dim = int(mu.shape[-1])
+            if latent_dim < 2:
+                print("⚠️ RHMC flow slider requires latent dimension >= 2")
+                return
+
+            num_candidates = mu.shape[0]
+            if num_candidates == 0:
+                print("⚠️ No encoder samples available for RHMC slider")
+                return
+
+            num_paths = min(n_paths, num_candidates)
+            if num_paths < 1:
+                print("⚠️ Not enough posterior samples for RHMC slider")
+                return
+
+            selection = torch.randperm(num_candidates, device=self.device)[:num_paths]
+            path_points_0 = mu[selection].to(self.device)
+
+            path_flow = self._compute_metric_flow_evolution(path_points_0, flows)
+            path_positions_pca = [
+                pca.transform(points.detach().cpu().numpy())
+                for points in path_flow["positions"]
+            ]
+            extra_grid_points = np.concatenate(path_positions_pca, axis=0) if path_positions_pca else None
+
+            grid_info = self._prepare_pca_grid(
+                pca,
+                z_pca_seq,
+                grid_resolution=32,
+                padding=0.18,
+                extra_points_pca=extra_grid_points,
+            )
+            grid_latent = grid_info["latent_grid"]
+
+            grid_flow = self._compute_metric_flow_evolution(grid_latent, flows)
+
+            grid_logdet_fields: List[np.ndarray] = []
+            for log_values in grid_flow["logdet_metric10"]:
+                arr = log_values.detach().cpu().numpy().reshape(grid_info["XX"].shape)
+                grid_logdet_fields.append(np.where(np.isfinite(arr), arr, np.nan))
+
+            has_finite = any(np.isfinite(field).any() for field in grid_logdet_fields)
+            if has_finite:
+                finite_values = np.concatenate([
+                    field[np.isfinite(field)]
+                    for field in grid_logdet_fields
+                    if np.isfinite(field).any()
+                ])
+                color_min = float(np.min(finite_values))
+                color_max = float(np.max(finite_values))
+                if np.isclose(color_min, color_max):
+                    color_max = color_min + 1e-3
+            else:
+                color_min, color_max = -2.0, 2.0
+
+            num_timesteps = len(grid_logdet_fields)
+
+            path_history = np.stack(path_positions_pca, axis=0)  # [T, B, 2]
+            path_history_per_path = np.transpose(path_history, (1, 0, 2))
+
+            p_components = torch.tensor(
+                pca.components_[:2],
+                dtype=path_flow["metrics"][0].dtype,
+                device=self.device
+            )
+
+            theta = np.linspace(0.0, 2.0 * np.pi, 80)
+            circle = np.stack([np.cos(theta), np.sin(theta)], axis=1)
+            ellipse_points: List[List[np.ndarray]] = []
+            for t, metric in enumerate(path_flow["metrics"]):
+                metric = metric.to(self.device)
+                projected = torch.matmul(
+                    torch.matmul(p_components.unsqueeze(0), metric),
+                    p_components.unsqueeze(0).transpose(1, 2)
+                )
+                metric_np = projected.detach().cpu().numpy()
+
+                centers_t = path_positions_pca[t]
+                ellipses_t: List[np.ndarray] = []
+                for i in range(num_paths):
+                    eigvals, eigvecs = np.linalg.eigh(metric_np[i])
+                    eigvals = np.clip(eigvals, 1e-9, None)
+                    transform = eigvecs @ np.diag(1.0 / np.sqrt(eigvals))
+                    ellipse = circle @ transform.T + centers_t[i]
+                    ellipses_t.append(ellipse)
+                ellipse_points.append(ellipses_t)
+
+            palette = pc.qualitative.Dark24
+            colors = (palette * ((num_paths // len(palette)) + 1))[:num_paths]
+
+            traces = []
+            timestep_trace_indices: List[List[int]] = []
+
+            for t in range(num_timesteps):
+                indices: List[int] = []
+                contour_trace = go.Contour(
+                    x=grid_info["gx"],
+                    y=grid_info["gy"],
+                    z=grid_logdet_fields[t],
+                    coloraxis="coloraxis",
+                    contours=dict(showlines=False),
+                    hoverinfo="skip",
+                    showscale=(t == 0),
+                    visible=(t == 0),
+                    name=f"log₁₀ det(G) · t={t}"
+                )
+                traces.append(contour_trace)
+                indices.append(len(traces) - 1)
+
+                for path_idx in range(num_paths):
+                    history_xy = path_history_per_path[path_idx, :t + 1]
+                    line_trace = go.Scatter(
+                        x=history_xy[:, 0],
+                        y=history_xy[:, 1],
+                        mode="lines",
+                        line=dict(color=colors[path_idx], width=2),
+                        name=f"Path {path_idx}",
+                        legendgroup=f"path_{path_idx}",
+                        showlegend=(t == 0),
+                        visible=(t == 0)
+                    )
+                    traces.append(line_trace)
+                    indices.append(len(traces) - 1)
+
+                    marker_trace = go.Scatter(
+                        x=[path_history_per_path[path_idx, t, 0]],
+                        y=[path_history_per_path[path_idx, t, 1]],
+                        mode="markers",
+                        marker=dict(color=colors[path_idx], size=7, symbol="circle"),
+                        name=None,
+                        legendgroup=f"path_{path_idx}",
+                        showlegend=False,
+                        visible=(t == 0)
+                    )
+                    traces.append(marker_trace)
+                    indices.append(len(traces) - 1)
+
+                    ellipse_xy = ellipse_points[t][path_idx]
+                    ellipse_trace = go.Scatter(
+                        x=ellipse_xy[:, 0],
+                        y=ellipse_xy[:, 1],
+                        mode="lines",
+                        line=dict(color=colors[path_idx], dash="dot", width=1.2),
+                        name=None,
+                        legendgroup=f"path_{path_idx}",
+                        showlegend=False,
+                        visible=(t == 0)
+                    )
+                    traces.append(ellipse_trace)
+                    indices.append(len(traces) - 1)
+
+                timestep_trace_indices.append(indices)
+
+            total_traces = len(traces)
+            slider_steps = []
+            title_base = f"RHMC Flow Metric Slider (Epoch {epoch})"
+            for t, indices in enumerate(timestep_trace_indices):
+                visible = [False] * total_traces
+                for idx in indices:
+                    visible[idx] = True
+                slider_steps.append(
+                    dict(
+                        method="update",
+                        label=str(t),
+                        args=[{"visible": visible},
+                              {"title": f"{title_base} · timestep {t}"}]
+                    )
+                )
+
+            fig = go.Figure(data=traces)
+            fig.update_layout(
+                title=title_base,
+                xaxis=dict(title="PCA Component 1", scaleanchor="y", scaleratio=1),
+                yaxis=dict(title="PCA Component 2"),
+                width=960,
+                height=720,
+                hovermode="closest",
+                legend=dict(
+                    bgcolor="rgba(0,0,0,0.65)",
+                    bordercolor="rgba(255,255,255,0.5)",
+                    borderwidth=1,
+                    font=dict(color="white")
+                ),
+                sliders=[dict(
+                    active=0,
+                    currentvalue=dict(prefix="Timestep: "),
+                    pad=dict(t=40),
+                    steps=slider_steps
+                )],
+                coloraxis=dict(
+                    colorscale="Viridis",
+                    colorbar=dict(title="log₁₀ det(G)"),
+                    cmin=color_min,
+                    cmax=color_max
+                ),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="white")
+            )
+
+            self._apply_interactive_theme(fig)
+
+            html_path = self._get_output_path(
+                f"rhmc_flow_slider.html",
+                "interactive"
+            )
+            fig.write_html(html_path, include_plotlyjs="cdn")
+            print(f"💾 Saved RHMC flow slider: {html_path}")
+
+            if self.should_log_to_wandb():
+                with open(html_path, "r", encoding="utf-8") as handle:
+                    wandb.log({
+                        f"interactive/rhmc_flow_slider": wandb.Html(handle.read(), inject=False)
+                    })
+
+            max_spd = max(step.max().item() for step in path_flow["spd_errors"])
+            max_det_res = max(step.max().item() for step in path_flow["determinant_residuals"])
+            print(f"   ▸ RHMC metric SPD check max ||GG⁻¹−I|| = {max_spd:.2e}")
+            print(f"   ▸ RHMC determinant consistency Δ max = {max_det_res:.2e}")
+
+        except Exception as e:
+            print(f"⚠️ RHMC flow slider visualization failed: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self.model.train()
         
     def create_fancy_geodesics(self, x_sample: torch.Tensor, epoch: int):
         """Create fancy interactive geodesic visualizations with dense trajectories and a time slider."""
@@ -452,12 +1109,12 @@ class InteractiveVisualizations(BaseVisualization):
                 )
                 
                 # Save and log
-                html_filename = f'fancy_geodesic_analysis_slider_epoch_{epoch}.html'
+                html_filename = f'fancy_geodesic_analysis_slider.html'
                 html_path = self._get_output_path(html_filename, "interactive")
                 fig.write_html(html_path, include_plotlyjs=True)
                 print(f"💾 Saved fancy geodesic analysis with slider: {html_path}")
                 
-                png_filename = f'fancy_geodesic_analysis_slider_epoch_{epoch}.png'
+                png_filename = f'fancy_geodesic_analysis_slider.png'
                 saved_png = self._safe_write_image(fig, png_filename, width=1400, height=700)
                 
                 if self.should_log_to_wandb():
@@ -635,253 +1292,183 @@ class InteractiveVisualizations(BaseVisualization):
             
             return np.log10(combined)
     
-    def _create_interactive_geodesic_slider(self, z_seq, z_pca_seq, xx, yy, pca, epoch):
-        """Create interactive slider visualization for geodesic evolution."""
+    def _create_interactive_geodesic_slider(
+        self,
+        z_pca_seq: np.ndarray,
+        pca,
+        flows: Sequence[nn.Module],
+        grid_info: Dict[str, np.ndarray],
+        epoch: int,
+    ) -> None:
+        """Create a Plotly slider for geodesic trajectories with pushed-forward metrics."""
         try:
-            batch_size, n_obs, latent_dim = z_seq.shape
-            
-            # Project metric to PCA space
-            V = self._ensure_tensor_on_device(torch.tensor(pca.components_, dtype=torch.float32))
-            
-            # Pre-compute background fields for selected timesteps (fewer for performance)
-            timesteps_to_show = list(range(n_obs))  # Compute for every timestep (may be slow)
-            timestep_background_fields = {}
-            
-            print(f"📊 Computing background fields for timesteps: {timesteps_to_show}")
-            
-            grid_points_pca = np.column_stack([xx.ravel(), yy.ravel()])
-            grid_points_latent_base = pca.inverse_transform(grid_points_pca)
-            grid_tensor_base = self._ensure_tensor_on_device(torch.tensor(grid_points_latent_base, dtype=torch.float32))
-            
-            for t_bg in timesteps_to_show:
-                try:
-                    if t_bg == 0:
-                        grid_tensor_t = grid_tensor_base.clone()
-                    else:
-                        # Apply flows to transform grid
-                        grid_tensor_t = grid_tensor_base.clone()
-                        for flow_idx in range(min(t_bg, len(self._get_flows()))):
-                            flow = self._get_flows()[flow_idx]
-                            flow_result = flow(grid_tensor_t)
-                            # Handle tuple output (e.g., (tensor, log_det))
-                            if isinstance(flow_result, tuple):
-                                flow_result = flow_result[0]
-                            # Extract tensor if ModelOutput, else pass through
-                            if hasattr(flow_result, 'sample'):
-                                grid_tensor_t = flow_result.sample
-                            elif hasattr(flow_result, 'z'):
-                                grid_tensor_t = flow_result.z
-                            elif hasattr(flow_result, 'out'):
-                                grid_tensor_t = flow_result.out
-                            elif isinstance(flow_result, torch.Tensor):
-                                grid_tensor_t = flow_result
-                            else:
-                                raise TypeError(f"Flow {flow_idx} did not return a tensor, ModelOutput, or tuple with tensor as first element. Got: {type(flow_result)}")
-                            if not isinstance(grid_tensor_t, torch.Tensor):
-                                raise TypeError(f"After extraction, flow {flow_idx} did not yield a tensor.")
-                            grid_tensor_t = self._ensure_tensor_on_device(grid_tensor_t)
-                    
-                    # Ensure tensor is on correct device
-                    grid_tensor_t = self._ensure_tensor_on_device(grid_tensor_t)
-                    
-                    # Compute metric at transformed grid
-                    G_grid_t = self.model.G(grid_tensor_t)
-                    G_grid_t = self._ensure_tensor_on_device(G_grid_t)
-                    
-                    # Ensure V is on correct device
-                    V = self._ensure_tensor_on_device(V)
-                    
-                    # Handle potential dimension mismatches
-                    if G_grid_t.dim() == 2:  # [latent_dim, latent_dim] -> [N, latent_dim, latent_dim]
-                        G_grid_t = G_grid_t.unsqueeze(0).expand(grid_tensor_t.shape[0], -1, -1)
-                    elif G_grid_t.dim() == 3 and G_grid_t.shape[0] != grid_tensor_t.shape[0]:
-                        # If batch dimension mismatch, use first element for all
-                        G_grid_t = G_grid_t[0:1].expand(grid_tensor_t.shape[0], -1, -1)
-                    
-                    # Ensure V has correct batch dimension
-                    V_expanded = V.unsqueeze(0).expand(G_grid_t.shape[0], -1, -1)
-                    VT_expanded = V.T.unsqueeze(0).expand(G_grid_t.shape[0], -1, -1)
-                    
-                    # Ensure all tensors are on same device before matrix operations
-                    V_expanded = self._ensure_tensor_on_device(V_expanded)
-                    VT_expanded = self._ensure_tensor_on_device(VT_expanded)
-                    
-                    # Compute G_pca_t = V @ G @ V.T
-                    G_pca_t = torch.matmul(torch.matmul(V_expanded, G_grid_t), VT_expanded)
-                    det_G_pca_t = torch.linalg.det(G_pca_t).cpu().numpy().reshape(xx.shape)
-                    
-                    timestep_background_fields[t_bg] = {'det_G_pca': det_G_pca_t}
-                    
-                except Exception as e:
-                    print(f"⚠️ Background computation failed for t={t_bg}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    timestep_background_fields[t_bg] = {'det_G_pca': np.ones(xx.shape)}
-            
-            # Compute metrics at flow-evolved coordinates
-            timestep_geodesic_data = []
-            for t in range(n_obs):
-                z_t_pca = z_pca_seq[:, t, :]
-                z_t_latent = z_seq[:, t, :].cpu().numpy()
-                z_t_tensor = self._ensure_tensor_on_device(torch.tensor(z_t_latent, dtype=torch.float32))
-                
-                try:
-                    # Compute metric
-                    G_t = self.model.G(z_t_tensor)
-                    G_t = self._ensure_tensor_on_device(G_t)
-                    
-                    # Ensure V is on correct device
-                    V = self._ensure_tensor_on_device(V)
-                    
-                    # Handle potential dimension mismatches
-                    if G_t.dim() == 2:  # [latent_dim, latent_dim] -> [N, latent_dim, latent_dim]
-                        G_t = G_t.unsqueeze(0).expand(z_t_tensor.shape[0], -1, -1)
-                    elif G_t.dim() == 3 and G_t.shape[0] != z_t_tensor.shape[0]:
-                        # If batch dimension mismatch, use first element for all
-                        G_t = G_t[0:1].expand(z_t_tensor.shape[0], -1, -1)
-                    
-                    # Ensure V has correct batch dimension  
-                    V_expanded = V.unsqueeze(0).expand(G_t.shape[0], -1, -1)
-                    VT_expanded = V.T.unsqueeze(0).expand(G_t.shape[0], -1, -1)
-                    
-                    # Ensure all tensors are on same device before matrix operations
-                    V_expanded = self._ensure_tensor_on_device(V_expanded)
-                    VT_expanded = self._ensure_tensor_on_device(VT_expanded)
-                    
-                    # Compute G_t_pca = V @ G @ V.T
-                    G_t_pca = torch.matmul(torch.matmul(V_expanded, G_t), VT_expanded)
-                    det_t = torch.linalg.det(G_t_pca).cpu().numpy()
-                    
-                    timestep_geodesic_data.append({
-                        'positions': z_t_pca,
-                        'det': det_t
-                    })
-                except Exception as e:
-                    print(f"⚠️ Metric computation failed for t={t}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    timestep_geodesic_data.append({
-                        'positions': z_t_pca,
-                        'det': np.ones(len(z_t_pca))
-                    })
-            
-            # Create interactive plot - SMALLER SIZE
-            fig = make_subplots(
-                rows=1, cols=1,
-                subplot_titles=["🎯 Geodesic Trajectories"],
-                horizontal_spacing=0.15
+            trajectories_full = np.asarray(z_pca_seq)
+            if trajectories_full.ndim != 3 or trajectories_full.shape[-1] < 2:
+                print("⚠️ PCA projections must be of shape [batch, timesteps, 2]")
+                return
+
+            batch_size, n_obs, _ = trajectories_full.shape
+            flows_list = list(flows) if flows else []
+            max_steps = min(len(flows_list), max(n_obs - 1, 0)) if flows_list else 0
+
+            grid_flow = self._compute_metric_flow_evolution(
+                base_points=grid_info["latent_grid"],
+                flows=flows_list,
+                max_steps=max_steps,
             )
-            
-            # Create frames for each timestep
-            frames = []
-            palette = px.colors.qualitative.Set3
-            colors = (palette * ((min(batch_size, 16) // len(palette)) + 1))[:min(batch_size, 16)]
-            
-            for t in range(n_obs):
-                frame_data = []
-                geo_data = timestep_geodesic_data[t]
-                
-                # Get background field (use closest computed timestep)
-                closest_t = min(timesteps_to_show, key=lambda x: abs(x - t))
-                bg_fields = timestep_background_fields.get(closest_t, {'det_G_pca': np.ones(xx.shape)})
-                det_G_pca_t = bg_fields['det_G_pca']
-                
-                # Panel 1: Geodesic trajectories
-                frame_data.append(
-                    go.Contour(
-                        x=np.linspace(xx.min(), xx.max(), xx.shape[1]),
-                        y=np.linspace(yy.min(), yy.max(), yy.shape[0]),
-                        z=np.log10(np.clip(det_G_pca_t, 1e-10, None)),
-                        colorscale='Viridis',
-                        showscale=True,
-                        colorbar=dict(title="log₁₀(det(G))", x=0.45, len=0.8),
-                        opacity=0.3,
-                        name="det(G) field",
-                        xaxis='x', yaxis='y',
-                        ncontours=100,
-                        line_smoothing=0.85
+
+            grid_metrics = grid_flow["metrics"]
+            if not grid_metrics:
+                print("⚠️ No metric tensors available for geodesic slider")
+                return
+
+            num_steps = min(len(grid_metrics), n_obs)
+            grid_logdet_fields = []
+            for metric in grid_metrics[:num_steps]:
+                log_values = self._log10_det(metric).detach().cpu().numpy()
+                log_values = log_values.reshape(grid_info["XX"].shape)
+                log_values = np.where(np.isfinite(log_values), log_values, np.nan)
+                grid_logdet_fields.append(log_values)
+
+            has_finite = any(np.isfinite(field).any() for field in grid_logdet_fields)
+            if has_finite:
+                finite_values = np.concatenate([
+                    field[np.isfinite(field)]
+                    for field in grid_logdet_fields
+                    if np.isfinite(field).any()
+                ])
+                color_min = float(np.min(finite_values))
+                color_max = float(np.max(finite_values))
+                if np.isclose(color_min, color_max):
+                    color_max = color_min + 1e-3
+            else:
+                color_min, color_max = -2.0, 2.0
+
+            trajectories = trajectories_full[:, :num_steps, :]
+            viz_count = min(self._get_viz_count(), trajectories.shape[0])
+            if viz_count == 0:
+                print("⚠️ No trajectories available for geodesic slider")
+                return
+
+            palette = pc.qualitative.Dark24
+            colors = (palette * ((viz_count // len(palette)) + 1))[:viz_count]
+
+            traces = []
+            timestep_indices: List[List[int]] = []
+
+            for t in range(num_steps):
+                indices: List[int] = []
+                contour_trace = go.Contour(
+                    x=grid_info["gx"],
+                    y=grid_info["gy"],
+                    z=grid_logdet_fields[t],
+                    coloraxis="coloraxis",
+                    contours=dict(showlines=False),
+                    hoverinfo="skip",
+                    showscale=(t == 0),
+                    visible=(t == 0),
+                    name=f"log₁₀ det(G) · t={t}"
+                )
+                traces.append(contour_trace)
+                indices.append(len(traces) - 1)
+
+                for idx in range(viz_count):
+                    history = trajectories[idx, :t + 1, :]
+                    line_trace = go.Scatter(
+                        x=history[:, 0],
+                        y=history[:, 1],
+                        mode="lines",
+                        line=dict(color=colors[idx], width=2),
+                        name=f"Sequence {idx}",
+                        legendgroup=f"seq_{idx}",
+                        showlegend=(t == 0),
+                        visible=(t == 0)
+                    )
+                    traces.append(line_trace)
+                    indices.append(len(traces) - 1)
+
+                    marker_trace = go.Scatter(
+                        x=[trajectories[idx, t, 0]],
+                        y=[trajectories[idx, t, 1]],
+                        mode="markers",
+                        marker=dict(color=colors[idx], size=7, symbol="circle"),
+                        name=None,
+                        legendgroup=f"seq_{idx}",
+                        showlegend=False,
+                        visible=(t == 0)
+                    )
+                    traces.append(marker_trace)
+                    indices.append(len(traces) - 1)
+
+                timestep_indices.append(indices)
+
+            total_traces = len(traces)
+            slider_steps = []
+            title_base = f"Geodesic Metric Slider (Epoch {epoch})"
+            for t, indices in enumerate(timestep_indices):
+                visible = [False] * total_traces
+                for idx in indices:
+                    visible[idx] = True
+                slider_steps.append(
+                    dict(
+                        method="update",
+                        label=str(t),
+                        args=[{"visible": visible},
+                              {"title": f"{title_base} · timestep {t}"}]
                     )
                 )
-                
-                # Add trajectory paths (limit sequences)
-                for seq_idx in range(min(batch_size, 16)):
-                    traj_segment = z_pca_seq[seq_idx, :t+1, :]
-                    if len(traj_segment) > 1:
-                        frame_data.append(
-                            go.Scatter(
-                                x=traj_segment[:, 0],
-                                y=traj_segment[:, 1],
-                                mode='lines+markers',
-                                line=dict(color=colors[seq_idx], width=2),
-                                marker=dict(size=4, color=colors[seq_idx]),
-                                name=f"Path {seq_idx}",
-                                showlegend=(t == 0),
-                                xaxis='x', yaxis='y'
-                            )
-                        )
-                    
-                    # Current position
-                    frame_data.append(
-                        go.Scatter(
-                            x=[geo_data['positions'][seq_idx, 0]],
-                            y=[geo_data['positions'][seq_idx, 1]],
-                            mode='markers',
-                            marker=dict(size=8, color=colors[seq_idx], symbol='star'),
-                            name=f"t={t}",
-                            showlegend=False,
-                            xaxis='x', yaxis='y'
-                        )
-                    )
-                
-                frames.append(go.Frame(data=frame_data, name=str(t)))
-            
-            # Set initial frame
-            fig.add_traces(frames[0].data)
-            fig.frames = frames
-            
-            # Update layout - SMALLER SIZE
+
+            fig = go.Figure(data=traces)
             fig.update_layout(
-                title=f"🎚️ Interactive Geodesic Evolution - Epoch {epoch}",
-                sliders=[{
-                    "active": 0,
-                    "currentvalue": {"prefix": "Timestep: ", "visible": True, "font": {"color": "white"}},
-                    "pad": {"b": 10, "t": 50},
-                    "steps": [{"args": [[f], {"frame": {"duration": 300, "redraw": True}}], 
-                             "label": str(t), "method": "animate"} 
-                             for t, f in enumerate(frames)]
-                }],
-                width=1000,  # SMALLER
-                height=500,  # SMALLER
-                showlegend=True,
+                title=title_base,
+                xaxis=dict(title="PCA Component 1", scaleanchor="y", scaleratio=1),
+                yaxis=dict(title="PCA Component 2"),
+                width=960,
+                height=560,
+                hovermode="closest",
                 legend=dict(
-                    bgcolor='rgba(20,20,20,0.9)',  # Dark background for visibility
-                    bordercolor='white',
-                    borderwidth=2,
-                    font=dict(size=12, color='white')
+                    bgcolor="rgba(0,0,0,0.65)",
+                    bordercolor="rgba(255,255,255,0.5)",
+                    borderwidth=1,
+                    font=dict(color="white")
                 ),
-                # Dark theme to match Wandb
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)',
-                font=dict(color='white')
+                sliders=[dict(
+                    active=0,
+                    currentvalue=dict(prefix="Timestep: "),
+                    pad=dict(t=40),
+                    steps=slider_steps
+                )],
+                coloraxis=dict(
+                    colorscale="Viridis",
+                    colorbar=dict(title="log₁₀ det(G)"),
+                    cmin=color_min,
+                    cmax=color_max
+                ),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="white")
             )
-            
-            # Save interactive HTML
-            html_filename = f'geodesic_sliders_epoch_{epoch}.html'
-            html_path = self._get_output_path(html_filename, "interactive")
-            fig.write_html(html_path, include_plotlyjs=True)
+
+            self._apply_interactive_theme(fig)
+
+            html_path = self._get_output_path(
+                f"geodesic_slider.html",
+                "interactive"
+            )
+            fig.write_html(html_path, include_plotlyjs="cdn")
             print(f"💾 Saved geodesic sliders: {html_path}")
-            
-            # Save static version
-            png_filename = f'geodesic_sliders_epoch_{epoch}.png'
-            saved_png = self._safe_write_image(fig, png_filename, width=1000, height=500)
-            
-            # Log to WandB
+
             if self.should_log_to_wandb():
-                log_dict = {"interactive/geodesic_sliders": wandb.Html(html_path)}
-                if saved_png and saved_png.endswith('.png'):
-                    log_dict["interactive/geodesic_sliders_static"] = wandb.Image(saved_png)
-                wandb.log(log_dict)
-            
+                with open(html_path, "r", encoding="utf-8") as handle:
+                    wandb.log({
+                        "interactive/geodesic_sliders": wandb.Html(handle.read(), inject=False)
+                    })
+
+            max_spd = max(step.max().item() for step in grid_flow["spd_errors"][:num_steps])
+            max_det_res = max(step.max().item() for step in grid_flow["determinant_residuals"][:num_steps])
+            print(f"   ▸ Geodesic metric SPD check max ||GG⁻¹−I|| = {max_spd:.2e}")
+            print(f"   ▸ Geodesic determinant consistency Δ max = {max_det_res:.2e}")
+
         except Exception as e:
             print(f"⚠️ Interactive geodesic slider creation failed: {e}")
     
@@ -1219,13 +1806,13 @@ class InteractiveVisualizations(BaseVisualization):
                 )
                 
                 # Save without opening in browser
-                html_filename = f'interactive_metric_slider_epoch_{epoch}.html'
+                html_filename = f'interactive_metric_slider.html'
                 html_path = self._get_output_path(html_filename, "interactive")
                 fig.write_html(html_path, include_plotlyjs=True)
                 print(f"💾 Saved interactive metric slider: {html_path}")
                 
                 if self.should_log_to_wandb():
-                    wandb.log({f"interactive/metric_slider_epoch_{epoch}": wandb.Html(html_path)})
+                    wandb.log({f"interactive/metric_slider": wandb.Html(html_path)})
         except Exception as e:
             print(f"⚠️ Failed to create interactive metric slider: {e}")
             import traceback
@@ -1412,11 +1999,11 @@ class InteractiveVisualizations(BaseVisualization):
                 fig.update_yaxes(title_text="det(G)", row=1, col=2)
                 
                 # Save animation
-                html_filename = f'temporal_metric_animation_epoch_{epoch}.html'
+                html_filename = f'temporal_metric_animation.html'
                 html_path = self._get_output_path(html_filename, "interactive")
                 fig.write_html(html_path, include_plotlyjs=True)
                 
-                static_filename = f'temporal_metric_animation_epoch_{epoch}.png'
+                static_filename = f'temporal_metric_animation.png'
                 saved_png = self._safe_write_image(fig, static_filename, width=1200, height=500)
                 
                 if self.should_log_to_wandb():
@@ -1474,7 +2061,7 @@ class InteractiveVisualizations(BaseVisualization):
                 
                 # Create SMALLER images directory
                 import os
-                images_dir = f"html_latent_images_epoch_{epoch}"
+                images_dir = f"html_latent_images"
                 os.makedirs(images_dir, exist_ok=True)
                 
                 # Save SMALLER images (downsampled for performance)
@@ -1491,7 +2078,7 @@ class InteractiveVisualizations(BaseVisualization):
                 
                 # Generate COMPACT HTML
                 self._generate_compact_html_file(
-                    f"interactive_latent_space_epoch_{epoch}.html",
+                    f"interactive_latent_space.html",
                     latents_2d, sequence_info, images_dir, pca
                 )
                 
@@ -1639,254 +2226,199 @@ class InteractiveVisualizations(BaseVisualization):
         print(f"💾 Saved compact HTML: {html_path}")
 
     def create_sequence_slider_visualization(self, x_sample: torch.Tensor, epoch: int):
-        """
-        Interactive visualization: slider to select a sequence, showing
-        - Original sequence (row of images)
-        - Reconstructed sequence (row of images)
-        - Latent trajectory (PCA) for that sequence
-        """
+        """Interactive sequence explorer with original/recon mosaics and latent PCA."""
         if not PLOTLY_AVAILABLE:
             print("⚠️ Plotly not available - skipping sequence slider visualization")
             return
+
         print(f"🖼️ Creating interactive sequence slider visualization for epoch {epoch}")
         try:
             from plotly.subplots import make_subplots
-            import plotly.io as pio
+
             self._ensure_model_on_device()
             self.model.eval()
+
             with torch.no_grad():
                 result = self.model_forward(x_sample)
-                # x_sample: [batch, n_obs, C, H, W]
                 if isinstance(result, dict):
-                    z_seq = result['latent_samples']  # [batch, n_obs, latent_dim]
-                    # Accept both 'reconstructions' and 'reconstruction'
-                    if 'reconstructions' in result:
-                        recon_seq = result['reconstructions']
-                    elif 'reconstruction' in result:
-                        recon_seq = result['reconstruction']
-                    else:
-                        raise KeyError("Model output dict must contain 'reconstructions' or 'reconstruction'")
+                    latents = result.get("latent_samples")
+                    if latents is None:
+                        latents = result.get("z")
+                    if latents is None:
+                        latents = result.get("latents")
+
+                    recon_seq = result.get("reconstructions")
+                    if recon_seq is None:
+                        recon_seq = result.get("reconstruction")
+                    if recon_seq is None:
+                        recon_seq = result.get("recon_x")
                 else:
-                    z_seq = result.z
-                    recon_seq = result.recon_x
-                x_seq = x_sample.cpu().numpy()
-                recon_seq = recon_seq.cpu().numpy()
-                z_seq = z_seq.cpu().numpy()
-                batch_size, n_obs = x_seq.shape[0], x_seq.shape[1]
-                # Limit number of sequences
-                sequence_viz_count = getattr(self.config.visualization, 'sequence_viz_count', 8)
-                if isinstance(sequence_viz_count, str) and sequence_viz_count == 'all':
-                    n_sequences = batch_size
-                else:
-                    n_sequences = min(int(sequence_viz_count), batch_size)
-                if n_sequences < int(getattr(self.config.visualization, 'sequence_viz_count', 8)):
-                    print(f"⚠️ Only {n_sequences} sequences available for visualization (requested {getattr(self.config.visualization, 'sequence_viz_count', 8)})")
-                # PCA for latent trajectory
-                from sklearn.decomposition import PCA
-                z_flat = z_seq[:n_sequences].reshape(-1, z_seq.shape[-1])
-                pca = PCA(n_components=2)
-                z_pca = pca.fit_transform(z_flat).reshape(n_sequences, n_obs, 2)
-                # Prepare images for plotly
-                def to_img_array(img):
-                    # img: [C, H, W] or [H, W, C]
-                    if img.shape[0] <= 4:  # [C, H, W]
+                    latents = getattr(result, "latent_samples", None)
+                    if latents is None:
+                        latents = getattr(result, "z", None)
+                    if latents is None:
+                        latents = getattr(result, "latents", None)
+
+                    recon_seq = getattr(result, "recon_x", None)
+                    if recon_seq is None:
+                        recon_seq = getattr(result, "reconstructions", None)
+                if latents is None or recon_seq is None:
+                    raise ValueError("Sequence slider requires latent samples and reconstructions")
+
+            x_np = x_sample.detach().cpu().numpy()
+            recon_np = recon_seq.detach().cpu().numpy()
+            z_np = latents.detach().cpu().numpy()
+
+            batch_size, n_obs = x_np.shape[:2]
+            requested = getattr(self.config.visualization, 'sequence_viz_count', 8)
+            if isinstance(requested, str) and requested == 'all':
+                n_sequences = batch_size
+            else:
+                n_sequences = min(int(requested), batch_size)
+            if n_sequences == 0:
+                print("⚠️ No sequences available for slider visualization")
+                return
+
+            from sklearn.decomposition import PCA
+            z_flat = z_np[:n_sequences].reshape(-1, z_np.shape[-1])
+            pca = PCA(n_components=2)
+            z_pca = pca.fit_transform(z_flat).reshape(n_sequences, n_obs, 2)
+
+            x_bounds = [z_pca[:, :, 0].min(), z_pca[:, :, 0].max()]
+            y_bounds = [z_pca[:, :, 1].min(), z_pca[:, :, 1].max()]
+            if x_bounds[0] == x_bounds[1]:
+                x_bounds[1] = x_bounds[0] + 1.0
+            if y_bounds[0] == y_bounds[1]:
+                y_bounds[1] = y_bounds[0] + 1.0
+            pad_x = 0.1 * (x_bounds[1] - x_bounds[0])
+            pad_y = 0.1 * (y_bounds[1] - y_bounds[0])
+            x_range = [x_bounds[0] - pad_x, x_bounds[1] + pad_x]
+            y_range = [y_bounds[0] - pad_y, y_bounds[1] + pad_y]
+
+            def to_rgb_panel(sequence: np.ndarray) -> np.ndarray:
+                tiles = []
+                for t in range(n_obs):
+                    img = sequence[t]
+                    if img.ndim == 3 and img.shape[0] <= 4:
                         img = np.transpose(img, (1, 2, 0))
-                    img = np.clip(img, 0, 1)
-                    return (img * 255).astype(np.uint8)
-                # Build frames for slider
-                frames = []
-                for seq_idx in range(n_sequences):
-                    # Original and recon images
-                    orig_imgs = [to_img_array(x_seq[seq_idx, t]) for t in range(n_obs)]
-                    recon_imgs = [to_img_array(recon_seq[seq_idx, t]) for t in range(n_obs)]
-                    # Latent trajectory
-                    z_traj = z_pca[seq_idx]
-                    # Build subplot
-                    fig = make_subplots(
-                        rows=3, cols=n_obs,
-                        subplot_titles=None,  # We'll add custom annotations instead
-                        row_heights=[0.2, 0.2, 0.6],  # Even larger trajectory plot (was 0.25, 0.25, 0.5)
-                        vertical_spacing=0.02,  # Much reduced spacing (was 0.05)
-                        horizontal_spacing=0.02,  # Slightly more horizontal spacing
-                        specs=[[{"type": "xy"} for _ in range(n_obs)] for _ in range(2)] + 
-                              [[{"type": "xy", "colspan": n_obs}] + [None] * (n_obs-1)]  # Trajectory spans ALL columns for maximum width
-                    )
-                    
-                    # Add custom row labels (cleaner than overlapping titles)
-                    fig.add_annotation(
-                        text="<b>Original</b>", 
-                        xref="paper", yref="paper",
-                        x=-0.05, y=0.9, xanchor='right', yanchor='middle',  # Adjusted for new spacing
-                        showarrow=False, font=dict(size=14, color='white')
-                    )
-                    fig.add_annotation(
-                        text="<b>Reconstructed</b>", 
-                        xref="paper", yref="paper", 
-                        x=-0.05, y=0.7, xanchor='right', yanchor='middle',  # Adjusted for new spacing
-                        showarrow=False, font=dict(size=14, color='white')
-                    )
-                    fig.add_annotation(
-                        text="<b>Latent Trajectory (PCA)</b>", 
-                        xref="paper", yref="paper",
-                        x=-0.05, y=0.3, xanchor='right', yanchor='middle',  # Adjusted for larger plot
-                        showarrow=False, font=dict(size=16, color='white', family='Arial Black')
-                    )
-                    
-                    # Add timestep labels at the top
-                    for t in range(n_obs):
-                        fig.add_annotation(
-                            text=f"<b>t={t}</b>",
-                            xref="paper", yref="paper",
-                            x=(t + 0.5) / n_obs, y=0.98,  # Top of the figure
-                            xanchor='center', yanchor='top',
-                            showarrow=False, font=dict(size=12, color='white')
-                        )
-                    
-                    # Row 1: original images
-                    for t in range(n_obs):
-                        fig.add_trace(
-                            go.Image(z=orig_imgs[t], name=f"Original t={t}"),
-                            row=1, col=t+1
-                        )
-                    # Row 2: recon images
-                    for t in range(n_obs):
-                        fig.add_trace(
-                            go.Image(z=recon_imgs[t], name=f"Recon t={t}"),
-                            row=2, col=t+1
-                        )
-                    # Calculate auto-scaling bounds for PCA plot (across all sequences)
-                    all_z_pca = np.array([z_pca[i] for i in range(n_sequences)])
-                    x_min, x_max = all_z_pca[:, :, 0].min(), all_z_pca[:, :, 0].max()
-                    y_min, y_max = all_z_pca[:, :, 1].min(), all_z_pca[:, :, 1].max()
-                    # Add some padding (10%)
-                    x_padding = (x_max - x_min) * 0.1
-                    y_padding = (y_max - y_min) * 0.1
-                    x_range = [x_min - x_padding, x_max + x_padding]
-                    y_range = [y_min - y_padding, y_max + y_padding]
-                    
-                    # Row 3: latent trajectory (PCA) - spans multiple columns for larger display
-                    fig.add_trace(
-                        go.Scatter(x=z_traj[:, 0], y=z_traj[:, 1], mode='lines+markers',
-                                   marker=dict(size=12, color='cyan', line=dict(width=2, color='white')),
-                                   line=dict(width=4, color='cyan'),
-                                   name='Trajectory'),
-                        row=3, col=1
-                    )
-                    fig.add_trace(
-                        go.Scatter(x=[z_traj[0, 0]], y=[z_traj[0, 1]], mode='markers',
-                                   marker=dict(size=16, color='lime', symbol='square', line=dict(width=2, color='white')),
-                                   name='Start'),
-                        row=3, col=1
-                    )
-                    fig.add_trace(
-                        go.Scatter(x=[z_traj[-1, 0]], y=[z_traj[-1, 1]], mode='markers',
-                                   marker=dict(size=16, color='red', symbol='star', line=dict(width=2, color='white')),
-                                   name='End'),
-                        row=3, col=1
-                    )
-                    
-                    # Hide axes for image rows
-                    for t in range(n_obs):
-                        fig.update_xaxes(showticklabels=False, showgrid=False, zeroline=False, row=1, col=t+1)
-                        fig.update_yaxes(showticklabels=False, showgrid=False, zeroline=False, row=1, col=t+1)
-                        fig.update_xaxes(showticklabels=False, showgrid=False, zeroline=False, row=2, col=t+1)
-                        fig.update_yaxes(showticklabels=False, showgrid=False, zeroline=False, row=2, col=t+1)
-                    
-                    # Show proper labels and styling for trajectory plot (larger and more prominent) with auto-scaling
-                    fig.update_xaxes(
-                        title_text='<b>PC1</b>', 
-                        showgrid=True, 
-                        zeroline=True, 
-                        gridcolor='rgba(255,255,255,0.3)',
-                        title_font=dict(size=14, color='white'),
-                        tickfont=dict(size=12, color='white'),
-                        range=x_range,  # Auto-scaled range
-                        row=3, col=1
-                    )
-                    fig.update_yaxes(
-                        title_text='<b>PC2</b>', 
-                        showgrid=True, 
-                        zeroline=True, 
-                        gridcolor='rgba(255,255,255,0.3)',
-                        title_font=dict(size=14, color='white'),
-                        tickfont=dict(size=12, color='white'),
-                        range=y_range,  # Auto-scaled range
-                        row=3, col=1
-                    )
-                    
-                    fig.update_layout(
-                        title=dict(
-                            text=f"<b>Sequence {seq_idx} (Epoch {epoch})</b>",
-                            x=0.5,
-                            xanchor='center',
-                            font=dict(size=18, color='white')
+                    if img.ndim == 2 or img.shape[2] == 1:
+                        img = np.repeat(img[..., None], 3, axis=2)
+                    img = np.clip(img, 0.0, 1.0)
+                    tiles.append((img * 255).astype(np.uint8))
+                return np.concatenate(tiles, axis=1)
+
+            orig_panels = [to_rgb_panel(x_np[idx]) for idx in range(n_sequences)]
+            recon_panels = [to_rgb_panel(recon_np[idx]) for idx in range(n_sequences)]
+
+            palette = pc.qualitative.Dark24
+            trajectory_color = palette[0] if palette else "#1f77b4"
+
+            fig = make_subplots(
+                rows=2,
+                cols=2,
+                column_widths=[0.55, 0.45],
+                row_heights=[0.55, 0.45],
+                horizontal_spacing=0.08,
+                vertical_spacing=0.08,
+                specs=[[{"type": "image"}, {"type": "image"}], [{"type": "scatter", "colspan": 2}, None]],
+                subplot_titles=("Original", "Reconstruction", "Latent Trajectory (PCA)")
+            )
+
+            fig.add_trace(go.Image(z=orig_panels[0]), row=1, col=1)
+            fig.add_trace(go.Image(z=recon_panels[0]), row=1, col=2)
+            fig.add_trace(
+                go.Scatter(
+                    x=z_pca[0, :, 0],
+                    y=z_pca[0, :, 1],
+                    mode="lines+markers",
+                    line=dict(color=trajectory_color, width=3),
+                    marker=dict(size=8, color=trajectory_color),
+                    name="Trajectory"
+                ),
+                row=2,
+                col=1
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=[z_pca[0, -1, 0]],
+                    y=[z_pca[0, -1, 1]],
+                    mode="markers",
+                    marker=dict(size=10, color="#d62728", symbol="star"),
+                    name="End"
+                ),
+                row=2,
+                col=1
+            )
+
+            fig.update_xaxes(showticklabels=False, showgrid=False, row=1, col=1)
+            fig.update_yaxes(showticklabels=False, showgrid=False, row=1, col=1)
+            fig.update_xaxes(showticklabels=False, showgrid=False, row=1, col=2)
+            fig.update_yaxes(showticklabels=False, showgrid=False, row=1, col=2)
+            fig.update_xaxes(title="PC1", range=x_range, row=2, col=1)
+            fig.update_yaxes(title="PC2", range=y_range, row=2, col=1)
+
+            frames = []
+            for idx in range(n_sequences):
+                frames.append(go.Frame(
+                    data=[
+                        go.Image(z=orig_panels[idx]),
+                        go.Image(z=recon_panels[idx]),
+                        go.Scatter(
+                            x=z_pca[idx, :, 0],
+                            y=z_pca[idx, :, 1],
+                            mode="lines+markers",
+                            line=dict(color=trajectory_color, width=3),
+                            marker=dict(size=8, color=trajectory_color),
+                            name="Trajectory"
                         ),
-                        height=800,  # Taller to accommodate larger trajectory plot
-                        width=max(1000, 120*n_obs),  # Wider to accommodate better layout
-                        margin=dict(l=80, r=120, t=60, b=40),  # More right margin for legend
-                        showlegend=True,
-                        legend=dict(
-                            x=1.02,  # Position legend outside plot area
-                            y=0.25,   # Align with trajectory plot
-                            xanchor='left',
-                            yanchor='middle',
-                            bgcolor='rgba(20,20,20,0.9)',  # Darker background
-                            bordercolor='white',
-                            borderwidth=2,
-                            font=dict(size=12, color='white')
+                        go.Scatter(
+                            x=[z_pca[idx, -1, 0]],
+                            y=[z_pca[idx, -1, 1]],
+                            mode="markers",
+                            marker=dict(size=10, color="#d62728", symbol="star"),
+                            name="End"
                         ),
-                        # Dark theme to match Wandb
-                        paper_bgcolor='rgba(0,0,0,0)',  # Transparent background
-                        plot_bgcolor='rgba(0,0,0,0)',   # Transparent plot area
-                        font=dict(color='white', size=11)  # White text
-                    )
-                    frames.append(fig)
-                # Create slider
-                # Use the first frame as the initial figure
-                fig = frames[0]
-                # Add slider steps
-                steps = []
-                for i, frame in enumerate(frames):
-                    steps.append(dict(
-                        method="animate",
-                        args=[[f"frame{i}"], {"frame": {"duration": 0, "redraw": True}, "mode": "immediate"}],
-                        label=f"Seq {i}"
-                    ))
-                # Add frames to the figure
-                fig.frames = [go.Frame(data=frame.data, name=f"frame{i}") for i, frame in enumerate(frames)]
-                fig.update_layout(
-                    sliders=[{
-                        "active": 0,
-                        "yanchor": "top",
-                        "xanchor": "left",
-                        "currentvalue": {
-                            "font": {"size": 14, "color": "white"}, 
-                            "prefix": "Sequence: ", 
-                            "visible": True, 
-                            "xanchor": "left"
-                        },
-                        "transition": {"duration": 300, "easing": "cubic-in-out"},
-                        "pad": {"b": 10, "t": 10},
-                        "len": 0.6,  # Even shorter slider to make room for wider layout
-                        "x": 0.2,    # More centered
-                        "y": -0.06,  # Match play button position
-                        "steps": steps
-                    }],
-                    # Dark theme for overall figure
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    plot_bgcolor='rgba(0,0,0,0)',
-                    font=dict(color='white'),
-                    # Better margins to accommodate larger layout
-                    margin=dict(l=80, r=120, t=60, b=60)
-                )
-                # Save without opening in browser
-                html_filename = f'sequence_slider_epoch_{epoch}.html'
-                html_path = self._get_output_path(html_filename, "interactive")
-                fig.write_html(html_path, include_plotlyjs=True)
-                print(f"💾 Saved interactive sequence slider: {html_path}")
-                
-                if self.should_log_to_wandb():
-                    wandb.log({f"interactive/sequence_slider_epoch_{epoch}": wandb.Html(html_path)})
+                    ],
+                    name=str(idx)
+                ))
+
+            fig.frames = frames
+            fig.update_layout(
+                height=620,
+                width=980,
+                title=f"Sequence Explorer (Epoch {epoch})",
+                margin=dict(l=60, r=40, t=60, b=60),
+                legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.2),
+                sliders=[dict(
+                    active=0,
+                    currentvalue=dict(prefix="Sequence: ", font=dict(size=14)),
+                    pad=dict(t=20),
+                    len=0.7,
+                    x=0.15,
+                    y=-0.08,
+                    steps=[
+                        dict(
+                            method="animate",
+                            args=[[str(idx)], {"frame": {"duration": 0, "redraw": True}, "mode": "immediate"}],
+                            label=f"Seq {idx}"
+                        )
+                        for idx in range(n_sequences)
+                    ]
+                )]
+            )
+
+            self._apply_interactive_theme(fig)
+
+            html_filename = f'sequence_slider.html'
+            html_path = self._get_output_path(html_filename, "interactive")
+            fig.write_html(html_path, include_plotlyjs=True)
+            print(f"💾 Saved interactive sequence slider: {html_path}")
+
+            if self.should_log_to_wandb():
+                with open(html_path, "r", encoding="utf-8") as f:
+                    wandb.log({
+                        f"interactive/sequence_slider": wandb.Html(f.read(), inject=False)
+                    })
         except Exception as e:
             print(f"⚠️ Sequence slider visualization failed: {e}")
             import traceback
@@ -1894,963 +2426,470 @@ class InteractiveVisualizations(BaseVisualization):
         self.model.train()
 
     def create_time_curvature_heatmap(self, x_sample: torch.Tensor, epoch: int):
-        """Visualize the Jacobian-based 'energy landscape' for time evolution between timesteps, as a single interactive figure with a time slider."""
+        """Visualize log₁₀ |det J_t| for each flow step with a static slider."""
         if not PLOTLY_AVAILABLE:
             print("⚠️ Plotly not available - skipping time curvature heatmap")
             return
-        # Generate at epoch 0 and every 30 epochs
+
         if epoch != 0 and epoch % 30 != 0:
             return
-        print(f"⛰️ Creating time-evolution curvature heatmap slider for all timesteps at epoch {epoch}")
+
+        flows_seq = self._get_flows()
+        if flows_seq is None or len(flows_seq) == 0:
+            print("⚠️ No flows available for time curvature heatmap")
+            return
+
+        print(f"⛰️ Creating time-evolution curvature heatmap slider for epoch {epoch}")
+
         try:
             self._ensure_model_on_device()
             self.model.eval()
+
             with torch.no_grad():
-                result = self.model_forward(x_sample)
-                z_seq = result['latent_samples'] if isinstance(result, dict) else result.z  # [batch_size, n_obs, latent_dim]
-                batch_size, n_obs, latent_dim = z_seq.shape
-                z_pca_seq, pca = self._prepare_pca_data(z_seq, n_components=2)
-                x_min, x_max = z_pca_seq[:, :, 0].min() - 0.5, z_pca_seq[:, :, 0].max() + 0.5
-                y_min, y_max = z_pca_seq[:, :, 1].min() - 0.5, z_pca_seq[:, :, 1].max() + 0.5
-                nx, ny = 30, 30
-                xx, yy = np.meshgrid(np.linspace(x_min, x_max, nx), np.linspace(y_min, y_max, ny))
-                grid_points_pca = np.column_stack([xx.ravel(), yy.ravel()])
-                grid_points_latent = pca.inverse_transform(grid_points_pca)
-                grid_tensor = self._ensure_tensor_on_device(torch.tensor(grid_points_latent, dtype=torch.float32))
-                flows = self._get_flows()
-                if flows is None or len(flows) == 0:
-                    print("⚠️ No flows available for Jacobian analysis")
+                forward_out = self.model_forward(x_sample)
+                z_seq = self._extract_latent_sequence(forward_out)
+
+                if z_seq is None:
+                    print("⚠️ Could not extract latent sequence for curvature heatmap")
                     return
-                
-                # FIRST PASS: Compute global min/max for consistent color scaling
-        
-                all_jacobian_energies = []
-                
-                for t in range(min(len(flows), n_obs-1)):
-                    flow = flows[t] if t < len(flows) else flows[-1]
-                    timestep_energies = []
-                    
-                    for i in range(grid_tensor.shape[0]):
-                        z = grid_tensor[i:i+1].clone().detach().requires_grad_(True)
-                        try:
-                            out = flow(z)
-                            log_abs_det_jac = None
-                            
-                            # Extract log_abs_det_jac if available
-                            if hasattr(out, 'log_abs_det_jac'):
-                                log_abs_det_jac = out.log_abs_det_jac
-                            
-                            if log_abs_det_jac is not None:
-                                if torch.is_tensor(log_abs_det_jac):
-                                    energy = log_abs_det_jac.cpu().item() / np.log(10)
-                                else:
-                                    energy = float(log_abs_det_jac) / np.log(10)
-                                timestep_energies.append(energy)
-                            else:
-                                timestep_energies.append(0.0)
-                        except:
-                            timestep_energies.append(0.0)
-                    
-                    all_jacobian_energies.extend(timestep_energies)
-                
-                # Compute global color scale
-                global_min = np.min(all_jacobian_energies)
-                global_max = np.max(all_jacobian_energies)
-                global_range = global_max - global_min
-                
-                # Add some padding for better visualization
-                color_min = global_min - 0.1 * global_range
-                color_max = global_max + 0.1 * global_range
-                
-                print(f"🎨 Global color scale: [{color_min:.4f}, {color_max:.4f}]")
-                
-                # SECOND PASS: Create frames with consistent color scaling
-                frames = []
-                for t in range(min(len(flows), n_obs-1)):
-                    print(f"  ... timestep {t}")
-                    flow = flows[t] if t < len(flows) else flows[-1]
-                    jacobian_energy = []
-                    eigvecs_list = []  # For principal directions
-                    
 
-                    
-                    for i in range(grid_tensor.shape[0]):
-                        z = grid_tensor[i:i+1].clone().detach().requires_grad_(True)
-                        try:
-                            out = flow(z)
-                            
-                            # Enhanced output extraction with better debugging
-                            flow_output = None
-                            log_abs_det_jac = None
-                            
-                            if isinstance(out, tuple):
-                                flow_output = out[0]
-                            elif hasattr(out, 'sample'):
-                                flow_output = out.sample
-                            elif hasattr(out, 'z'):
-                                flow_output = out.z
-                            elif hasattr(out, 'out'):
-                                flow_output = out.out
-                                # Check for built-in log determinant
-                                if hasattr(out, 'log_abs_det_jac'):
-                                    log_abs_det_jac = out.log_abs_det_jac
-                            elif torch.is_tensor(out):
-                                flow_output = out
-                            else:
-                                flow_output = out
-                            
-                            if flow_output is None:
-                                jacobian_energy.append(color_min)  # Use color_min instead of 0
-                                if latent_dim == 2:
-                                    eigvecs_list.append((np.zeros(2), np.eye(2)))
-                                continue
-                            
-                            # Method 1: Use built-in log determinant if available
-                            if log_abs_det_jac is not None:
-                                try:
-                                    if torch.is_tensor(log_abs_det_jac):
-                                        energy = log_abs_det_jac.cpu().item() / np.log(10)  # Convert to log10
-                                    else:
-                                        energy = float(log_abs_det_jac) / np.log(10)
-                                    
-                                    jacobian_energy.append(energy)
-                                    
-                                    # For eigenvalues, we'd need the full Jacobian - skip for now
-                                    if latent_dim == 2:
-                                        eigvecs_list.append((np.zeros(2), np.eye(2)))
-                                    continue
-                                except Exception as e:
-                                    pass
-                            
-                            # Method 2: Use functional jacobian computation
-                            try:
-                                def flow_func(z_input):
-                                    flow_out = flow(z_input)
-                                    if hasattr(flow_out, 'out'):
-                                        return flow_out.out
-                                    elif hasattr(flow_out, 'z'):
-                                        return flow_out.z
-                                    elif hasattr(flow_out, 'sample'):
-                                        return flow_out.sample
-                                    elif isinstance(flow_out, tuple):
-                                        return flow_out[0]
-                                    else:
-                                        return flow_out
-                                
-                                # Use functional jacobian
-                                J = torch.autograd.functional.jacobian(flow_func, z.squeeze(0))
-                                J_np = J.detach().cpu().numpy()
-                                
-                                # Compute determinant
-                                det_J = np.linalg.det(J_np)
-                                energy = np.log10(np.abs(det_J) + 1e-12)
-                                
-                                jacobian_energy.append(energy)
-                                
-                                # For 2D: get eigenvalues/vectors
-                                if latent_dim == 2:
-                                    try:
-                                        eigvals, eigvecs = np.linalg.eig(J_np)
-                                        eigvecs_list.append((eigvals, eigvecs))
-                                    except:
-                                        eigvecs_list.append((np.zeros(2), np.eye(2)))
-                                        
-                                continue
-                                
-                            except Exception as func_e:
-                                pass
-                            
-                            # Fallback to color_min
-                            jacobian_energy.append(color_min)
-                            if latent_dim == 2:
-                                eigvecs_list.append((np.zeros(2), np.eye(2)))
-                                    
-                        except Exception as e:
-                            jacobian_energy.append(color_min)  # Use color_min instead of 0
-                            if latent_dim == 2:
-                                eigvecs_list.append((np.zeros(2), np.eye(2)))
-                    
-                    jacobian_energy = np.array(jacobian_energy).reshape(xx.shape)
-                    
+                z_pca_seq, pca = self._prepare_pca_data(z_seq, n_components=2)
 
-                    frame_data = []
-                    # Use consistent color scale with more contours for better detail
-                    frame_data.append(
-                        go.Contour(
-                            x=np.linspace(x_min, x_max, nx),
-                            y=np.linspace(y_min, y_max, ny),
-                            z=jacobian_energy,
-                            colorscale='Turbo',  # Changed from 'Cividis' to 'Turbo' for more color contrast
-                            ncontours=100,  # Increased from 50 to 100 for much finer detail
-                            line_smoothing=0.85,
-                            opacity=0.8,
-                            showscale=True,
-                            colorbar=dict(
-                                title="log₁₀|det(J)|<br><sub>Flow Jacobian Energy</sub>", 
-                                x=1.02, len=0.8, thickness=20,
-                                tickmode='linear',
-                                tick0=color_min,
-                                dtick=(color_max - color_min) / 10  # 10 detailed tick marks
-                            ),
-                            name="Time-evolution energy",
-                            zmin=color_min,  # Fixed color scale
-                            zmax=color_max,   # Fixed color scale
-                            contours=dict(
-                                start=color_min,
-                                end=color_max,
-                                size=(color_max - color_min) / 100,  # Very fine contour steps
-                                showlines=True,
-                                coloring='heatmap'
-                            )
-                        )
-                    )
-                    # Plot all available trajectories (not just trajectory 0)
-                    palette = px.colors.qualitative.Set1
-                    for seq_idx in range(min(batch_size, 8)):
-                        frame_data.append(
-                            go.Scatter(
-                                x=z_pca_seq[seq_idx, :t+2, 0],
-                                y=z_pca_seq[seq_idx, :t+2, 1],
-                                mode='lines+markers',
-                                line=dict(color=palette[seq_idx % len(palette)], width=3),
-                                marker=dict(size=6, color=palette[seq_idx % len(palette)]),
-                                name=f'Trajectory {seq_idx}'
-                            )
-                        )
-                    # --- (Optional) For 2D: plot principal eigenvector directions as arrows at selected grid points ---
-                    # This is a suggestion for further improvement:
-                    # For a subset of grid points, plot arrows showing the direction of the largest eigenvector of J
-                    # (Uncomment and tune density for performance)
-                    # if latent_dim == 2 and t == 0:
-                    #     arrow_density = 5  # plot every 5th grid point
-                    #     for idx, (eigvals, eigvecs) in enumerate(eigvecs_list):
-                    #         if idx % arrow_density == 0:
-                    #             x0, y0 = grid_points_pca[idx]
-                    #             v = eigvecs[:, np.argmax(np.abs(eigvals))]  # principal direction
-                    #             frame_data.append(go.Scatter(
-                    #                 x=[x0, x0 + v[0]],
-                    #                 y=[y0, y0 + v[1]],
-                    #                 mode='lines',
-                    #                 line=dict(color='white', width=1),
-                    #                 showlegend=False
-                    #             ))
-                    frames.append(go.Frame(data=frame_data, name=str(t)))
-                # Set up figure
-                fig = go.Figure()
-                for trace in frames[0].data:
-                    fig.add_trace(trace)
-                fig.frames = frames
-                fig.update_layout(
-                    title=f"⛰️ Time-evolution Curvature Heatmap (Jacobian, Slider) - Epoch {epoch}",
-                    width=1200, height=700,  # Made wider (was 900x700)
-                    showlegend=True,
-                    font=dict(color='white'),
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    plot_bgcolor='rgba(0,0,0,0)',
-                    margin=dict(l=60, r=120, t=120, b=140),  # More space for interpretation
-                    annotations=[
-                        dict(
-                            text="<b>🔬 Flow Jacobian Energy Interpretation:</b><br>" +
-                                 "• <b>High values (red/orange)</b>: Expansive flow regions - volumes grow<br>" +
-                                 "• <b>Medium values (yellow/green)</b>: Moderate flow transformation<br>" +
-                                 "• <b>Low values (blue/purple)</b>: Contractive flow regions - volumes shrink<br>" +
-                                 "• <b>Sharp gradients</b>: Rapid changes in flow behavior<br>" +
-                                 "• <b>Smooth regions</b>: Stable flow characteristics<br>" +
-                                 "• <b>Trajectory paths</b>: How sequences move through this energy landscape",
-                            x=0.5, y=-0.15,
-                            xref="paper", yref="paper",
-                            xanchor="center", yanchor="top",
-                            showarrow=False,
-                            font=dict(size=11, color='white'),
-                            bgcolor='rgba(0,0,0,0.8)',
-                            bordercolor='white',
-                            borderwidth=1
-                        )
-                    ],
-                    sliders=[{
-                        "active": 0,
-                        "currentvalue": {"prefix": "Timestep: ", "visible": True, "font": {"color": "white"}},
-                        "pad": {"b": 10, "t": 50},
-                        "len": 0.8,  # Make slider take up most of the width
-                        "x": 0.1,    # Center the slider
-                        "steps": [{"args": [[f], {"frame": {"duration": 300, "redraw": True}}], "label": str(t), "method": "animate"} for t, f in enumerate(frames)]
-                    }]
+            flows = list(flows_seq)
+            grid_info = self._prepare_pca_grid(pca, z_pca_seq, grid_resolution=28, padding=0.2)
+            grid_flow = self._compute_metric_flow_evolution(
+                base_points=grid_info["latent_grid"],
+                flows=flows,
+                max_steps=min(len(flows), max(z_pca_seq.shape[1] - 1, 0))
+            )
+
+            jacobian_steps = grid_flow["jacobians_step"]
+            if not jacobian_steps:
+                print("⚠️ No Jacobian data produced for curvature heatmap")
+                return
+
+            det_fields = []
+            for jac_step in jacobian_steps:
+                det = torch.linalg.det(jac_step)
+                logdet = torch.log(det.abs().clamp(min=1e-12)) / np.log(10.0)
+                field = logdet.detach().cpu().numpy().reshape(grid_info["XX"].shape)
+                field = np.where(np.isfinite(field), field, np.nan)
+                det_fields.append(field)
+
+            trajectories = np.asarray(z_pca_seq)
+            if trajectories.shape[1] < 2:
+                print("⚠️ Need at least two timesteps for curvature heatmap")
+                return
+
+            num_steps = min(len(det_fields), trajectories.shape[1] - 1)
+            if num_steps == 0:
+                print("⚠️ No flow steps align with latent timesteps for curvature heatmap")
+                return
+
+            has_finite = any(np.isfinite(field).any() for field in det_fields[:num_steps])
+            if has_finite:
+                finite_values = np.concatenate([
+                    field[np.isfinite(field)]
+                    for field in det_fields[:num_steps]
+                    if np.isfinite(field).any()
+                ])
+                color_min = float(np.min(finite_values))
+                color_max = float(np.max(finite_values))
+                if np.isclose(color_min, color_max):
+                    color_max = color_min + 1e-3
+            else:
+                color_min, color_max = -3.0, 3.0
+
+            viz_count = min(self._get_viz_count(), trajectories.shape[0])
+            palette = pc.qualitative.Dark24
+            colors = (palette * ((viz_count // len(palette)) + 1))[:viz_count]
+
+            traces = []
+            timestep_indices: List[List[int]] = []
+
+            for t in range(num_steps):
+                indices: List[int] = []
+                contour_trace = go.Contour(
+                    x=grid_info["gx"],
+                    y=grid_info["gy"],
+                    z=det_fields[t],
+                    coloraxis="coloraxis",
+                    contours=dict(showlines=False),
+                    hoverinfo="skip",
+                    showscale=(t == 0),
+                    visible=(t == 0),
+                    name=f"log₁₀ |det J_{t}|"
                 )
-                # Save as interactive HTML
-                html_filename = f'time_curvature_heatmap_slider_epoch_{epoch}.html'
-                html_path = self._get_output_path(html_filename, "interactive")
-                fig.write_html(html_path, include_plotlyjs=True)
-                print(f"💾 Saved time curvature heatmap slider: {html_path}")
-                # Save static version
-                png_filename = f'time_curvature_heatmap_slider_epoch_{epoch}.png'
-                saved_png = self._safe_write_image(fig, png_filename, width=900, height=700)
-                # Log to WandB
-                if self.should_log_to_wandb():
-                    log_dict = {"interactive/time_curvature_heatmap_slider": wandb.Html(html_path)}
-                    if saved_png and saved_png.endswith('.png'):
-                        log_dict["interactive/time_curvature_heatmap_slider_static"] = wandb.Image(saved_png)
-                    wandb.log(log_dict)
+                traces.append(contour_trace)
+                indices.append(len(traces) - 1)
+
+                for idx in range(viz_count):
+                    history = trajectories[idx, :t + 2, :]
+                    line_trace = go.Scatter(
+                        x=history[:, 0],
+                        y=history[:, 1],
+                        mode="lines",
+                        line=dict(color=colors[idx], width=2),
+                        name=f"Sequence {idx}",
+                        legendgroup=f"seq_{idx}",
+                        showlegend=(t == 0),
+                        visible=(t == 0)
+                    )
+                    traces.append(line_trace)
+                    indices.append(len(traces) - 1)
+
+                    marker_trace = go.Scatter(
+                        x=[trajectories[idx, t + 1, 0]],
+                        y=[trajectories[idx, t + 1, 1]],
+                        mode="markers",
+                        marker=dict(color=colors[idx], size=7, symbol="circle"),
+                        name=None,
+                        legendgroup=f"seq_{idx}",
+                        showlegend=False,
+                        visible=(t == 0)
+                    )
+                    traces.append(marker_trace)
+                    indices.append(len(traces) - 1)
+
+                timestep_indices.append(indices)
+
+            total_traces = len(traces)
+            slider_steps = []
+            title_base = f"Flow Jacobian Heatmap (Epoch {epoch})"
+            for t, indices in enumerate(timestep_indices):
+                visible = [False] * total_traces
+                for idx in indices:
+                    visible[idx] = True
+                slider_steps.append(
+                    dict(
+                        method="update",
+                        label=str(t),
+                        args=[{"visible": visible},
+                              {"title": f"{title_base} · step {t}"}]
+                    )
+                )
+
+            fig = go.Figure(data=traces)
+            fig.update_layout(
+                title=title_base,
+                xaxis=dict(title="PCA Component 1", scaleanchor="y", scaleratio=1),
+                yaxis=dict(title="PCA Component 2"),
+                width=1000,
+                height=640,
+                hovermode="closest",
+                legend=dict(
+                    bgcolor="rgba(0,0,0,0.65)",
+                    bordercolor="rgba(255,255,255,0.5)",
+                    borderwidth=1,
+                    font=dict(color="white")
+                ),
+                sliders=[dict(
+                    active=0,
+                    currentvalue=dict(prefix="Flow step: "),
+                    pad=dict(t=40),
+                    steps=slider_steps
+                )],
+                coloraxis=dict(
+                    colorscale="RdYlBu_r",
+                    colorbar=dict(title="log₁₀ |det J_t|"),
+                    cmin=color_min,
+                    cmax=color_max
+                ),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="white")
+            )
+
+            self._apply_interactive_theme(fig)
+
+            html_path = self._get_output_path(
+                f"time_curvature_heatmap_slider.html",
+                "interactive"
+            )
+            fig.write_html(html_path, include_plotlyjs="cdn")
+            print(f"💾 Saved time curvature heatmap slider: {html_path}")
+
+            if self.should_log_to_wandb():
+                with open(html_path, "r", encoding="utf-8") as handle:
+                    wandb.log({
+                        f"interactive/time_curvature_heatmap_slider": wandb.Html(handle.read(), inject=False)
+                    })
+
+            max_spd = max(step.max().item() for step in grid_flow["spd_errors"][:num_steps + 1])
+            max_det_res = max(step.max().item() for step in grid_flow["determinant_residuals"][:num_steps + 1])
+            print(f"   ▸ Time-curvature SPD check max ||GG⁻¹−I|| = {max_spd:.2e}")
+            print(f"   ▸ Time-curvature determinant Δ max = {max_det_res:.2e}")
+
         except Exception as e:
             print(f"⚠️ Time curvature heatmap slider creation failed: {e}")
-
+            import traceback
+            traceback.print_exc()
+        finally:
+            self.model.train()
 
 
     def create_time_curvature_heatmap_2d_focused(self, x_sample: torch.Tensor, epoch: int):
-        """
-        Create a 2D-focused time curvature heatmap that works directly in PCA space.
-        This shows eigenvalue directions and components in the 2D visualization space.
-        """
+        """Slider view of flow Jacobian behaviour in the PCA plane (det and singular values)."""
         if not PLOTLY_AVAILABLE:
             print("⚠️ Plotly not available - skipping 2D focused curvature heatmap")
             return
-        # Generate at epoch 0 and every 30 epochs
+
         if epoch != 0 and epoch % 30 != 0:
             return
-        print(f"🎯 Creating 2D-focused time-evolution curvature heatmap for epoch {epoch}")
+
+        flows_seq = self._get_flows()
+        if flows_seq is None or len(flows_seq) == 0:
+            print("⚠️ No flows available for 2D Jacobian analysis")
+            return
+
+        print(f"🎯 Creating 2D-focused curvature heatmap for epoch {epoch}")
+
         try:
             self._ensure_model_on_device()
             self.model.eval()
+
             with torch.no_grad():
-                result = self.model_forward(x_sample)
-                z_seq = result['latent_samples'] if isinstance(result, dict) else result.z
-                batch_size, n_obs, latent_dim = z_seq.shape
-                
-                # Create PCA projection
-                z_pca_seq, pca = self._prepare_pca_data(z_seq, n_components=2)
-                x_min, x_max = z_pca_seq[:, :, 0].min() - 0.5, z_pca_seq[:, :, 0].max() + 0.5
-                y_min, y_max = z_pca_seq[:, :, 1].min() - 0.5, z_pca_seq[:, :, 1].max() + 0.5
-                nx, ny = 30, 30
-                xx, yy = np.meshgrid(np.linspace(x_min, x_max, nx), np.linspace(y_min, y_max, ny))
-                
-                flows = self._get_flows()
-                if flows is None or len(flows) == 0:
-                    print("⚠️ No flows available for 2D Jacobian analysis")
+                forward_out = self.model_forward(x_sample)
+                z_seq = self._extract_latent_sequence(forward_out)
+
+                if z_seq is None:
+                    print("⚠️ Could not extract latent sequence for focused curvature heatmap")
                     return
-                
-                # PRE-COMPUTE ALL JACOBIAN DATA FOR CONSISTENT COLOR SCALING
-        
-                all_jacobian_data = []
-                for t in range(min(len(flows), n_obs-1)):
-                    jacobian_data = self._compute_2d_jacobian_in_pca_space(flows[t], xx, yy, pca)
-                    all_jacobian_data.append(jacobian_data)
-                
-                # Compute global color scales for each component
-                all_det_j = np.concatenate([data['det_j'].flatten() for data in all_jacobian_data])
-                all_eig1 = np.concatenate([data['eigenval1'].flatten() for data in all_jacobian_data])
-                all_eig2 = np.concatenate([data['eigenval2'].flatten() for data in all_jacobian_data])
-                
-                # Global ranges with padding
-                det_min, det_max = np.min(all_det_j), np.max(all_det_j)
-                det_range = det_max - det_min
-                det_color_min, det_color_max = det_min - 0.1 * det_range, det_max + 0.1 * det_range
-                
-                eig1_min, eig1_max = np.min(all_eig1), np.max(all_eig1)
-                eig1_range = eig1_max - eig1_min
-                eig1_color_min, eig1_color_max = eig1_min - 0.1 * eig1_range, eig1_max + 0.1 * eig1_range
-                
-                eig2_min, eig2_max = np.min(all_eig2), np.max(all_eig2)
-                eig2_range = eig2_max - eig2_min
-                eig2_color_min, eig2_color_max = eig2_min - 0.1 * eig2_range, eig2_max + 0.1 * eig2_range
-                
-                print(f"🎨 2D Color scales:")
-                print(f"   det(J): [{det_color_min:.4f}, {det_color_max:.4f}]")
-                print(f"   λ₁: [{eig1_color_min:.4f}, {eig1_color_max:.4f}]")
-                print(f"   λ₂: [{eig2_color_min:.4f}, {eig2_color_max:.4f}]")
-                
-                # Create subplots for multiple views
-                fig = make_subplots(
-                    rows=2, cols=2,
-                    subplot_titles=[
-                        "🔍 det(J₂D) - Total Area Change", 
-                        "🌊 λ₁ - First Eigenvalue (Dominant Direction)", 
-                        "🌀 λ₂ - Second Eigenvalue (Secondary Direction)", 
-                        "🧭 Direction Field - Principal Vectors"
-                    ],
-                    horizontal_spacing=0.12, vertical_spacing=0.15
+
+                z_pca_seq, pca = self._prepare_pca_data(z_seq, n_components=2)
+
+            flows = list(flows_seq)
+            grid_info = self._prepare_pca_grid(pca, z_pca_seq, grid_resolution=28, padding=0.2)
+            grid_flow = self._compute_metric_flow_evolution(
+                base_points=grid_info["latent_grid"],
+                flows=flows,
+                max_steps=min(len(flows), max(z_pca_seq.shape[1] - 1, 0))
+            )
+
+            jacobian_steps = grid_flow["jacobians_step"]
+            if not jacobian_steps:
+                print("⚠️ No Jacobian data produced for focused curvature heatmap")
+                return
+
+            P = torch.tensor(pca.components_[:2], dtype=jacobian_steps[0].dtype, device=self.device)
+
+            det_fields = []
+            sigma_max_fields = []
+            sigma_min_fields = []
+            for jac_step in jacobian_steps:
+                jac_step = jac_step.to(self.device)
+                J_pca = torch.matmul(
+                    torch.matmul(P.unsqueeze(0), jac_step),
+                    P.unsqueeze(0).transpose(1, 2)
                 )
-                
-                frames = []
-                for t in range(min(len(flows), n_obs-1)):
-                    print(f"  ... creating frame for timestep {t}")
-                    
-                    # Use pre-computed Jacobian data
-                    jacobian_data = all_jacobian_data[t]
-                    
-                    frame_data = []
-                    
-                    # Panel 1: det(J_2D) - total area change with enhanced detail
-                    frame_data.append(
-                        go.Contour(
-                            x=np.linspace(x_min, x_max, nx),
-                            y=np.linspace(y_min, y_max, ny),
-                            z=np.log10(np.clip(np.abs(jacobian_data['det_j']), 1e-12, None)),
-                            colorscale='RdYlBu_r',
-                            showscale=True,
-                            ncontours=60,  # Much more detailed
-                            line_smoothing=0.9,
-                            opacity=0.8,
-                            colorbar=dict(
-                                title="log₁₀|det(J₂D)|<br><sub>Area Change</sub>", 
-                                x=0.44, len=0.35, thickness=15,
-                                tickmode='linear',
-                                tick0=np.log10(np.clip(det_color_min, 1e-12, None)),
-                                dtick=(np.log10(np.clip(det_color_max, 1e-12, None)) - 
-                                      np.log10(np.clip(det_color_min, 1e-12, None))) / 8
-                            ),
-                            name="Area Change",
-                            xaxis='x', yaxis='y',
-                            zmin=np.log10(np.clip(det_color_min, 1e-12, None)),
-                            zmax=np.log10(np.clip(det_color_max, 1e-12, None)),
-                            contours=dict(
-                                start=np.log10(np.clip(det_color_min, 1e-12, None)),
-                                end=np.log10(np.clip(det_color_max, 1e-12, None)),
-                                size=(np.log10(np.clip(det_color_max, 1e-12, None)) - 
-                                     np.log10(np.clip(det_color_min, 1e-12, None))) / 60,
-                                showlines=True,
-                                coloring='heatmap'
-                            )
-                        )
-                    )
-                    
-                    # Panel 2: First eigenvalue with enhanced detail
-                    frame_data.append(
-                        go.Contour(
-                            x=np.linspace(x_min, x_max, nx),
-                            y=np.linspace(y_min, y_max, ny),
-                            z=jacobian_data['eigenval1'],
-                            colorscale='Viridis',
-                            showscale=True,
-                            ncontours=60,  # Much more detailed
-                            line_smoothing=0.9,
-                            opacity=0.8,
-                            colorbar=dict(
-                                title="λ₁<br><sub>Dominant Eigenvalue</sub>", 
-                                x=0.94, len=0.35, thickness=15,
-                                tickmode='linear',
-                                tick0=eig1_color_min,
-                                dtick=(eig1_color_max - eig1_color_min) / 8
-                            ),
-                            name="Eigenvalue 1",
-                            xaxis='x2', yaxis='y2',
-                            zmin=eig1_color_min,
-                            zmax=eig1_color_max,
-                            contours=dict(
-                                start=eig1_color_min,
-                                end=eig1_color_max,
-                                size=(eig1_color_max - eig1_color_min) / 60,
-                                showlines=True,
-                                coloring='heatmap'
-                            )
-                        )
-                    )
-                    
-                    # Panel 3: Second eigenvalue with enhanced detail
-                    frame_data.append(
-                        go.Contour(
-                            x=np.linspace(x_min, x_max, nx),
-                            y=np.linspace(y_min, y_max, ny),
-                            z=jacobian_data['eigenval2'],
-                            colorscale='Plasma',
-                            showscale=True,
-                            ncontours=60,  # Much more detailed
-                            line_smoothing=0.9,
-                            opacity=0.8,
-                            colorbar=dict(
-                                title="λ₂<br><sub>Secondary Eigenvalue</sub>", 
-                                x=0.44, len=0.35, thickness=15,
-                                y=0.15,  # Lower position for bottom left
-                                tickmode='linear',
-                                tick0=eig2_color_min,
-                                dtick=(eig2_color_max - eig2_color_min) / 8
-                            ),
-                            name="Eigenvalue 2",
-                            xaxis='x3', yaxis='y3',
-                            zmin=eig2_color_min,
-                            zmax=eig2_color_max,
-                            contours=dict(
-                                start=eig2_color_min,
-                                end=eig2_color_max,
-                                size=(eig2_color_max - eig2_color_min) / 60,
-                                showlines=True,
-                                coloring='heatmap'
-                            )
-                        )
-                    )
-                    
-                    # Panel 4: Direction field (eigenvector arrows)
-                    arrow_data = self._create_eigenvector_arrows(jacobian_data, xx, yy, x_min, x_max, y_min, y_max, density=4)
-                    frame_data.extend(arrow_data)
-                    
-                    # Add trajectories to all panels
-                    palette = px.colors.qualitative.Set1
-                    for seq_idx in range(min(batch_size, 4)):  # Fewer trajectories to avoid clutter
-                        color = palette[seq_idx % len(palette)]
-                        # Panel 1
-                        frame_data.append(
-                            go.Scatter(
-                                x=z_pca_seq[seq_idx, :t+2, 0], y=z_pca_seq[seq_idx, :t+2, 1],
-                                mode='lines+markers', line=dict(color=color, width=2),
-                                marker=dict(size=4, color=color), name=f'Traj {seq_idx}',
-                                showlegend=(seq_idx==0), xaxis='x', yaxis='y'
-                            )
-                        )
-                        # Panel 2
-                        frame_data.append(
-                            go.Scatter(
-                                x=z_pca_seq[seq_idx, :t+2, 0], y=z_pca_seq[seq_idx, :t+2, 1],
-                                mode='lines+markers', line=dict(color=color, width=2),
-                                marker=dict(size=4, color=color), showlegend=False,
-                                xaxis='x2', yaxis='y2'
-                            )
-                        )
-                        # Panel 3
-                        frame_data.append(
-                            go.Scatter(
-                                x=z_pca_seq[seq_idx, :t+2, 0], y=z_pca_seq[seq_idx, :t+2, 1],
-                                mode='lines+markers', line=dict(color=color, width=2),
-                                marker=dict(size=4, color=color), showlegend=False,
-                                xaxis='x3', yaxis='y3'
-                            )
-                        )
-                        # Panel 4
-                        frame_data.append(
-                            go.Scatter(
-                                x=z_pca_seq[seq_idx, :t+2, 0], y=z_pca_seq[seq_idx, :t+2, 1],
-                                mode='lines+markers', line=dict(color=color, width=2),
-                                marker=dict(size=4, color=color), showlegend=False,
-                                xaxis='x4', yaxis='y4'
-                            )
-                        )
-                    
-                    frames.append(go.Frame(data=frame_data, name=str(t)))
-                
-                # Set initial frame
-                for trace in frames[0].data:
-                    fig.add_trace(trace)
-                    
-                fig.frames = frames
-                fig.update_layout(
-                    title=f"🎯 2D-Focused Jacobian Analysis - Epoch {epoch}",
-                    width=1200, height=800,
-                    showlegend=True,
-                    font=dict(color='white'),
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    plot_bgcolor='rgba(0,0,0,0)',
-                    sliders=[{
-                        "active": 0,
-                        "currentvalue": {"prefix": "Timestep: ", "visible": True, "font": {"color": "white"}},
-                        "pad": {"b": 10, "t": 50},
-                        "steps": [{"args": [[f], {"frame": {"duration": 300, "redraw": True}}], "label": str(t), "method": "animate"} for t, f in enumerate(frames)]
-                    }]
+
+                det = torch.linalg.det(J_pca)
+                logdet = torch.log(det.abs().clamp(min=1e-12)) / np.log(10.0)
+                det_field = logdet.detach().cpu().numpy().reshape(grid_info["XX"].shape)
+                det_field = np.where(np.isfinite(det_field), det_field, np.nan)
+                det_fields.append(det_field)
+
+                _, singular_vals, _ = torch.linalg.svd(J_pca)
+                log_singular = torch.log(singular_vals.clamp(min=1e-9)) / np.log(10.0)
+                sigma_max = log_singular[:, 0].detach().cpu().numpy().reshape(grid_info["XX"].shape)
+                sigma_min = log_singular[:, -1].detach().cpu().numpy().reshape(grid_info["XX"].shape)
+                sigma_max = np.where(np.isfinite(sigma_max), sigma_max, np.nan)
+                sigma_min = np.where(np.isfinite(sigma_min), sigma_min, np.nan)
+                sigma_max_fields.append(sigma_max)
+                sigma_min_fields.append(sigma_min)
+
+            trajectories = np.asarray(z_pca_seq)
+            if trajectories.shape[1] < 2:
+                print("⚠️ Need at least two timesteps for focused curvature heatmap")
+                return
+
+            num_steps = min(len(det_fields), trajectories.shape[1] - 1)
+            if num_steps == 0:
+                print("⚠️ No flow steps align with latent timesteps for focused curvature heatmap")
+                return
+
+            def _compute_global_range(fields, default=(-2.0, 2.0)):
+                finite_vals = [field[np.isfinite(field)] for field in fields[:num_steps] if np.isfinite(field).any()]
+                if finite_vals:
+                    values = np.concatenate(finite_vals)
+                    vmin = float(np.min(values))
+                    vmax = float(np.max(values))
+                    if np.isclose(vmin, vmax):
+                        vmax = vmin + 1e-3
+                    return vmin, vmax
+                return default
+
+            det_min, det_max = _compute_global_range(det_fields, (-3.0, 3.0))
+            smax_min, smax_max = _compute_global_range(sigma_max_fields, (-2.0, 2.0))
+            smin_min, smin_max = _compute_global_range(sigma_min_fields, (-2.0, 2.0))
+
+            viz_count = min(self._get_viz_count(), trajectories.shape[0])
+            palette = pc.qualitative.Dark24
+            colors = (palette * ((viz_count // len(palette)) + 1))[:viz_count]
+
+            fig = make_subplots(
+                rows=1,
+                cols=3,
+                subplot_titles=[
+                    "log₁₀ |det J_t|",
+                    "log₁₀ σ_max(J_t)",
+                    "log₁₀ σ_min(J_t)"
+                ],
+                horizontal_spacing=0.1
+            )
+
+            timestep_indices: List[List[int]] = []
+
+            for t in range(num_steps):
+                indices: List[int] = []
+
+                det_trace = go.Contour(
+                    x=grid_info["gx"],
+                    y=grid_info["gy"],
+                    z=det_fields[t],
+                    coloraxis="coloraxis",
+                    contours=dict(showlines=False),
+                    hoverinfo="skip",
+                    showscale=(t == 0),
+                    visible=(t == 0)
                 )
-                
-                # Update layout with comprehensive interpretation
-                fig.update_layout(
-                    title=f"🎯 2D-Focused Time Curvature Analysis (4-Panel View) - Epoch {epoch}",
-                    width=1400, height=900,  # Taller for 2x2 layout
-                    showlegend=True,
-                    font=dict(size=12, color='white'),
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    plot_bgcolor='rgba(0,0,0,0)',
-                    margin=dict(l=60, r=100, t=140, b=200),  # Extra space for comprehensive explanation
-                    annotations=[
-                        dict(
-                            text="<b>🧠 Comprehensive 2D Jacobian Analysis Interpretation:</b><br><br>" +
-                                 "<b>📊 Panel 1 - det(J₂D) (Top Left):</b><br>" +
-                                 "• <b>Positive values (red)</b>: Area expansion - flow stretches regions<br>" +
-                                 "• <b>Negative values (blue)</b>: Area contraction - flow compresses regions<br>" +
-                                 "• <b>Zero (white)</b>: Area preserving - flow maintains local volumes<br><br>" +
-                                 "<b>🌊 Panel 2 - λ₁ Dominant Eigenvalue (Top Right):</b><br>" +
-                                 "• <b>Large positive</b>: Strong expansion along principal direction<br>" +
-                                 "• <b>Large negative</b>: Strong contraction along principal direction<br>" +
-                                 "• <b>Near zero</b>: Minimal change along principal direction<br><br>" +
-                                 "<b>🌀 Panel 3 - λ₂ Secondary Eigenvalue (Bottom Left):</b><br>" +
-                                 "• <b>Large positive</b>: Strong expansion along secondary direction<br>" +
-                                 "• <b>Large negative</b>: Strong contraction along secondary direction<br>" +
-                                 "• <b>Comparison with λ₁</b>: Shows anisotropy (directional preference)<br><br>" +
-                                 "<b>🧭 Panel 4 - Direction Field (Bottom Right):</b><br>" +
-                                 "• <b>Arrow directions</b>: Principal eigenvector orientations<br>" +
-                                 "• <b>Arrow colors</b>: Eigenvalue magnitudes<br>" +
-                                 "• <b>Flow preferences</b>: Where trajectories are pushed/pulled",
-                            x=0.5, y=-0.15,
-                            xref="paper", yref="paper",
-                            xanchor="center", yanchor="top",
-                            showarrow=False,
-                            font=dict(size=10, color='white'),
-                            bgcolor='rgba(0,0,0,0.85)',
-                            bordercolor='white',
-                            borderwidth=1
-                        )
-                    ],
-                    sliders=[{
-                        "active": 0,
-                        "currentvalue": {"prefix": "Timestep: ", "visible": True, "font": {"color": "white"}},
-                        "pad": {"b": 10, "t": 50},
-                        "len": 0.8,
-                        "x": 0.1,
-                        "steps": [{"args": [[f], {"frame": {"duration": 400, "redraw": True}}], "label": str(t), "method": "animate"} for t, f in enumerate(frames)]
-                    }]
+                fig.add_trace(det_trace, row=1, col=1)
+                indices.append(len(fig.data) - 1)
+
+                smax_trace = go.Contour(
+                    x=grid_info["gx"],
+                    y=grid_info["gy"],
+                    z=sigma_max_fields[t],
+                    coloraxis="coloraxis2",
+                    contours=dict(showlines=False),
+                    hoverinfo="skip",
+                    showscale=(t == 0),
+                    visible=(t == 0)
                 )
-                
-                # Save and log
-                html_filename = f'time_curvature_2d_focused_epoch_{epoch}.html'
-                html_path = self._get_output_path(html_filename, "interactive")
-                fig.write_html(html_path, include_plotlyjs=True)
-                print(f"💾 Saved 2D-focused curvature heatmap: {html_path}")
-                
-                if self.should_log_to_wandb():
-                    wandb.log({"interactive/time_curvature_2d_focused": wandb.Html(html_path)})
-                    
+                fig.add_trace(smax_trace, row=1, col=2)
+                indices.append(len(fig.data) - 1)
+
+                smin_trace = go.Contour(
+                    x=grid_info["gx"],
+                    y=grid_info["gy"],
+                    z=sigma_min_fields[t],
+                    coloraxis="coloraxis3",
+                    contours=dict(showlines=False),
+                    hoverinfo="skip",
+                    showscale=(t == 0),
+                    visible=(t == 0)
+                )
+                fig.add_trace(smin_trace, row=1, col=3)
+                indices.append(len(fig.data) - 1)
+
+                for idx in range(viz_count):
+                    history = trajectories[idx, :t + 2, :]
+                    line_trace = go.Scatter(
+                        x=history[:, 0],
+                        y=history[:, 1],
+                        mode="lines",
+                        line=dict(color=colors[idx], width=2),
+                        name=f"Sequence {idx}",
+                        legendgroup=f"seq_{idx}",
+                        showlegend=(t == 0),
+                        visible=(t == 0)
+                    )
+                    fig.add_trace(line_trace, row=1, col=1)
+                    indices.append(len(fig.data) - 1)
+
+                    marker_trace = go.Scatter(
+                        x=[trajectories[idx, t + 1, 0]],
+                        y=[trajectories[idx, t + 1, 1]],
+                        mode="markers",
+                        marker=dict(color=colors[idx], size=7, symbol="circle"),
+                        name=None,
+                        legendgroup=f"seq_{idx}",
+                        showlegend=False,
+                        visible=(t == 0)
+                    )
+                    fig.add_trace(marker_trace, row=1, col=1)
+                    indices.append(len(fig.data) - 1)
+
+                timestep_indices.append(indices)
+
+            total_traces = len(fig.data)
+            slider_steps = []
+            title_base = f"Flow Jacobian 2D Summary (Epoch {epoch})"
+            for t, indices in enumerate(timestep_indices):
+                visible = [False] * total_traces
+                for idx in indices:
+                    visible[idx] = True
+                slider_steps.append(
+                    dict(
+                        method="update",
+                        label=str(t),
+                        args=[{"visible": visible},
+                              {"title": f"{title_base} · step {t}"}]
+                    )
+                )
+
+            fig.update_layout(
+                width=1220,
+                height=560,
+                hovermode="closest",
+                legend=dict(
+                    bgcolor="rgba(0,0,0,0.65)",
+                    bordercolor="rgba(255,255,255,0.5)",
+                    borderwidth=1,
+                    font=dict(color="white")
+                ),
+                sliders=[dict(
+                    active=0,
+                    currentvalue=dict(prefix="Flow step: "),
+                    pad=dict(t=40),
+                    steps=slider_steps
+                )],
+                coloraxis=dict(
+                    colorscale="RdYlBu_r",
+                    colorbar=dict(title="log₁₀ |det J_t|", x=0.28),
+                    cmin=det_min,
+                    cmax=det_max
+                ),
+                coloraxis2=dict(
+                    colorscale="Viridis",
+                    colorbar=dict(title="log₁₀ σ_max", x=0.62),
+                    cmin=smax_min,
+                    cmax=smax_max
+                ),
+                coloraxis3=dict(
+                    colorscale="Cividis",
+                    colorbar=dict(title="log₁₀ σ_min", x=0.96),
+                    cmin=smin_min,
+                    cmax=smin_max
+                ),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="white")
+            )
+
+            self._apply_interactive_theme(fig)
+
+            html_path = self._get_output_path(
+                f"time_curvature_2d_focused.html",
+                "interactive"
+            )
+            fig.write_html(html_path, include_plotlyjs="cdn")
+            print(f"💾 Saved 2D-focused curvature heatmap: {html_path}")
+
+            if self.should_log_to_wandb():
+                with open(html_path, "r", encoding="utf-8") as handle:
+                    wandb.log({
+                        f"interactive/time_curvature_2d_focused": wandb.Html(handle.read(), inject=False)
+                    })
+
+            max_spd = max(step.max().item() for step in grid_flow["spd_errors"][:num_steps + 1])
+            max_det_res = max(step.max().item() for step in grid_flow["determinant_residuals"][:num_steps + 1])
+            print(f"   ▸ Curvature 2D SPD check max ||GG⁻¹−I|| = {max_spd:.2e}")
+            print(f"   ▸ Curvature 2D determinant Δ max = {max_det_res:.2e}")
+
         except Exception as e:
             print(f"⚠️ 2D-focused curvature heatmap creation failed: {e}")
             import traceback
             traceback.print_exc()
-    
-    def _compute_2d_jacobian_in_pca_space(self, flow, xx, yy, pca):
-        """Compute 2x2 Jacobian matrix in PCA space and extract eigenvalue information."""
-        grid_points_pca = np.column_stack([xx.ravel(), yy.ravel()])
-        
-        # Convert PCA coordinates back to original latent space for flow computation
-        grid_points_latent = pca.inverse_transform(grid_points_pca)
-        grid_tensor = self._ensure_tensor_on_device(torch.tensor(grid_points_latent, dtype=torch.float32))
-        
-        det_j_list = []
-        eigenval1_list = []
-        eigenval2_list = []
-        eigenvec1_list = []
-        eigenvec2_list = []
-        
-        print(f"  [DEBUG 2D] Computing 2D Jacobian for {grid_tensor.shape[0]} grid points")
-        
-        for i in range(grid_tensor.shape[0]):
-            z_latent = grid_tensor[i:i+1].clone().detach().requires_grad_(True)
-            try:
-                # Apply flow in latent space
-                out = flow(z_latent)
-                
-                # Method 1: Use built-in log_abs_det_jac if available (SAME AS MAIN FIX)
-                log_abs_det_jac = None
-                flow_output = None
-                
-                if isinstance(out, tuple):
-                    flow_output = out[0]
-                elif hasattr(out, 'sample'):
-                    flow_output = out.sample
-                elif hasattr(out, 'z'):
-                    flow_output = out.z
-                elif hasattr(out, 'out'):
-                    flow_output = out.out
-                    # Check for built-in log determinant
-                    if hasattr(out, 'log_abs_det_jac'):
-                        log_abs_det_jac = out.log_abs_det_jac
-                        if i == 0:
-                            print(f"  [DEBUG 2D] Found log_abs_det_jac: {log_abs_det_jac}")
-                elif torch.is_tensor(out):
-                    flow_output = out
-                else:
-                    flow_output = out
-                
-                # Use built-in log determinant if available
-                if log_abs_det_jac is not None:
-                    try:
-                        if torch.is_tensor(log_abs_det_jac):
-                            # For 2D case, we can use the log det directly
-                            log_det_j = log_abs_det_jac.cpu().item()
-                            det_j = np.exp(log_det_j)  # Convert back to linear scale
-                        else:
-                            log_det_j = float(log_abs_det_jac)
-                            det_j = np.exp(log_det_j)
-                        
-                        if i == 0:
-                            print(f"  [DEBUG 2D] Using built-in: log_det_j={log_det_j}, det_j={det_j}")
-                        
-                        det_j_list.append(det_j)
-                        
-                        # For eigenvalues, we'll approximate from the determinant
-                        # This is a simplification - in reality we'd need the full Jacobian
-                        # But for visualization purposes, we can create meaningful variations
-                        eigenval1_list.append(np.sqrt(np.abs(det_j)) * (1.0 + 0.1 * np.sin(i * 0.1)))  # Variation
-                        eigenval2_list.append(np.sqrt(np.abs(det_j)) * (1.0 + 0.1 * np.cos(i * 0.1)))  # Variation
-                        eigenvec1_list.append(np.array([1.0, 0.1 * np.sin(i * 0.1)]))  # Approximate direction
-                        eigenvec2_list.append(np.array([0.1 * np.cos(i * 0.1), 1.0]))  # Approximate direction
-                        continue
-                        
-                    except Exception as e:
-                        if i == 0:
-                            print(f"  [DEBUG 2D] Failed to use log_abs_det_jac: {e}")
-                
-                # Method 2: Functional Jacobian (fallback)
-                try:
-                    if i == 0:
-                        print(f"  [DEBUG 2D] Attempting functional Jacobian computation")
-                    
-                    def flow_func_2d(z_input):
-                        flow_out = flow(z_input.unsqueeze(0))
-                        if hasattr(flow_out, 'out'):
-                            return flow_out.out.squeeze(0)
-                        elif hasattr(flow_out, 'z'):
-                            return flow_out.z.squeeze(0)
-                        elif hasattr(flow_out, 'sample'):
-                            return flow_out.sample.squeeze(0)
-                        elif isinstance(flow_out, tuple):
-                            return flow_out[0].squeeze(0)
-                        else:
-                            return flow_out.squeeze(0)
-                    
-                    # Use functional jacobian
-                    J_latent = torch.autograd.functional.jacobian(flow_func_2d, z_latent.squeeze(0))
-                    J_latent_np = J_latent.detach().cpu().numpy()
-                    
-                    # Transform Jacobian to PCA space: J_pca = V^T @ J_latent @ V
-                    # where V are the first 2 PCA components
-                    V = pca.components_.T[:, :2]  # [latent_dim, 2] - first 2 PCA directions
-                    J_pca = V.T @ J_latent_np @ V  # [2, 2] Jacobian in PCA space
-                    
-                    # Compute eigenvalues and eigenvectors in 2D PCA space
-                    eigenvals, eigenvecs = np.linalg.eig(J_pca)
-                    
-                    # Sort by magnitude for consistency
-                    idx = np.argsort(np.abs(eigenvals))[::-1]
-                    eigenvals = eigenvals[idx]
-                    eigenvecs = eigenvecs[:, idx]
-                    
-                    det_j_list.append(np.linalg.det(J_pca))
-                    eigenval1_list.append(eigenvals[0].real)
-                    eigenval2_list.append(eigenvals[1].real)
-                    eigenvec1_list.append(eigenvecs[:, 0].real)
-                    eigenvec2_list.append(eigenvecs[:, 1].real)
-                    
-                    if i == 0:
-                        print(f"  [DEBUG 2D] Functional method: det(J_pca)={np.linalg.det(J_pca)}")
-                    
-                except Exception as e:
-                    if i == 0:
-                        print(f"  [DEBUG 2D] Functional Jacobian failed: {e}")
-                    # Fallback values
-                    det_j_list.append(1.0)
-                    eigenval1_list.append(1.0)
-                    eigenval2_list.append(1.0)
-                    eigenvec1_list.append(np.array([1.0, 0.0]))
-                    eigenvec2_list.append(np.array([0.0, 1.0]))
-                
-            except Exception as e:
-                if i == 0:
-                    print(f"  [DEBUG 2D] Overall computation failed: {e}")
-                # Fallback values
-                det_j_list.append(1.0)
-                eigenval1_list.append(1.0)
-                eigenval2_list.append(1.0)
-                eigenvec1_list.append(np.array([1.0, 0.0]))
-                eigenvec2_list.append(np.array([0.0, 1.0]))
-        
-        # Convert to numpy arrays and reshape
-        result = {
-            'det_j': np.array(det_j_list).reshape(xx.shape),
-            'eigenval1': np.array(eigenval1_list).reshape(xx.shape),
-            'eigenval2': np.array(eigenval2_list).reshape(xx.shape),
-            'eigenvec1': np.array(eigenvec1_list).reshape(xx.shape + (2,)),
-            'eigenvec2': np.array(eigenvec2_list).reshape(xx.shape + (2,))
-        }
-        
-        print(f"  [DEBUG 2D] Final det_j stats: min={result['det_j'].min():.6f}, max={result['det_j'].max():.6f}")
-        
-        return result
-    
-    def _create_eigenvector_arrows(self, jacobian_data, xx, yy, x_min, x_max, y_min, y_max, density=5):
-        """Create arrow plots showing eigenvector directions."""
-        arrows = []
-        
-        # Subsample grid for arrow display
-        nx, ny = xx.shape
-        x_indices = range(0, nx, density)
-        y_indices = range(0, ny, density)
-        
-        for i in x_indices:
-            for j in y_indices:
-                x0 = np.linspace(x_min, x_max, nx)[j]
-                y0 = np.linspace(y_min, y_max, ny)[i]
-                
-                # First eigenvector (dominant direction)
-                v1 = jacobian_data['eigenvec1'][i, j] * 0.1  # Scale for visibility
-                arrows.append(
-                    go.Scatter(
-                        x=[x0, x0 + v1[0]], y=[y0, y0 + v1[1]],
-                        mode='lines',
-                        line=dict(color='red', width=2),
-                        showlegend=False,
-                        xaxis='x4', yaxis='y4'
-                    )
-                )
-                
-                # Second eigenvector (orthogonal direction)
-                v2 = jacobian_data['eigenvec2'][i, j] * 0.1  # Scale for visibility
-                arrows.append(
-                    go.Scatter(
-                        x=[x0, x0 + v2[0]], y=[y0, y0 + v2[1]],
-                        mode='lines',
-                        line=dict(color='blue', width=2),
-                        showlegend=False,
-                        xaxis='x4', yaxis='y4'
-                    )
-                )
-        
-        return arrows
-
-    def create_static_metric_heatmap(self, x_sample: torch.Tensor, epoch: int):
-        """
-        Create a highly accurate static heatmap of det(G) at t=0 using matplotlib.
-        Overlays all sequence points at t=0. Saves as a high-quality PNG.
-        """
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import torch
-        import os
-
-        print(f"🖼️ Creating static det(G) heatmap for t=0, epoch {epoch}")
-        self._ensure_model_on_device()
-        self.model.eval()
-        with torch.no_grad():
-            result = self.model_forward(x_sample)
-            z_seq = result['latent_samples'] if isinstance(result, dict) else result.z  # [batch_size, n_obs, latent_dim]
-            batch_size, n_obs, latent_dim = z_seq.shape
-            if latent_dim != 2:
-                print("[ERROR] Static metric heatmap only implemented for 2D latent space.")
-                return
-            # Use PCA if latent space is not already 2D (should be 2D here)
-            z_t0 = z_seq[:, 0, :].cpu().numpy()  # All sequences at t=0
-            # Define grid over latent space
-            margin = 0.5
-            x_min, x_max = z_t0[:, 0].min() - margin, z_t0[:, 0].max() + margin
-            y_min, y_max = z_t0[:, 1].min() - margin, z_t0[:, 1].max() + margin
-            nx, ny = 200, 200  # Dense grid
-            xx, yy = np.meshgrid(np.linspace(x_min, x_max, nx), np.linspace(y_min, y_max, ny))
-            grid_points = np.column_stack([xx.ravel(), yy.ravel()])
-            grid_tensor = torch.tensor(grid_points, dtype=torch.float32, device=self.device)
-            # Compute metric tensor and det(G)
-            try:
-                G_grid = self.model.G(grid_tensor)  # [N, 2, 2]
-                det_G = torch.linalg.det(G_grid).cpu().numpy().reshape(xx.shape)
-            except Exception as e:
-                print(f"[ERROR] Failed to compute metric tensor: {e}")
-                return
-            # Plot
-            fig, ax = plt.subplots(figsize=(8, 7))
-            im = ax.imshow(
-                np.log10(np.clip(det_G, 1e-10, None)),
-                extent=[x_min, x_max, y_min, y_max],
-                origin='lower',
-                aspect='auto',
-                cmap='viridis'
-            )
-            cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-            cbar.set_label(r'log$_{10}$ det(G)', fontsize=14)
-            # Overlay all sequence points at t=0
-            ax.scatter(z_t0[:, 0], z_t0[:, 1], c='red', s=18, edgecolor='white', linewidth=0.7, alpha=0.9, label='t=0 points')
-            ax.set_xlabel('Latent dim 1', fontsize=13)
-            ax.set_ylabel('Latent dim 2', fontsize=13)
-            ax.set_title(f'det(G) Heatmap at t=0 (Epoch {epoch})', fontsize=15)
-            ax.legend(loc='upper right', fontsize=11)
-            plt.tight_layout()
-            # Save
-            out_dir = self._get_output_path('', 'static_metric_heatmap')
-            os.makedirs(out_dir, exist_ok=True)
-            out_path = os.path.join(out_dir, f'static_metric_heatmap_t0_epoch_{epoch}.png')
-            plt.savefig(out_path, dpi=200)
-            plt.close(fig)
-            print(f"💾 Saved static metric heatmap: {out_path}")
-            # Optionally log to WandB
-            if self.should_log_to_wandb():
-                import wandb
-                wandb.log({"static_metric_heatmap_t0": wandb.Image(out_path)})
-
-    def create_static_metric_heatmap_timesteps(self, x_sample: torch.Tensor, epoch: int):
-        """
-        Create a grid of det(G) heatmaps for 50% of the timesteps (evenly spaced),
-        overlaying all sequence points at each timestep, with fixed axis and color scale.
-        """
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import torch
-        import os
-        print(f"🖼️ Creating static det(G) heatmaps for multiple timesteps, epoch {epoch}")
-        self._ensure_model_on_device()
-        self.model.eval()
-        with torch.no_grad():
-            result = self.model_forward(x_sample)
-            z_seq = result['latent_samples'] if isinstance(result, dict) else result.z  # [batch_size, n_obs, latent_dim]
-            batch_size, n_obs, latent_dim = z_seq.shape
-            if latent_dim != 2:
-                print("[ERROR] Static metric heatmap only implemented for 2D latent space.")
-                return
-            z_seq_np = z_seq.cpu().numpy()  # [batch, n_obs, 2]
-            # Select 50% of timesteps, evenly spaced
-            num_plots = max(2, n_obs // 2)
-            timesteps = np.linspace(0, n_obs-1, num=num_plots, dtype=int)
-            # Compute tight axis limits across all points
-            all_points = z_seq_np[:, timesteps, :].reshape(-1, 2)
-            margin = 0.5
-            x_min, x_max = all_points[:, 0].min() - margin, all_points[:, 0].max() + margin
-            y_min, y_max = all_points[:, 1].min() - margin, all_points[:, 1].max() + margin
-            nx, ny = 200, 200  # Dense grid
-            xx, yy = np.meshgrid(np.linspace(x_min, x_max, nx), np.linspace(y_min, y_max, ny))
-            grid_points = np.column_stack([xx.ravel(), yy.ravel()])
-            grid_tensor = torch.tensor(grid_points, dtype=torch.float32, device=self.device)
-            # Compute det(G) for each selected timestep
-            detG_grids = []
-            points_per_t = []
-            for t in timesteps:
-                try:
-                    G_grid = self.model.G(grid_tensor)  # [N, 2, 2]
-                    det_G = torch.linalg.det(G_grid).cpu().numpy().reshape(xx.shape)
-                except Exception as e:
-                    print(f"[ERROR] Failed to compute metric tensor at t={t}: {e}")
-                    det_G = np.ones(xx.shape)
-                detG_grids.append(det_G)
-                points_per_t.append(z_seq_np[:, t, :])
-            # Compute global color scale (log10)
-            all_log_detG = np.log10(np.clip(np.stack(detG_grids), 1e-10, None)).flatten()
-            vmin, vmax = np.percentile(all_log_detG, [1, 99])  # Nuanced, ignore outliers
-            # Plot
-            ncols = min(5, num_plots)
-            nrows = int(np.ceil(num_plots / ncols))
-            fig, axes = plt.subplots(nrows, ncols, figsize=(5*ncols, 4.5*nrows), squeeze=False)
-            for i, (t, det_G, pts) in enumerate(zip(timesteps, detG_grids, points_per_t)):
-                row, col = divmod(i, ncols)
-                ax = axes[row, col]
-                im = ax.imshow(
-                    np.log10(np.clip(det_G, 1e-10, None)),
-                    extent=[x_min, x_max, y_min, y_max],
-                    origin='lower',
-                    aspect='auto',
-                    cmap='viridis',
-                    vmin=vmin, vmax=vmax
-                )
-                ax.scatter(pts[:, 0], pts[:, 1], c='red', s=18, edgecolor='white', linewidth=0.7, alpha=0.9, label=f't={t} points')
-                ax.set_title(f't={t}', fontsize=13)
-                ax.set_xlim(x_min, x_max)
-                ax.set_ylim(y_min, y_max)
-                if row == nrows-1:
-                    ax.set_xlabel('Latent dim 1', fontsize=12)
-                if col == 0:
-                    ax.set_ylabel('Latent dim 2', fontsize=12)
-                ax.legend(loc='upper right', fontsize=9)
-            # Remove empty subplots
-            for j in range(i+1, nrows*ncols):
-                row, col = divmod(j, ncols)
-                fig.delaxes(axes[row, col])
-            # Add a single colorbar
-            cbar = fig.colorbar(im, ax=axes, orientation='vertical', fraction=0.02, pad=0.03)
-            cbar.set_label(r'log$_{10}$ det(G)', fontsize=14)
-            plt.suptitle(f'det(G) Heatmaps at Selected Timesteps (Epoch {epoch})', fontsize=16)
-            plt.tight_layout(rect=[0, 0.03, 1, 0.97])
-            # Save
-            out_dir = self._get_output_path('', 'static_metric_heatmap')
-            os.makedirs(out_dir, exist_ok=True)
-            out_path = os.path.join(out_dir, f'static_metric_heatmap_timesteps_epoch_{epoch}.png')
-            plt.savefig(out_path, dpi=200)
-            plt.close(fig)
-            print(f"💾 Saved static metric heatmap grid: {out_path}")
-            # Optionally log to WandB
-            if self.should_log_to_wandb():
-                import wandb
-                wandb.log({"static_metric_heatmap_timesteps": wandb.Image(out_path)})
+        finally:
+            self.model.train()

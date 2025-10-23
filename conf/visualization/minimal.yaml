@@ -6,7 +6,7 @@ frequency: 5
 # Module toggles
 enable_basic: true
 enable_manifold: false
-enable_interactive: false
+enable_interactive: true
 enable_flow_analysis: false
 
 # Frequency controls (every N epochs)

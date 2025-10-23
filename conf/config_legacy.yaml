@@ -5,7 +5,7 @@ defaults:
   - model: riemannian_flow_vae
   - training: full_data
   - data: cyclic_sprites
-  - visualization: minimal
+  - visualization: three_stage_optimized
   - evaluation: default
   - metric: rhvae
   - sampling: rhmc_default

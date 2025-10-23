@@ -10,12 +10,17 @@ Handles all loss computations for Riemannian VAE models including:
 - Combined loss computation
 """
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, Union
 import numpy as np
 import os
+from contextlib import nullcontext
+
+from .metric_utils import half_logdet_volume as _global_half_logdet_volume
+from .metric_tensor import inverse_fallback_count
 
 class LossManager(nn.Module):
     def __init__(
@@ -24,11 +29,14 @@ class LossManager(nn.Module):
         riemannian_beta: Optional[float] = None,
         loop_penalty_weight: float = 1.0,
         device: Optional[torch.device] = None,
-        metric_reg_weight: float = 0.0,  # NEW: weight for metric regularization
+        metric_reg_weight: float = 2.0,  # NEW: weight for metric regularization
         metric_reg_type: str = 'none',   # NEW: type: 'none', 'determinant', 'condition', 'smoothness'
-        metric_reg_target: float = 0.0,  # NEW: target value for regularization (e.g., logdet target)
+        metric_reg_target: float = 2.0,  # NEW: target value for regularization (e.g., logdet target)
         # μ anchoring
         mu_l2_weight: float = 0.0,
+        recon_scale: float = 100.0,
+        kl_monitor_baseline_tau: float = 0.98,
+        metric_representation: str = "ginv",
         # Prior mode for KL: 'uniform' (default, cancels volume) or 'volume_gaussian'
         kl_prior_mode: str = 'uniform',
         # Riemannian KL options (to mirror original model behavior)
@@ -50,6 +58,12 @@ class LossManager(nn.Module):
         self.metric_reg_type = metric_reg_type
         self.metric_reg_target = metric_reg_target
         self.mu_l2_weight = float(mu_l2_weight)
+        self.recon_scale = float(recon_scale)
+        self.kl_monitor_baseline_tau = float(kl_monitor_baseline_tau)
+        self._kl_monitor_baseline: Optional[torch.Tensor] = None
+        self.metric_representation = str(metric_representation).lower()
+        if self.metric_representation not in {"g", "ginv"}:
+            raise ValueError("LossManager: metric_representation must be 'G' or 'Ginv'")
         self.kl_prior_mode = str(kl_prior_mode)
         self.kl_use_metric_normalization = kl_use_metric_normalization
         self.kl_metric_norm_mode = kl_metric_norm_mode
@@ -72,6 +86,16 @@ class LossManager(nn.Module):
             'metric_reg': [],  # NEW
             'mu_l2': []
         }
+        self._inverse_fallbacks_seen = inverse_fallback_count()
+        self._debug_prev_sigma_stats: Dict[str, Dict[str, float]] = {}
+
+    def _monitor_inverse_fallbacks(self) -> None:
+        current = inverse_fallback_count()
+        previous = getattr(self, "_inverse_fallbacks_seen", 0)
+        if current > previous:
+            delta = current - previous
+            print(f"[WARN] Metric inverse fallback triggered {delta} additional time(s); total={current}.")
+            self._inverse_fallbacks_seen = current
     
     def compute_reconstruction_loss(self, x_recon: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
         """
@@ -84,9 +108,9 @@ class LossManager(nn.Module):
         Returns:
             Reconstruction loss scalar
         """
-        # CRITICAL FIX: Scale reconstruction loss by 255 (user prefers non-normalized scale)
-        # This gives meaningful loss values in the 0-255 range
-        loss = F.mse_loss(x_recon, x, reduction='mean') * 255.0
+        loss = F.mse_loss(x_recon, x, reduction='mean')
+        if self.recon_scale != 1.0:
+            loss = loss * x.new_tensor(self.recon_scale)
         
         if not torch.isfinite(loss):
             if os.environ.get("RLVAE_DEBUG") == "1":
@@ -120,12 +144,11 @@ class LossManager(nn.Module):
         metric_tensor: Optional[Any] = None
     ) -> torch.Tensor:
         """
-        Compute KL divergence for metric-aware Riemannian posterior:
-        KL[q_φ(z_0|x_0) || p(z_0)] = 1/2 E_q[(z_0-μ)^T G(z_0) (z_0-μ)]
-        Where:
-        - q_φ(z_0|x_0) ∝ [det G(z_0)]^{-1/2} exp(-1/2 (z_0-μ)^T G(z_0) (z_0-μ))
-        - p(z_0) ∝ [det G(z_0)]^{-1/2} (uniform Riemannian prior)
-        The log det G(z_0) terms cancel out, leaving only the quadratic form.
+        Local surrogate KL for the Riemannian Gaussian posterior (Stage-B bound).
+
+        This penalises samples or means under G(z) but does not implement the Stage-C
+        Monte-Carlo KL with flows. Use only for ablations or when RHMC is disabled.
+
         Args:
             mu: Posterior mean [batch_size, latent_dim]
             log_var: Posterior log variance (not used)
@@ -134,15 +157,16 @@ class LossManager(nn.Module):
         Returns:
             KL divergence (scalar)
         """
+        debug = os.environ.get('RLVAE_DEBUG', '0') == '1'
         # DEBUG: Print KL computation details
-        if not hasattr(self, '_kl_debug_printed'):
+        if debug and not hasattr(self, '_kl_debug_printed'):
             print(f"[KL DEBUG] kl_metric_eval_point: {self.kl_metric_eval_point}")
             print(f"[KL DEBUG] mu shape: {mu.shape}, mean: {mu.mean().item():.4f}, std: {mu.std().item():.4f}")
             print(f"[KL DEBUG] z_samples shape: {z_samples.shape}, mean: {z_samples.mean().item():.4f}, std: {z_samples.std().item():.4f}")
             self._kl_debug_printed = True
         if metric_tensor is None:
             # Fallback to standard KL (silenced unless debug)
-            if os.environ.get("RLVAE_DEBUG") == "1":
+            if debug:
                 print("⚠️ DEBUG: Falling back to standard KL")
             if os.environ.get('RLVAE_STRICT', '0') == '1':
                 raise RuntimeError("LossManager: metric_tensor is None under strict Riemannian mode")
@@ -160,82 +184,97 @@ class LossManager(nn.Module):
             except Exception:
                 pass
             # Choose evaluation point for metric: 'z' (samples) or 'mu' (means)
-            eval_pts = z_samples if self.kl_metric_eval_point == 'z' else 'mu'
-            print(f"[KL DEBUG] Using eval_pts: {self.kl_metric_eval_point} -> shape {eval_pts.shape}, mean {eval_pts.mean().item():.4f}, std {eval_pts.std().item():.4f}")
-            # Compute inverse metric tensor at chosen points (G̃ = G^{-1})
-            if hasattr(metric_tensor, 'compute_inverse_metric'):
-                G_inv = metric_tensor.compute_inverse_metric(eval_pts)  # [B, D, D]
-            elif hasattr(metric_tensor, 'compute_metric'):
-                G = metric_tensor.compute_metric(eval_pts)
-                G_inv = torch.linalg.inv(G)
-            else:
-                # Assume callable returns G; invert
-                G = metric_tensor(eval_pts)
-                G_inv = torch.linalg.inv(G)
+            eval_pts = z_samples if self.kl_metric_eval_point == 'z' else mu
+            eval_pts_metric = eval_pts.float() if self.kl_amp_safe else eval_pts
+            if debug:
+                print(
+                    f"[KL DEBUG] Using eval_pts: {self.kl_metric_eval_point} -> "
+                    f"shape {eval_pts.shape}, mean {eval_pts.mean().item():.4f}, std {eval_pts.std().item():.4f}"
+                )
+            # Compute metric/precision tensor at chosen points
+            G_eval_raw, rep_eval = self._evaluate_metric(eval_pts_metric, metric_tensor, None, with_rep=True)
+            if G_eval_raw is None or rep_eval is None:
+                raise RuntimeError("Metric tensor not available for Riemannian KL computation.")
+            rep_eval = rep_eval.lower()
 
-            # Optional normalization of G_inv for scale invariance
-            if self.kl_use_metric_normalization:
-                d = G_inv.shape[-1]
+            def _as_metric(tensor: torch.Tensor, rep: str) -> torch.Tensor:
+                if rep == "g":
+                    return tensor
+                if rep == "ginv":
+                    chol, _ = self._cholesky_spd(tensor, jitter=1e-6)
+                    d_local = tensor.shape[-1]
+                    eye = torch.eye(d_local, device=tensor.device, dtype=tensor.dtype).unsqueeze(0).expand_as(tensor)
+                    return torch.cholesky_solve(eye, chol)
+                raise ValueError(f"Unknown metric representation '{rep}'.")
+
+            tensor_for_quad = G_eval_raw
+            rep_for_quad = rep_eval
+
+            # Optional normalization (only meaningful when actual metric is provided)
+            if self.kl_use_metric_normalization and rep_eval == "g":
+                d = tensor_for_quad.shape[-1]
                 if self.kl_metric_norm_mode == 'geomean':
-                    sign, logabsdet = torch.slogdet(G_inv)
+                    sign, logabsdet = torch.slogdet(tensor_for_quad)
                     s = torch.exp(logabsdet / d).unsqueeze(-1).unsqueeze(-1)
-                    Gtilde = G_inv / (s + 1e-12)
+                    tensor_for_quad = tensor_for_quad / (s + 1e-12)
                 elif self.kl_metric_norm_mode == 'trace':
-                    s = (torch.einsum('bii->b', G_inv) / d).unsqueeze(-1).unsqueeze(-1)
-                    Gtilde = G_inv / (s + 1e-12)
-                else:
-                    Gtilde = G_inv
-            else:
-                Gtilde = G_inv
+                    s = (torch.einsum('bii->b', tensor_for_quad) / d).unsqueeze(-1).unsqueeze(-1)
+                    tensor_for_quad = tensor_for_quad / (s + 1e-12)
 
             # AMP-safe float32 compute
             mu_f32 = mu.float() if self.kl_amp_safe else mu
             z_f32 = z_samples.float() if self.kl_amp_safe else z_samples
-            Gtilde_f32 = Gtilde.float() if self.kl_amp_safe else Gtilde
+            tensor_quad_f32 = tensor_for_quad.float() if self.kl_amp_safe else tensor_for_quad
 
             # Choose what to penalize based on evaluation point
             if self.kl_metric_eval_point == 'mu':
                 # Penalize encoder means directly: (μ - 0)ᵀ G(μ) (μ - 0)
                 # This pulls encoder means toward the prior center (0)
                 diff = mu_f32 - 0.0  # [B, D] - distance from prior center
-                print(f"[KL DEBUG] Penalizing encoder means: diff shape {diff.shape}, mean {diff.mean().item():.4f}, std {diff.std().item():.4f}")
+                if debug:
+                    print(f"[KL DEBUG] Penalizing encoder means with G: diff shape {diff.shape}, mean {diff.mean().item():.4f}, std {diff.std().item():.4f}")
             else:
-                # Penalize distance between samples and means: (z - μ)ᵀ G(z) (z - μ)
-                # This is the standard VAE KL behavior
+                # Penalize distance between samples and means
                 diff = z_f32 - mu_f32  # [B, D]
-                print(f"[KL DEBUG] Penalizing sample-mean distance: diff shape {diff.shape}, mean {diff.mean().item():.4f}, std {diff.std().item():.4f}")
+                if debug:
+                    print(f"[KL DEBUG] Penalizing sample-mean distance with G: diff shape {diff.shape}, mean {diff.mean().item():.4f}, std {diff.std().item():.4f}")
             
-            quadratic_form = torch.einsum('bi,bij,bj->b', diff, Gtilde_f32, diff)
+            quadratic_form = self._quad_with_G(diff, tensor_quad_f32, rep_for_quad)
             kl_terms = 0.5 * quadratic_form
 
             # Optional volume-corrected Gaussian prior at μ: 0.5||μ||^2 - 0.5 log|G(μ)|
             if self.kl_prior_mode == 'volume_gaussian' and self.kl_metric_eval_point == 'mu':
                 try:
-                    # Ensure we have G at eval points
-                    if hasattr(metric_tensor, 'compute_metric'):
-                        G_mu = metric_tensor.compute_metric(eval_pts)
-                    else:
-                        # If only inverse is available, invert (small regularization for stability)
-                        if 'Gtilde_f32' in locals():
-                            G_mu = torch.linalg.inv(Gtilde_f32.float())
-                        else:
-                            raise RuntimeError('Metric tensor G not available for volume prior term')
-                    sign, logabsdet_G = torch.slogdet(G_mu.float())
-                    logabsdet_G = logabsdet_G  # [B]
-                    mu_norm_sq = torch.sum(mu_f32 ** 2, dim=-1)  # [B]
-                    prior_term = 0.5 * mu_norm_sq - 0.5 * logabsdet_G
+                    mu_metric = mu_f32 if self.kl_amp_safe else mu
+                    G_mu_tensor, rep_mu = self._evaluate_metric(mu_metric, metric_tensor, None, with_rep=True)
+                    if G_mu_tensor is None or rep_mu is None:
+                        raise RuntimeError('Metric tensor not available for volume prior term')
+                    rep_mu = rep_mu.lower()
+                    G_mu_metric = _as_metric(G_mu_tensor, rep_mu)
+                    G_mu_metric = G_mu_metric.float() if self.kl_amp_safe else G_mu_metric
+                    mu_quad = self._quad_with_G(mu_f32, G_mu_metric, "g")
+                    half_logdet_volume = self._half_logdet_volume(G_mu_tensor, rep_mu)
+                    logdet_G = -2.0 * half_logdet_volume
+                    prior_term = 0.5 * mu_quad - 0.5 * logdet_G
+                    # Debug: report prior term statistics
+                    if debug:
+                        print(f"[KL DEBUG] volume prior term stats: mean={prior_term.mean().item():.6f}, min={prior_term.min().item():.6f}, max={prior_term.max().item():.6f}")
                     kl_terms = kl_terms + prior_term
-                    print(f"[KL DEBUG] Added volume prior term: mean={prior_term.mean().item():.6f}")
+                    if debug:
+                        print(f"[KL DEBUG] Added volume prior term: mean={prior_term.mean().item():.6f}")
                 except Exception as e:
-                    print(f"[KL DEBUG] Volume prior term failed: {e}")
+                    if debug:
+                        print(f"[KL DEBUG] Volume prior term failed: {e}")
 
             kl_divergence = kl_terms.mean()
-            print(f"[KL DEBUG] Final KL: {kl_divergence.item():.6f}, quadratic_form mean: {quadratic_form.mean().item():.6f}")
+            if debug:
+                print(f"[KL DEBUG] Final KL: {kl_divergence.item():.6f}, quadratic_form mean: {quadratic_form.mean().item():.6f}")
             return kl_divergence.to(mu.dtype)
         except Exception as e:
             if os.environ.get('RLVAE_STRICT', '0') == '1':
                 raise RuntimeError(f"LossManager: Riemannian KL failed under strict mode: {e}")
-            print(f"⚠️ Riemannian KL computation failed: {e}, using standard KL")
+            if debug:
+                print(f"⚠️ Riemannian KL computation failed: {e}, using standard KL")
             try:
                 if os.environ.get('RLVAE_TRACE', '0') == '1':
                     print("TRACE KL source: error path -> standard KL")
@@ -245,29 +284,582 @@ class LossManager(nn.Module):
             return -0.5 * torch.sum(1 + log_var_clamped - mu.pow(2) - log_var_clamped.exp(), dim=1).mean()
     
     def compute_flow_loss(
-        self, 
-        log_det_jacobians: Optional[list] = None
+        self,
+        log_det_jacobians: Optional[list] = None,
     ) -> torch.Tensor:
         """
-        Compute flow loss (negative log determinant of Jacobian).
+        Small L2 regularizer on per-step log|det J| (only used when Stage-C uniform is OFF).
+        """
+        if not log_det_jacobians:
+            return torch.tensor(0.0, device=self.device)
+
+        # stack per-step [B] → [T-1, B] and L2
+        per_step = []
+        for t, term in enumerate(log_det_jacobians):
+            if isinstance(term, torch.Tensor):
+                v = torch.nan_to_num(term.to(device=self.device), nan=0.0, posinf=0.0, neginf=0.0)
+                if v.ndim == 0:
+                    v = v.expand(1)  # best-effort
+                per_step.append(v.reshape(-1))
+        if not per_step:
+            return torch.tensor(0.0, device=self.device)
+
+        M = torch.stack(per_step, dim=0)  # [T-1, B]
+        loss = (M ** 2).mean() * 1e-4     # tiny weight; keep gradients sane
+        return loss
+
+    def _sum_logdet_jacobians(
+        self,
+        log_det_jacobians: Optional[list],
+        batch_size: int,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """
+        Aggregate per-sample log|det J_t| from each flow into a per-sample sum.
+        Each item must contribute [B]; never clamp or take abs here.
+        """
+        if not log_det_jacobians:
+            return torch.zeros(batch_size, device=device, dtype=dtype)
+
+        total = torch.zeros(batch_size, device=device, dtype=dtype)
+        for i, term in enumerate(log_det_jacobians):
+            if not isinstance(term, torch.Tensor):
+                continue
+            t = term.to(device=device, dtype=dtype)
+
+            # Normalize to per-sample [B]
+            if t.ndim == 1 and t.shape[0] == batch_size:
+                contrib = t
+            elif t.ndim == 2 and t.shape[0] == batch_size:
+                contrib = t.sum(dim=1)
+            elif t.ndim > 2:
+                contrib = t.reshape(batch_size, -1).sum(dim=1)
+            elif t.ndim == 0:
+                # Scalar logdet is suspicious; treat as "pre-summed" and spread evenly as zeros
+                print(f"[FLOW WARN] scalar logdet at flow {i}; replacing with zeros [B].")
+                contrib = torch.zeros(batch_size, device=device, dtype=dtype)
+            else:
+                # Last-resort reshape/crop
+                print(f"[FLOW WARN] unexpected logdet shape {tuple(t.shape)} at flow {i}; trying reshape.")
+                contrib = t.reshape(-1)[:batch_size]
+                if contrib.numel() < batch_size:
+                    pad = torch.zeros(batch_size - contrib.numel(), device=device, dtype=dtype)
+                    contrib = torch.cat([contrib, pad], dim=0)
+
+            # Light runtime guard: very large means often implicate wrong sign/direction upstream
+            mean_abs = contrib.abs().mean().item()
+            if mean_abs > 5.0:
+                print(f"[WARN] Large flow logdet contribution (flow {i}): mean={mean_abs:.2f}")
+
+            total += contrib
+
+        total = torch.nan_to_num(total, nan=0.0, posinf=0.0, neginf=0.0)
+        return total
+
+        
+    def _evaluate_metric(
+        self,
+        z: Optional[torch.Tensor],
+        metric_tensor: Optional[Any],
+        rhmc_posterior: Optional[Any],
+        *,
+        with_rep: bool = False,
+    ) -> Union[Optional[torch.Tensor], Tuple[Optional[torch.Tensor], Optional[str]]]:
+        """
+        Evaluate the metric tensor at ``z`` using whichever component is available.
+
+        Returns a symmetrized SPD tensor together with the representation tag
+        (``'g'`` for metric, ``'ginv'`` for precision) or ``(None, None)`` if no
+        metric information is available.
+        """
+        if z is None:
+            return None, None
+
+        preferred = self.metric_representation.lower()
+
+        def _resolve(component: Any) -> tuple[Optional[torch.Tensor], Optional[str]]:
+            if component is None:
+                return None, None
+            try:
+                if preferred == "ginv" and hasattr(component, "compute_inverse_metric"):
+                    return component.compute_inverse_metric(z), "ginv"
+                if preferred == "g" and hasattr(component, "compute_metric"):
+                    return component.compute_metric(z), "g"
+            except Exception:
+                pass
+            try:
+                if hasattr(component, "compute_metric"):
+                    return component.compute_metric(z), "g"
+                if hasattr(component, "compute_inverse_metric"):
+                    return component.compute_inverse_metric(z), "ginv"
+                if callable(component):
+                    tensor = component(z)
+                    if isinstance(tensor, torch.Tensor):
+                        return tensor, self.metric_representation
+            except Exception:
+                return None, None
+            if hasattr(component, "G"):
+                try:
+                    return component.G(z), "g"
+                except Exception:
+                    return None, None
+            if hasattr(component, "G_inv"):
+                try:
+                    return component.G_inv(z), "ginv"
+                except Exception:
+                    return None, None
+            return None, None
+
+        tensor, rep = _resolve(metric_tensor)
+
+        if tensor is None or rep is None:
+            try:
+                model = getattr(rhmc_posterior, "_ctx", {}).get("model", None) if rhmc_posterior is not None else None
+            except Exception:
+                model = None
+            if model is not None:
+                tensor, rep = _resolve(model)
+
+        if tensor is None or rep is None:
+            self._monitor_inverse_fallbacks()
+            return (None, None) if with_rep else None
+
+        tensor = 0.5 * (tensor + tensor.transpose(-1, -2))
+        self._monitor_inverse_fallbacks()
+        return (tensor, rep) if with_rep else tensor
+
+    def _debug_log_sigma(self, label: str, sigma: torch.Tensor, *, info: str = "") -> None:
+        if os.environ.get("RLVAE_DEBUG", "0") != "1":
+            return
+        with torch.no_grad():
+            sigma32 = sigma.detach().float()
+            try:
+                eigvals = torch.linalg.eigvalsh(sigma32)
+                min_eig = eigvals.min().item()
+                max_eig = eigvals.max().item()
+                mean_eig = eigvals.mean().item()
+            except RuntimeError:
+                min_eig = max_eig = mean_eig = float('nan')
+            trace = torch.einsum('bii->b', sigma32).mean().item()
+            logdet_vals = self._slogdet_spd(sigma32).mean().item()
+            prev = self._debug_prev_sigma_stats.get(label)
+            delta_trace = delta_logdet = ""
+            if prev is not None:
+                delta_trace = f" (Δ{trace - prev['trace']:+.4e})"
+                delta_logdet = f" (Δ{logdet_vals - prev['logdet']:+.4e})"
+            context = f" - {info}" if info else ""
+            print(f"[SIGMA DEBUG] {label}{context}: trace={trace:.4f}{delta_trace}, "
+                  f"logdet={logdet_vals:.4f}{delta_logdet}, "
+                  f"min_eig={min_eig:.4e}, max_eig={max_eig:.4e}, mean_eig={mean_eig:.4e}")
+            self._debug_prev_sigma_stats[label] = {
+                "trace": trace,
+                "logdet": logdet_vals,
+                "min_eig": min_eig,
+                "max_eig": max_eig,
+            }
+
+    def _symmetrize(self, matrix: torch.Tensor) -> torch.Tensor:
+        """Return symmetric part of a batch of matrices."""
+        return 0.5 * (matrix + matrix.transpose(-1, -2))
+
+    def _sanitize_covariance(self, matrix: torch.Tensor, *, floor: float) -> torch.Tensor:
+        """
+        Project a covariance onto the SPD cone with minimum eigenvalue ``floor``.
+        Always operates in float32 and removes NaNs/Infs.
+        """
+        if not isinstance(matrix, torch.Tensor):
+            raise TypeError("Expected tensor for covariance sanitization.")
+        floor = float(max(floor, 0.0))
+        mat32 = matrix.to(dtype=torch.float32)
+        mat32 = self._symmetrize(torch.nan_to_num(mat32, nan=0.0, posinf=0.0, neginf=0.0))
+        try:
+            evals, evecs = torch.linalg.eigh(mat32)
+            evals = torch.clamp(evals, min=floor if floor > 0 else 1e-6)
+            mat32 = evecs @ (evals.unsqueeze(-1) * evecs.transpose(-1, -2))
+        except Exception:
+            eye = torch.eye(mat32.shape[-1], device=mat32.device, dtype=mat32.dtype).unsqueeze(0)
+            mat32 = mat32 + max(floor, 1e-6) * eye
+        mat32 = self._symmetrize(torch.nan_to_num(mat32, nan=0.0, posinf=0.0, neginf=0.0))
+        return mat32
+
+    def _cholesky_spd(
+        self,
+        matrix: torch.Tensor,
+        *,
+        jitter: float = 1e-6,
+        max_tries: int = 6,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute a stable Cholesky factor for an SPD batch with jitter fallback.
+        """
+        d = matrix.shape[-1]
+        eye = torch.eye(d, device=matrix.device, dtype=matrix.dtype).unsqueeze(0)
+        jitter_local = float(jitter)
+        chol = None
+        stabilized = None
+        for _ in range(max_tries):
+            trial = self._symmetrize(matrix) + jitter_local * eye
+            trial32 = trial.float() if trial.dtype in (torch.float16, torch.bfloat16) else trial
+            if hasattr(torch.linalg, "cholesky_ex"):
+                chol32, info = torch.linalg.cholesky_ex(trial32)
+                if isinstance(info, torch.Tensor) and info.numel() > 0 and (info > 0).any():
+                    jitter_local = max(jitter_local * 10.0, 1e-5)
+                    continue
+                chol = chol32
+                stabilized = trial32
+                break
+            try:
+                chol32 = torch.linalg.cholesky(trial32)
+                chol = chol32
+                stabilized = trial32
+                break
+            except RuntimeError:
+                jitter_local = max(jitter_local * 10.0, 1e-5)
+        if chol is None or stabilized is None:
+            # Final fallback: add large jitter and attempt once more
+            jitter_local = max(jitter_local, 1e-3)
+            trial = self._symmetrize(matrix) + jitter_local * eye
+            trial32 = trial.float() if trial.dtype in (torch.float16, torch.bfloat16) else trial
+            chol = torch.linalg.cholesky(trial32)
+            stabilized = trial32
+        return chol, stabilized
+
+    def _slogdet_spd(self, matrix: torch.Tensor, *, jitter: float = 1e-6) -> torch.Tensor:
+        """
+        Compute log det of an SPD batch with jitter-guarded Cholesky.
+        """
+        chol, stabilized = self._cholesky_spd(matrix, jitter=jitter)
+        diag = torch.diagonal(chol, dim1=-2, dim2=-1)
+        logdet = 2.0 * torch.log(diag + 1e-18).sum(dim=-1)
+        return logdet.to(matrix.dtype if matrix.dtype.is_floating_point else torch.float32)
+
+    def _stable_half_logdet(self, G: torch.Tensor, *, jitter: float = 1e-6) -> torch.Tensor:
+        """
+        Compute ½ log det G with SPD regularisation.
+        """
+        logdet = self._slogdet_spd(G, jitter=jitter)
+        return 0.5 * torch.nan_to_num(logdet.to(G.dtype), nan=0.0, posinf=0.0, neginf=0.0)
+
+    def _log_gaussian_density(
+        self,
+        z: torch.Tensor,
+        mu: torch.Tensor,
+        Sigma: torch.Tensor,
+        *,
+        jitter: float = 1e-6,
+    ) -> torch.Tensor:
+        """
+        Evaluate log N(z | mu, Sigma) with SPD covariance using Cholesky solve.
+        """
+        chol, stabilized = self._cholesky_spd(Sigma, jitter=jitter)
+        diff = (z - mu).unsqueeze(-1)
+        diff32 = diff.float() if diff.dtype != chol.dtype else diff
+        sol = torch.cholesky_solve(diff32, chol)
+        quad = torch.einsum('bij,bij->b', diff32, sol)
+        diag = torch.diagonal(chol, dim1=-2, dim2=-1)
+        logdet = 2.0 * torch.log(diag + 1e-18).sum(dim=-1)
+        const = z.shape[-1] * math.log(2 * math.pi)
+        log_prob = -0.5 * quad - 0.5 * logdet - 0.5 * const
+        return log_prob.to(z.dtype if z.dtype.is_floating_point else stabilized.dtype)
+
+    def _half_logdet_volume(
+        self,
+        G_or_Ginv: torch.Tensor,
+        rep: Optional[str] = None,
+        *,
+        jitter: float = 1e-6,
+    ) -> torch.Tensor:
+        """
+        Return +½ log det G^{-1} regardless of representation supplied.
+        """
+        rep_effective = (rep or self.metric_representation).lower()
+        return _global_half_logdet_volume(G_or_Ginv, rep_effective, jitter=jitter)
+
+    def _quad_with_G(
+        self,
+        v: torch.Tensor,
+        G_or_Ginv: torch.Tensor,
+        rep: Optional[str] = None,
+        *,
+        jitter: float = 1e-6,
+    ) -> torch.Tensor:
+        """
+        Compute v^T G v regardless of metric representation.
+        """
+        rep_effective = (rep or self.metric_representation).lower()
+        rep = rep_effective
+        if rep == "ginv":
+            chol, _ = self._cholesky_spd(G_or_Ginv, jitter=jitter)
+            v_col = v.unsqueeze(-1).float()
+            x = torch.cholesky_solve(v_col, chol)
+            quad = torch.einsum('bij,bij->b', v_col, x)
+            return quad.to(v.dtype if v.dtype.is_floating_point else torch.float32)
+        elif rep == "g":
+            v32 = v.float()
+            G32 = G_or_Ginv.float()
+            quad = torch.einsum('bi,bij,bj->b', v32, G32, v32)
+            return quad.to(v.dtype if v.dtype.is_floating_point else torch.float32)
+        else:
+            raise ValueError(f"Unknown metric representation '{rep}' in quad computation.")
+
+    def _resolve_sigma_mu(
+        self,
+        mu: torch.Tensor,
+        Sigma_mu: Optional[torch.Tensor],
+        metric_tensor: Optional[Any],
+        rhmc_posterior: Optional[Any],
+        rhmc_traj_info: Optional[dict],
+        *,
+        jitter: float = 1e-6,
+    ) -> Optional[torch.Tensor]:
+        """
+        Build Σ_μ = α G^{-1}(μ) + ε I consistent with ``metric_representation``.
+        """
+        # Prefer caller-provided covariance only during training to avoid
+        # validation/test runs inheriting stale caches.
+        sigma_candidates = []
+        if self.training and isinstance(Sigma_mu, torch.Tensor):
+            sigma_candidates.append(Sigma_mu)
+        if self.training and isinstance(rhmc_traj_info, dict):
+            sigma_from_traj = rhmc_traj_info.get('Sigma_mu', None)
+            if isinstance(sigma_from_traj, torch.Tensor):
+                sigma_candidates.append(sigma_from_traj)
+        if self.training and rhmc_posterior is not None:
+            cached = getattr(rhmc_posterior, '_last_sigma_mu', None)
+            if isinstance(cached, torch.Tensor):
+                sigma_candidates.append(cached)
+
+        for candidate in sigma_candidates:
+            Sigma = candidate.to(device=mu.device, dtype=torch.float32)
+            Sigma = self._sanitize_covariance(Sigma, floor=1e-6)
+            target_dtype = mu.dtype if mu.dtype in (torch.float32, torch.float64) else torch.float32
+            self._debug_log_sigma("Sigma_mu_cached", Sigma, info="candidate")
+            return Sigma.to(target_dtype).detach()
+
+        G_eval, rep = self._evaluate_metric(mu, metric_tensor, rhmc_posterior, with_rep=True)
+        if G_eval is None or rep is None:
+            return None
+
+        rep = rep.lower()
+        if rep == "ginv":
+            Ginv_mu = G_eval.to(dtype=torch.float32)
+        elif rep == "g":
+            chol, _ = self._cholesky_spd(G_eval, jitter=jitter)
+            d = G_eval.shape[-1]
+            eye = torch.eye(d, device=G_eval.device, dtype=G_eval.dtype).unsqueeze(0)
+            Ginv_mu = torch.cholesky_solve(eye, chol)
+            Ginv_mu = Ginv_mu.to(dtype=torch.float32)
+        else:
+            raise ValueError(f"Unknown metric representation '{rep}' when building Σ_μ.")
+        self._debug_log_sigma("Ginv_mu", Ginv_mu, info=f"rep={rep}")
+
+        alpha = 1.0
+        eps_reg = float(jitter)
+        if isinstance(rhmc_traj_info, dict):
+            try_alpha = rhmc_traj_info.get('alpha', None)
+            if try_alpha is not None:
+                try:
+                    alpha = float(try_alpha)
+                except Exception:
+                    pass
+            try_eps = rhmc_traj_info.get('eps_reg', None)
+            if try_eps is not None:
+                try:
+                    eps_reg = float(try_eps)
+                except Exception:
+                    pass
+        if rhmc_posterior is not None:
+            try:
+                alpha = float(getattr(rhmc_posterior, 'rhmc_alpha', alpha))
+            except Exception:
+                pass
+            try:
+                eps_reg = float(getattr(rhmc_posterior, 'eps_reg', eps_reg))
+            except Exception:
+                pass
+
+        alpha = float(alpha) if math.isfinite(alpha) and alpha > 0.0 else 1.0
+        eps_reg = float(eps_reg) if math.isfinite(eps_reg) and eps_reg >= 0.0 else 1e-6
+        alpha = max(alpha, 1e-3)
+        eps_reg = max(eps_reg, 1e-6)
+        d = Ginv_mu.shape[-1]
+        eye = torch.eye(d, device=Ginv_mu.device, dtype=Ginv_mu.dtype).unsqueeze(0)
+        Sigma = alpha * Ginv_mu + eps_reg * eye
+        Sigma = self._symmetrize(torch.nan_to_num(Sigma, nan=0.0, posinf=0.0, neginf=0.0))
+        Sigma = self._sanitize_covariance(Sigma, floor=max(eps_reg, 1e-6))
+        target_dtype = mu.dtype if mu.dtype in (torch.float32, torch.float64) else torch.float32
+        self._debug_log_sigma("Sigma_mu", Sigma, info=f"alpha={alpha:.4f}, eps={eps_reg:.2e}")
+        return Sigma.to(target_dtype).detach()
+
+    def _log_kinetic_density(
+        self,
+        rho: torch.Tensor,
+        z: torch.Tensor,
+        metric_tensor: Optional[Any],
+        rhmc_posterior: Optional[Any],
+        *,
+        jitter: float = 1e-6,
+    ) -> torch.Tensor:
+        """
+        log π_kin(ρ | z) with π_kin(ρ|z) = N(0, G(z)).
+        """
+        G_or_Ginv, rep = self._evaluate_metric(z, metric_tensor, rhmc_posterior, with_rep=True)
+        if G_or_Ginv is None or rep is None:
+            raise RuntimeError("Cannot evaluate kinetic density without metric.")
+        d = G_or_Ginv.shape[-1]
+        const = 0.5 * d * math.log(2 * math.pi)
+        rep = rep.lower()
+        if rep == "ginv":
+            rho32 = rho.float()
+            quad = torch.einsum('bi,bij,bj->b', rho32, G_or_Ginv.float(), rho32)
+            half_logdet = self._half_logdet_volume(G_or_Ginv, 'ginv', jitter=jitter)
+            return (-0.5 * quad + half_logdet - const).to(rho.dtype)
+        if rep == "g":
+            chol, _ = self._cholesky_spd(G_or_Ginv, jitter=jitter)
+            rho_col = rho.unsqueeze(-1).float()
+            sol = torch.cholesky_solve(rho_col, chol)
+            quad = torch.einsum('bij,bij->b', rho_col, sol)
+            half_logdet = self._half_logdet_volume(G_or_Ginv, 'g', jitter=jitter)
+            return (-0.5 * quad + half_logdet - const).to(rho.dtype)
+        raise ValueError(f"Unknown metric representation '{rep}' for kinetic density.")
+    
+    def _batch_jacobian(self, inputs: torch.Tensor, outputs: torch.Tensor) -> torch.Tensor:
+        """
+        Compute batched Jacobian d(outputs)/d(inputs) for vector-valued outputs.
         
         Args:
-            log_det_jacobians: List of log determinants for each flow [n_flows]
-            
+            inputs: [B, D] tensor with requires_grad=True
+            outputs: [B, D] tensor produced from inputs
         Returns:
-            Flow loss scalar
+            jac: [B, D, D] Jacobian for each batch element
         """
-        if log_det_jacobians is None or len(log_det_jacobians) == 0:
-            return torch.tensor(0.0, device=self.device)
-        
-        # Sum log determinants across flows
-        total_log_det = sum(log_det_jacobians)
-        loss = torch.mean(total_log_det).abs()  # Ensure positive loss
-        if not torch.isfinite(loss):
-            print("⚠️ Flow loss is not finite! Clamping to 0.0.")
-            loss = torch.tensor(0.0, device=self.device)
-        return loss
+        batch, dim = inputs.shape
+        jac = torch.zeros(batch, dim, dim, device=inputs.device, dtype=inputs.dtype)
+        for k in range(dim):
+            grads = torch.autograd.grad(
+                outputs[:, k].sum(),
+                inputs,
+                retain_graph=True,
+                create_graph=False,
+                allow_unused=False
+            )[0]
+            jac[:, k, :] = grads
+        return jac
     
+    def _pushforward_metric_via_flows(
+        self,
+        z0: torch.Tensor,
+        flow_manager: Optional[Any],
+        metric_tensor: Optional[Any],
+        rhmc_posterior: Optional[Any],
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """
+        Push forward the Stage-B metric through the flow stack.
+
+        Returns:
+            GT_sel: transported metric matching current self.metric_representation ('g' or 'ginv')
+            min_sv: min singular value of J (diagnostic)
+            half_logdet_push_g:     -1/2 log det G'     (always returned)
+            half_logdet_push_ginv:  +1/2 log det G'^{-1} (always returned)
+        """
+        # 0) Get base tensor in configured representation
+        Gbase, base_rep = self._evaluate_metric(z0, metric_tensor, rhmc_posterior, with_rep=True)
+        if Gbase is None or base_rep is None:
+            return (None, None), None, None, None
+
+        B, D = z0.shape
+        rep  = base_rep.lower()
+
+        def _spd_inverse(A: torch.Tensor) -> torch.Tensor:
+            chol, _ = self._cholesky_spd(A)
+            eye = torch.eye(A.shape[-1], device=A.device, dtype=A.dtype).unsqueeze(0).expand_as(A)
+            return torch.cholesky_solve(eye, chol)
+
+        if rep == "ginv":
+            Ginv0 = Gbase
+            G0 = _spd_inverse(Ginv0)
+        elif rep == "g":
+            G0 = Gbase
+            Ginv0 = _spd_inverse(G0)
+        else:
+            raise ValueError(f"Unknown metric representation '{rep}' for pushforward.")
+
+        # 2) No-flow case (J = I) — compute both volumes correctly
+        if flow_manager is None or getattr(flow_manager, 'n_flows', 0) == 0:
+            # -1/2 log det G' = -1/2 log det G0
+            half_logdet_push_g    = self._half_logdet_volume(G0, 'g', jitter=1e-6)
+            half_logdet_push_ginv = self._half_logdet_volume(Ginv0, 'ginv', jitter=1e-6)
+            GT_sel = G0 if rep == "g" else Ginv0
+            return (
+                (GT_sel.to(z0.dtype).detach(), rep),
+                torch.full((B,), float('nan'), device=G0.device, dtype=G0.dtype),
+                half_logdet_push_g.to(z0.dtype),
+                half_logdet_push_ginv.to(z0.dtype),
+            )
+
+        # 3) Build full Jacobian with autograd
+        from contextlib import nullcontext
+        grad_ctx = nullcontext()
+        if not torch.is_grad_enabled():
+            grad_ctx = torch.enable_grad()
+
+        with grad_ctx:
+            z = z0.detach().clone().requires_grad_(True)
+            eye = torch.eye(D, device=z.device, dtype=z.dtype).unsqueeze(0)
+            J_total = eye.repeat(B, 1, 1)
+            for flow in flow_manager.flows:
+                out_struct = flow(z)
+                z_next = out_struct.out
+                if not z_next.requires_grad:
+                    # Fall back to no-flow formulas if graph is broken
+                    half_logdet_push_g    = self._half_logdet_volume(G0, 'g', jitter=1e-6)
+                    half_logdet_push_ginv = self._half_logdet_volume(Ginv0, 'ginv', jitter=1e-6)
+                    GT_sel = G0 if rep == "g" else Ginv0
+                    return (
+                        (GT_sel.to(z0.dtype).detach(), rep),
+                        torch.full((B,), float('nan'), device=z.device, dtype=z.dtype),
+                        half_logdet_push_g.to(z0.dtype),
+                        half_logdet_push_ginv.to(z0.dtype),
+                    )
+                jac = self._batch_jacobian(z, z_next)  # [B, D, D] of ∂z_next/∂z
+                J_total = torch.bmm(jac, J_total)
+                z = z_next.detach().clone().requires_grad_(True)
+
+        # 4) Transport both objects with correct formulas
+        J64   = J_total.double()
+        G064  = G0.double()
+        Ginv64 = Ginv0.double()
+
+        # Diagnostics
+        sv = torch.linalg.svdvals(J64)
+        min_sv = sv.min(dim=-1).values
+
+        # G-transport:    G' = J^{-T} G J^{-1}
+        eye64 = torch.eye(D, device=J64.device, dtype=J64.dtype).unsqueeze(0).expand(B, -1, -1)
+        J_inv = torch.linalg.solve(J64, eye64)
+        GT_g  = torch.bmm(J_inv.transpose(1, 2), torch.bmm(G064, J_inv))
+        GT_g  = 0.5 * (GT_g + GT_g.transpose(1, 2))
+
+        # G^{-1}-transport:  G'^{-1} = J G^{-1} J^T
+        GT_ginv = torch.bmm(J64, torch.bmm(Ginv64, J64.transpose(1, 2)))
+        GT_ginv = 0.5 * (GT_ginv + GT_ginv.transpose(1, 2))
+
+        # 5) Volumes (always return both canonical scalars)
+        half_logdet_push_g    = self._half_logdet_volume(GT_g, 'g', jitter=1e-6)
+        half_logdet_push_ginv = self._half_logdet_volume(GT_ginv, 'ginv', jitter=1e-6)
+
+        # 6) Select the transported tensor for downstream, matching configured rep
+        GT_sel = GT_g if rep == "g" else GT_ginv
+
+        return (
+            (GT_sel.to(z0.dtype).detach(), rep),
+            min_sv.to(z0.dtype),
+            half_logdet_push_g.to(z0.dtype),
+            half_logdet_push_ginv.to(z0.dtype),
+        )
+        
     def compute_loop_penalty(
         self, 
         z_seq: list, 
@@ -305,11 +897,19 @@ class LossManager(nn.Module):
         mu: torch.Tensor,
         log_var: torch.Tensor,
         z_samples: torch.Tensor,
+        *,
         log_det_jacobians: Optional[list] = None,
         z_seq: Optional[list] = None,
+        flow_manager: Optional[Any] = None,
         loop_mode: str = "open",
         metric_tensor: Optional[Any] = None,
         use_riemannian_kl: bool = True,
+        # Explicit Stage-C latent states (preferred over legacy args)
+        z0: Optional[torch.Tensor] = None,
+        zS: Optional[torch.Tensor] = None,
+        zF: Optional[torch.Tensor] = None,
+        Sigma_mu: Optional[torch.Tensor] = None,
+        sum_logdet_flow: Optional[torch.Tensor] = None,
         # RHMC posterior pathway (MC KL on pushforward)
         rhmc_z0: Optional[torch.Tensor] = None,
         rhmc_zK: Optional[torch.Tensor] = None,
@@ -340,6 +940,7 @@ class LossManager(nn.Module):
         """
         # Ensure metric_reg is always defined for safe returns
         metric_reg = torch.tensor(0.0, device=x.device)
+        batch_size = mu.shape[0]
 
         # Compute individual loss components
         recon_loss = self.compute_reconstruction_loss(x_recon, x)
@@ -356,58 +957,272 @@ class LossManager(nn.Module):
             (rhmc_zK is not None or z_samples is not None)
         )
 
+        # Pre-compute flow Jacobian sum for potential MC KL usage
+        if sum_logdet_flow is not None:
+            sum_logdet_flow = sum_logdet_flow.to(device=mu.device, dtype=mu.dtype)
+        else:
+            if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                print("\n[DEBUG] --- FLOW JACOBIAN SUMMARY ---")
+                for i, term in enumerate(log_det_jacobians or []):
+                    if not isinstance(term, torch.Tensor):
+                        continue
+                    t_term = term.to(device=mu.device, dtype=mu.dtype)
+                    summary = (
+                        f"[DEBUG FLOW {i}] shape={tuple(t_term.shape)}, "
+                        f"min={t_term.min().item():.4f}, max={t_term.max().item():.4f}, "
+                        f"mean={t_term.mean().item():.4f}, std={t_term.std().item():.4f}"
+                    )
+                    print(summary)
+            sum_logdet_flow = self._sum_logdet_jacobians(
+                log_det_jacobians,
+                batch_size,
+                device=mu.device,
+                dtype=mu.dtype,
+            )
+
         # Resolve runtime switches (kwargs override ctor defaults)
         _mode = (rhmc_kl_mode or self.rhmc_kl_mode).lower()
         _src = (rhmc_kl_source or self.rhmc_kl_source).lower()
         _with_jac = bool(self.rhmc_kl_jacobian if rhmc_kl_jacobian is None else rhmc_kl_jacobian)
 
+        kl_aux_metrics: Dict[str, torch.Tensor] = {}
+        kl_components_sample: Dict[str, torch.Tensor] = {}
+        stage_c_uniform = False
+
         if use_rhmc_mc and _mode in {"mc", "jac"}:
-            # Log config once
+            if os.environ.get('RLVAE_DEBUG', '0') == '1':
+                print(f"[KL ROUTE] RHMC Monte-Carlo branch (prior_mode={self.kl_prior_mode})")
             if not hasattr(self, "_loss_cfg_printed"):
                 print(f"[LOSS CONFIG] rhmc_kl_mode={_mode}, source={_src}, jacobian={str(_with_jac).lower()}")
                 self._loss_cfg_printed = True
 
-            # Ensure zK present
-            zK = rhmc_zK if rhmc_zK is not None else z_samples
-            assert zK is not None, "zK samples required for RHMC MC KL"
+            # Resolve latent states
+            stage_zS = zS if zS is not None else (rhmc_zK if rhmc_zK is not None else z_samples)
+            if stage_zS is None:
+                raise RuntimeError("Stage-C KL requires post-RHMC samples (zS).")
+            stage_z0 = z0 if z0 is not None else (rhmc_z0 if rhmc_z0 is not None else z_samples)
+            stage_zF = zF
+            if stage_zF is None:
+                if isinstance(z_seq, list):
+                    for candidate in reversed(z_seq):
+                        if isinstance(candidate, torch.Tensor):
+                            stage_zF = candidate
+                            break
+                if stage_zF is None:
+                    stage_zF = stage_zS
 
-            # log_q from z0 if available and selected; else fallback at zK
-            if _src == "z0" and rhmc_log_q is not None:
-                log_q = rhmc_log_q
-            else:
-                # Fallback approximate log q at zK using current Riemannian Gaussian at μ
-                try:
-                    log_q = rhmc_posterior._compute_log_riemannian_gaussian(zK, mu, log_var)
-                except Exception as e:
-                    if os.environ.get("RLVAE_DEBUG") == "1":
-                        print(f"[KL DEBUG] Fallback log_q@zK failed: {e}; using isotropic Gaussian")
-                    diff = zK - mu
-                    d = zK.shape[-1]
-                    log_q = -0.5 * torch.sum(diff ** 2, dim=-1) - 0.5 * d * np.log(2 * np.pi)
+            if self.kl_prior_mode == "uniform" and _mode == "mc":
+                stage_c_uniform = True
+                eps_reg = float(getattr(rhmc_posterior, 'eps_reg', 1e-6)) if rhmc_posterior is not None else 1e-6
+                zS_effective = stage_zS
 
-            # log_p under Riemannian volume prior at zK
-            try:
-                log_p = rhmc_posterior._compute_log_prior(zK)
-            except Exception:
-                d = zK.shape[-1]
-                log_p = -0.5 * torch.sum(zK ** 2, dim=-1) - 0.5 * d * np.log(2 * np.pi)
-
-            # Optional Jacobian correction (placeholder)
-            jac_correction = 0.0
-            if _mode == "jac" and _with_jac and isinstance(rhmc_traj_info, dict):
-                j = rhmc_traj_info.get('jac_logdet', None)
-                if isinstance(j, torch.Tensor):
-                    jac_correction = j
-                elif j is not None:
+                if _src == "z0":
+                    if rhmc_log_q is not None:
+                        log_q = rhmc_log_q.to(mu.dtype)
+                    else:
+                        Sigma_mu = self._resolve_sigma_mu(
+                            mu,
+                            Sigma_mu,
+                            metric_tensor,
+                            rhmc_posterior,
+                            rhmc_traj_info,
+                            jitter=eps_reg,
+                        )
+                        if Sigma_mu is not None:
+                            log_q = self._log_gaussian_density(stage_z0, mu, Sigma_mu, jitter=eps_reg).to(mu.dtype)
+                        else:
+                            try:
+                                log_q = rhmc_posterior._compute_log_riemannian_gaussian(stage_z0, mu, log_var).to(mu.dtype)
+                            except Exception:
+                                diff = stage_z0 - mu
+                                d = diff.shape[-1]
+                            log_q = (-0.5 * torch.sum(diff ** 2, dim=-1) - 0.5 * d * np.log(2 * np.pi)).to(mu.dtype)
+                else:
                     try:
-                        jac_correction = torch.as_tensor(j, device=zK.device, dtype=log_q.dtype)
+                        log_q = rhmc_posterior._compute_log_riemannian_gaussian(zS_effective, mu, log_var).to(mu.dtype)
                     except Exception:
-                        jac_correction = 0.0
+                        diff = zS_effective - mu
+                        d = diff.shape[-1]
+                        log_q = (-0.5 * torch.sum(diff ** 2, dim=-1) - 0.5 * d * np.log(2 * np.pi)).to(mu.dtype)
 
-            kl_terms = log_q - log_p - jac_correction
-            kl_loss = kl_terms.mean().to(x.dtype)
-            kl_weight = self.riemannian_beta
+                G_source, rep_source = self._evaluate_metric(stage_z0, metric_tensor, rhmc_posterior, with_rep=True)
+                if G_source is None or rep_source is None:
+                    raise RuntimeError("Stage C uniform prior requires metric evaluation at z0.")
+                half_logdet_source_ginv = self._half_logdet_volume(G_source, rep_source.lower(), jitter=eps_reg).to(mu.dtype)
+
+                G_target, rep_target = self._evaluate_metric(zS_effective, metric_tensor, rhmc_posterior, with_rep=True)
+                if G_target is None or rep_target is None:
+                    raise RuntimeError("Stage C uniform prior requires metric evaluation at zS.")
+                half_logdet_target_ginv = self._half_logdet_volume(G_target, rep_target.lower(), jitter=eps_reg).to(mu.dtype)
+
+                flow_term = sum_logdet_flow.to(mu.dtype)
+                flow_term = torch.nan_to_num(flow_term, nan=0.0, posinf=0.0, neginf=0.0)
+
+                delta_kin = torch.zeros_like(flow_term)
+                delta_vol = torch.zeros_like(flow_term)
+                if isinstance(rhmc_traj_info, dict):
+                    dk = rhmc_traj_info.get('delta_kin', None)
+                    if isinstance(dk, torch.Tensor):
+                        delta_kin = dk.to(mu.dtype)
+                    else:
+                        traj = rhmc_traj_info.get('trajectory', None)
+                        if isinstance(traj, list) and len(traj) > 1:
+                            rho0 = traj[0].get('rho', None)
+                            rhoS = traj[-1].get('rho', None)
+                            z_traj0 = traj[0].get('z', stage_z0)
+                            z_trajS = traj[-1].get('z', zS_effective)
+                            if isinstance(rho0, torch.Tensor) and isinstance(rhoS, torch.Tensor):
+                                delta_kin = (
+                                    self._log_kinetic_density(rho0, z_traj0, metric_tensor, rhmc_posterior)
+                                    - self._log_kinetic_density(rhoS, z_trajS, metric_tensor, rhmc_posterior)
+                                ).to(mu.dtype)
+                    dv = rhmc_traj_info.get('delta_vol', None)
+                    if isinstance(dv, torch.Tensor):
+                        delta_vol = dv.to(mu.dtype)
+
+                kl_terms = (
+                    log_q.to(x.dtype)
+                    - half_logdet_target_ginv.to(x.dtype)
+                    - flow_term.to(x.dtype)           # ✅ fixed sign
+                    + (delta_kin.to(x.dtype) - delta_vol.to(x.dtype))
+                )
+                kl_loss = kl_terms.mean().to(x.dtype)
+                kl_weight = self.riemannian_beta
+                flow_loss = torch.zeros((), device=x.device, dtype=x.dtype)
+
+                log_q_key = 'log_q0' if _src == "z0" else 'log_qS'
+                volume_key = 'half_logdet_ginv_source'
+                kl_aux_metrics = {
+                    'loss/KL_uniform_mc': kl_loss.detach(),
+                    'loss/log_q_source_mean': log_q.mean().detach(),
+                    f'loss/{volume_key}_mean': half_logdet_source_ginv.mean().detach(),
+                    'loss/half_logdet_ginv_target_mean': half_logdet_target_ginv.mean().detach(),
+                    'loss/half_logdet_ginv_source_mean': half_logdet_source_ginv.mean().detach(),
+                    'loss/sum_logdet_flow_mean': flow_term.mean().detach(),
+                    'rhmc/delta_kin_mean': delta_kin.mean().detach(),
+                    'rhmc/delta_vol_mean': delta_vol.mean().detach(),
+                    'routing/kl_prior_mode_uniform': torch.tensor(1.0, device=x.device, dtype=x.dtype),
+                    'routing/rhmc_kl_mode_mc': torch.tensor(1.0, device=x.device, dtype=x.dtype),
+                }
+
+                consistency_sample = None
+                push_target_gap_sample = None
+                try:
+                    ((G_pushforward, rep_push),
+                    min_sv,
+                    half_logdet_push_g,
+                    half_logdet_push_ginv) = self._pushforward_metric_via_flows(stage_z0, flow_manager, metric_tensor, rhmc_posterior)
+
+                    if G_pushforward is not None and rep_push is not None:
+                        # We expect:  +1/2 logdet(G'^{-1}) = +1/2 logdet(G^{-1}) + log|det J|
+                        target_rhs = (half_logdet_source_ginv + flow_term).to(mu.dtype)
+
+                        # Compare residuals but honour configured representation
+                        res_g    = (half_logdet_push_g    - target_rhs).abs().mean()
+                        res_ginv = (half_logdet_push_ginv - target_rhs).abs().mean()
+
+                        rep_push = rep_push.lower()
+                        half_logdet_push = half_logdet_push_ginv if rep_push == "ginv" else half_logdet_push_g
+                        consistency = (half_logdet_push - target_rhs)
+
+                        if not hasattr(self, "_vol_triplet_printed"):
+                            print(f"[VOL CHECK] rep_push={rep_push} mean(source)={half_logdet_source_ginv.mean().item():.3f}, "
+                                f"mean(flow)={flow_term.mean().item():.3f}, "
+                                f"mean(push)={half_logdet_push.mean().item():.3f}, "
+                                f"mean(target)={half_logdet_target_ginv.mean().item():.3f}")
+                            self._vol_triplet_printed = True
+
+                        kl_aux_metrics['diagnostics/pushforward_consistency_mean'] = consistency.abs().mean().detach()
+                        kl_aux_metrics['diagnostics/pushforward_vs_target_mean']   = (half_logdet_push - half_logdet_target_ginv).abs().mean().detach()
+                        consistency_sample = consistency.detach()
+                        push_target_gap_sample = (half_logdet_push - half_logdet_target_ginv).detach()
+
+                        fits_ginv_better = bool(res_ginv <= res_g)
+                        config_pref_is_ginv = (self.metric_representation == "ginv")
+                        if config_pref_is_ginv != fits_ginv_better and not hasattr(self, "_push_rep_warned"):
+                            print(f"[WARN] Push-forward identity residual favours "
+                                f"{'G^{-1}' if fits_ginv_better else 'G'} (res_g={res_g.item():.3f}, res_ginv={res_ginv.item():.3f}) "
+                                f"while metric_representation='{self.metric_representation}'.")
+                            self._push_rep_warned = True
+
+                        if min_sv is not None:
+                            finite_mask = torch.isfinite(min_sv)
+                            if finite_mask.any():
+                                kl_aux_metrics['diagnostics/jacobian_min_singular_mean'] = min_sv[finite_mask].mean().detach()
+                except Exception:
+                    pass
+
+                if not hasattr(self, '_half_logdet_check_printed'):
+                    with torch.no_grad():
+                        print(
+                            "[CHECK] mean half_logdet_ginv(source) = "
+                            f"{half_logdet_source_ginv.mean().item():.3f}, "
+                            f"target = {half_logdet_target_ginv.mean().item():.3f}"
+                        )
+                    self._half_logdet_check_printed = True
+
+                kl_components_sample = {
+                    log_q_key: log_q.detach(),
+                    volume_key: half_logdet_source_ginv.detach(),
+                    'half_logdet_ginv_target': half_logdet_target_ginv.detach(),
+                    'half_logdet_ginv_source': half_logdet_source_ginv.detach(),
+                    'sum_logdet_flow': flow_term.detach(),
+                    'delta_kin': delta_kin.detach(),
+                    'delta_vol': delta_vol.detach(),
+                    'kl_terms': kl_terms.detach(),
+                }
+                if consistency_sample is not None:
+                    kl_components_sample['pushforward_consistency'] = consistency_sample
+                if push_target_gap_sample is not None:
+                    kl_components_sample['pushforward_vs_target'] = push_target_gap_sample
+            else:
+                # Legacy RHMC KL path (volume Gaussian / diagnostics)
+                log_q = None
+                if _src == "z0" and rhmc_log_q is not None:
+                    log_q = rhmc_log_q
+                else:
+                    try:
+                        log_q = rhmc_posterior._compute_log_riemannian_gaussian(stage_zS, mu, log_var)
+                    except Exception as e:
+                        if os.environ.get("RLVAE_DEBUG") == "1":
+                            print(f"[KL DEBUG] Fallback log_q failed: {e}; using isotropic Gaussian")
+                        diff = stage_zS - mu
+                        d = stage_zS.shape[-1]
+                        log_q = -0.5 * torch.sum(diff ** 2, dim=-1) - 0.5 * d * np.log(2 * np.pi)
+
+                try:
+                    log_p = rhmc_posterior._compute_log_prior(stage_zS)
+                except Exception:
+                    d = stage_zS.shape[-1]
+                    log_p = -0.5 * torch.sum(stage_zS ** 2, dim=-1) - 0.5 * d * np.log(2 * np.pi)
+
+                jac_correction = 0.0
+                if _mode == "jac" and _with_jac and isinstance(rhmc_traj_info, dict):
+                    j = rhmc_traj_info.get('jac_logdet', None)
+                    if isinstance(j, torch.Tensor):
+                        jac_correction = j
+                    elif j is not None:
+                        try:
+                            jac_correction = torch.as_tensor(j, device=stage_zS.device, dtype=log_q.dtype)
+                        except Exception:
+                            jac_correction = 0.0
+
+                jac_correction_tensor = jac_correction if isinstance(jac_correction, torch.Tensor) else torch.tensor(float(jac_correction), device=log_q.device, dtype=log_q.dtype)
+                kl_terms = log_q - log_p - jac_correction_tensor
+                kl_loss = kl_terms.mean().to(x.dtype)
+                kl_weight = self.riemannian_beta
+                kl_aux_metrics = {
+                    'loss/KL_rhmc_legacy': kl_loss.detach(),
+                    'routing/rhmc_kl_mode_legacy': torch.tensor(1.0, device=x.device, dtype=x.dtype),
+                }
+                kl_components_sample = {
+                    'log_q': log_q.detach(),
+                    'log_p': log_p.detach(),
+                    'jac_correction': jac_correction_tensor.detach(),
+                }
         elif use_riemannian_kl and metric_tensor is not None:
+            if os.environ.get('RLVAE_DEBUG', '0') == '1':
+                print(f"[KL ROUTE] compute_riemannian_kl_loss (prior_mode={self.kl_prior_mode})")
             # Geodesic bound / classical Riemannian KL (bound mode)
             kl_loss = self.compute_riemannian_kl_loss(mu, log_var, z_samples, metric_tensor)
             kl_weight = self.riemannian_beta
@@ -418,14 +1233,49 @@ class LossManager(nn.Module):
             kl_weight = self.beta
         if not torch.isfinite(kl_loss) and os.environ.get("RLVAE_DEBUG") == "1":
             print("[DEBUG] kl_loss is not finite!", kl_loss)
-        
-        flow_loss = self.compute_flow_loss(log_det_jacobians)
+
+        # Flow loss: for uniform MC path the Jacobian term is absorbed into KL
+        if stage_c_uniform:
+            flow_loss = torch.zeros((), device=x.device, dtype=x.dtype)
+        else:
+            flow_loss = self.compute_flow_loss(log_det_jacobians)
         if not torch.isfinite(flow_loss) and os.environ.get("RLVAE_DEBUG") == "1":
             print("[DEBUG] flow_loss is not finite!", flow_loss)
         
         loop_penalty = self.compute_loop_penalty(z_seq, loop_mode)
         if not torch.isfinite(loop_penalty) and os.environ.get("RLVAE_DEBUG") == "1":
             print("[DEBUG] loop_penalty is not finite!", loop_penalty)
+
+        kl_detached = kl_loss.detach()
+        kl_monitor = torch.zeros_like(kl_detached)
+        if torch.isfinite(kl_detached).all():
+            needs_reset = (
+                self._kl_monitor_baseline is None
+                or self._kl_monitor_baseline.device != kl_detached.device
+                or not torch.isfinite(self._kl_monitor_baseline).all()
+            )
+            if needs_reset:
+                self._kl_monitor_baseline = kl_detached.clone()
+            else:
+                tau = self.kl_monitor_baseline_tau
+                baseline = (tau * self._kl_monitor_baseline) + ((1.0 - tau) * kl_detached)
+                if not torch.isfinite(baseline).all():
+                    if os.environ.get("RLVAE_DEBUG") == "1":
+                        print("[DEBUG] KL baseline update produced non-finite value; resetting to current KL.")
+                    baseline = kl_detached.clone()
+                self._kl_monitor_baseline = baseline
+            kl_monitor = (kl_detached - self._kl_monitor_baseline).abs()
+        else:
+            if os.environ.get("RLVAE_DEBUG") == "1":
+                print(f"[DEBUG] kl_loss detached contained non-finite values: {kl_detached}")
+            self._kl_monitor_baseline = None
+        kl_monitor = torch.nan_to_num(kl_monitor, nan=0.0, posinf=0.0, neginf=0.0)
+        if self._kl_monitor_baseline is None:
+            self._kl_monitor_baseline = torch.nan_to_num(kl_detached.clone(), nan=0.0, posinf=0.0, neginf=0.0)
+        else:
+            self._kl_monitor_baseline = torch.nan_to_num(self._kl_monitor_baseline, nan=kl_detached.new_tensor(0.0), posinf=kl_detached.new_tensor(0.0), neginf=kl_detached.new_tensor(0.0))
+        kl_aux_metrics['monitor/kl_centered_abs'] = kl_monitor.detach()
+        kl_aux_metrics['monitor/kl_baseline'] = self._kl_monitor_baseline.detach()
         
         # Route debugging (one-time): show how total loss is assembled
         if not hasattr(self, "_route_debug_printed"):
@@ -446,6 +1296,7 @@ class LossManager(nn.Module):
             mu_l2_pen = (mu.pow(2).sum(dim=-1)).mean() * self.mu_l2_weight
             total_loss = total_loss + mu_l2_pen
             self.loss_history['mu_l2'].append(mu_l2_pen.item())
+            kl_aux_metrics['loss/mu_l2_penalty'] = mu_l2_pen.detach()
             if os.environ.get('RLVAE_DEBUG') == '1' and not hasattr(self, '_mu_l2_debugged'):
                 print(f"[MU L2] weight={self.mu_l2_weight:.3f}, penalty={mu_l2_pen.item():.6f}")
                 self._mu_l2_debugged = True
@@ -454,12 +1305,25 @@ class LossManager(nn.Module):
             print(f"[DEBUG] recon_loss: {recon_loss}, kl_loss: {kl_loss}, flow_loss: {flow_loss}, loop_penalty: {loop_penalty}")
         
         # If metric_tensor is used, print stats
-        if metric_tensor is not None and hasattr(metric_tensor, 'trainable') and os.environ.get("RLVAE_DEBUG") == "1":
+        if metric_tensor is not None and z_samples is not None and os.environ.get("RLVAE_DEBUG") == "1":
             try:
-                G = metric_tensor(z_samples)
-                print("[DEBUG] Metric tensor stats: min", G.min().item(), "max", G.max().item(), "mean", G.mean().item(), "std", G.std().item())
-                eigvals = torch.linalg.eigvals(G[0]).real
-                print("[DEBUG] Metric eigenvalues: min", eigvals.min().item(), "max", eigvals.max().item(), "mean", eigvals.mean().item())
+                G_eval_debug, rep_debug = self._evaluate_metric(z_samples, metric_tensor, rhmc_posterior, with_rep=True)
+                if G_eval_debug is not None and rep_debug is not None:
+                    rep_debug = rep_debug.lower()
+                    if rep_debug == "ginv":
+                        chol_dbg, _ = self._cholesky_spd(G_eval_debug, jitter=1e-6)
+                        d_dbg = G_eval_debug.shape[-1]
+                        eye_dbg = torch.eye(d_dbg, device=G_eval_debug.device, dtype=G_eval_debug.dtype).unsqueeze(0).expand_as(G_eval_debug)
+                        G_eval_debug = torch.cholesky_solve(eye_dbg, chol_dbg)
+                    eigvals = torch.linalg.eigvalsh(G_eval_debug.float())
+                    print(
+                        "[DEBUG] Metric eigvals: min",
+                        eigvals.min().item(),
+                        "max",
+                        eigvals.max().item(),
+                        "mean",
+                        eigvals.mean().item(),
+                    )
             except Exception as e:
                 print(f"[DEBUG] Error computing metric tensor stats: {e}")
         
@@ -510,7 +1374,14 @@ class LossManager(nn.Module):
                 'riemannian_beta': self.riemannian_beta,
                 'loop_penalty_weight': self.loop_penalty_weight
             },
-            'metric_reg': metric_reg # NEW
+            'metric_reg': metric_reg, # NEW
+            'loss_details': {
+                **kl_aux_metrics,
+                **({
+                    f'preview/{k}': (v[:5] if isinstance(v, torch.Tensor) and v.dim() > 0 else v)
+                    for k, v in kl_components_sample.items()
+                } if kl_components_sample else {}),
+            }
         }
     
     def get_loss_summary(self) -> Dict[str, Any]:
@@ -552,6 +1423,9 @@ class LossManager(nn.Module):
             'metric_reg_type': self.metric_reg_type,
             'metric_reg_target': self.metric_reg_target,
             'mu_l2_weight': self.mu_l2_weight,
+            'recon_scale': self.recon_scale,
+            'kl_monitor_baseline_tau': self.kl_monitor_baseline_tau,
+            'metric_representation': self.metric_representation,
             'kl_prior_mode': self.kl_prior_mode,
             'kl_use_metric_normalization': self.kl_use_metric_normalization,
             'kl_metric_norm_mode': self.kl_metric_norm_mode,

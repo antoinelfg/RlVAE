@@ -39,6 +39,7 @@ class EncoderManager(nn.Module):
         # Create encoder based on architecture
         self.encoder = self._create_encoder()
         self.to(self.device)
+        self._debug_prev_logvar_stats: Optional[Dict[str, float]] = None
         
         print(f"✅ Created {architecture.upper()} encoder: {self._get_parameter_count()} parameters")
     
@@ -285,7 +286,29 @@ class EncoderManager(nn.Module):
             mu = output.embedding
             log_var = output.log_covariance
             print(f"[ENCODER DEBUG] mu: min={mu.min().item():.4f}, max={mu.max().item():.4f}, mean={mu.mean().item():.4f}, std={mu.std().item():.4f}")
-            print(f"[ENCODER DEBUG] log_var: min={log_var.min().item():.4f}, max={log_var.max().item():.4f}, mean={log_var.mean().item():.4f}, std={log_var.std().item():.4f}")
+            log_var_min = log_var.min().item()
+            log_var_max = log_var.max().item()
+            log_var_mean = log_var.mean().item()
+            log_var_std = log_var.std(unbiased=False).item()
+            variance = log_var.exp()
+            var_mean = variance.mean().item()
+            var_min = variance.min().item()
+            var_max = variance.max().item()
+            stats = {
+                "log_var_mean": log_var_mean,
+                "log_var_std": log_var_std,
+                "var_mean": var_mean,
+                "var_min": var_min,
+                "var_max": var_max,
+            }
+            delta_msg = ""
+            if self._debug_prev_logvar_stats is not None:
+                delta_mean = log_var_mean - self._debug_prev_logvar_stats["log_var_mean"]
+                delta_var = var_mean - self._debug_prev_logvar_stats["var_mean"]
+                delta_msg = f" (Δmean={delta_mean:+.4e}, Δvar_mean={delta_var:+.4e})"
+            print(f"[ENCODER DEBUG] log_var: min={log_var_min:.4f}, max={log_var_max:.4f}, mean={log_var_mean:.4f}, std={log_var_std:.4f}{delta_msg}")
+            print(f"[ENCODER DEBUG] variance: min={var_min:.4e}, max={var_max:.4e}, mean={var_mean:.4e}")
+            self._debug_prev_logvar_stats = stats
             if torch.isnan(mu).any() or torch.isinf(mu).any():
                 print("[ENCODER DEBUG] mu contains NaN or Inf!")
             if torch.isnan(log_var).any() or torch.isinf(log_var).any():

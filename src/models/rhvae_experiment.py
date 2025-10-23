@@ -973,9 +973,100 @@ class RHVAEExperiment:
                     plt.tight_layout(); wandb.log({"metric_matrix_panels": wandb.Image(fig)}); plt.close()
                 except Exception as _e:
                     print(f"⚠️ Metric panel logging failed: {_e}")
+
+                # 7. Console-based tracing of metric SPD statistics
+                try:
+                    C_tensor = torch.as_tensor(centroids, dtype=torch.float32)
+                    M_tensor = torch.as_tensor(M, dtype=torch.float32)
+                    self._trace_metric_statistics(
+                        centroids=C_tensor,
+                        matrices=M_tensor,
+                        stage="metric_analysis"
+                    )
+                except Exception as trace_exc:
+                    print(f"[METRIC TRACE] Failed during metric analysis: {trace_exc}")
                     
         except Exception as e:
             print(f"⚠️ Metric analysis logging failed: {e}")
+
+    def _trace_metric_statistics(
+        self,
+        *,
+        centroids: Optional[torch.Tensor],
+        matrices: Optional[torch.Tensor],
+        stage: str = "export",
+        sample_points: int = 16,
+    ) -> None:
+        """Print detailed statistics about the learned metric tensors."""
+        if centroids is None or matrices is None:
+            print(f"[METRIC TRACE][{stage}] Missing centroids or metric matrices; skipping trace.")
+            return
+
+        with torch.no_grad():
+            mats = matrices.reshape(-1, matrices.shape[-2], matrices.shape[-1]).float()
+            if mats.numel() == 0:
+                print(f"[METRIC TRACE][{stage}] Empty metric tensor payload; skipping.")
+                return
+
+            mats = 0.5 * (mats + mats.transpose(-1, -2))  # symmetrize
+            eigvals = torch.linalg.eigvalsh(mats)
+            eig_min = float(eigvals.min().item())
+            eig_max = float(eigvals.max().item())
+            eig_mean = float(eigvals.mean().item())
+            eig_median = float(eigvals.median().item())
+            eig_std = float(eigvals.std(unbiased=False).item())
+            per_cond = eigvals.max(dim=-1).values / eigvals.min(dim=-1).values.clamp_min(1e-12)
+            cond_min = float(per_cond.min().item())
+            cond_max = float(per_cond.max().item())
+            cond_mean = float(per_cond.mean().item())
+
+            diag = torch.diagonal(mats, dim1=-2, dim2=-1)
+            diag_min = float(diag.min().item())
+            diag_max = float(diag.max().item())
+            diag_mean = float(diag.mean().item())
+
+            sign, logabsdet = torch.linalg.slogdet(mats)
+            finite_mask = torch.isfinite(logabsdet)
+            if finite_mask.any():
+                logdet_min = float(logabsdet[finite_mask].min().item())
+                logdet_max = float(logabsdet[finite_mask].max().item())
+                logdet_mean = float(logabsdet[finite_mask].mean().item())
+            else:
+                logdet_min = logdet_max = logdet_mean = float('nan')
+
+            print(f"[METRIC TRACE][{stage}] matrices={mats.shape[0]}, latent_dim={mats.shape[-1]}")
+            print(f"[METRIC TRACE][{stage}] eigen min={eig_min:.6f} max={eig_max:.6f} mean={eig_mean:.6f} median={eig_median:.6f} std={eig_std:.6f}")
+            print(f"[METRIC TRACE][{stage}] condition number range=[{cond_min:.2e}, {cond_max:.2e}] mean={cond_mean:.2e}")
+            print(f"[METRIC TRACE][{stage}] diagonal min={diag_min:.6f} max={diag_max:.6f} mean={diag_mean:.6f}")
+            print(f"[METRIC TRACE][{stage}] log|det| min={logdet_min:.6f} max={logdet_max:.6f} mean={logdet_mean:.6f}")
+
+            try:
+                num_centroids = int(centroids.shape[0])
+            except Exception:
+                num_centroids = 0
+            if num_centroids > 0:
+                print(f"[METRIC TRACE][{stage}] centroids={num_centroids} (latent_dim={centroids.shape[-1]})")
+
+            # Optional: sample a few points to evaluate assembled G^{-1}(z)
+            if (
+                num_centroids > 0
+                and hasattr(self, 'metric_adapter')
+                and getattr(self.metric_adapter, 'G_inv', None) is not None
+            ):
+                try:
+                    sample_n = min(sample_points, num_centroids)
+                    if sample_n > 0:
+                        idx = torch.randperm(num_centroids)[:sample_n]
+                        z = centroids[idx].to(self.device)
+                        Ginv = self.metric_adapter.G_inv(z).detach().cpu().float()
+                        Ginv = 0.5 * (Ginv + Ginv.transpose(-1, -2))
+                        eigs_g = torch.linalg.eigvalsh(Ginv)
+                        print(
+                            f"[METRIC TRACE][{stage}] assembled G_inv eigen min={eigs_g.min().item():.6f} "
+                            f"max={eigs_g.max().item():.6f} mean={eigs_g.mean().item():.6f}"
+                        )
+                except Exception as sample_exc:
+                    print(f"[METRIC TRACE][{stage}] Failed to trace assembled G_inv: {sample_exc}")
 
     def _collect_all_latents(self, max_samples: Optional[int] = 6000) -> torch.Tensor:
         """Encode the dataset to collect latent means μ(x). Optionally limit samples for speed."""
@@ -2037,6 +2128,14 @@ class RHVAEExperiment:
                 return
             centroids = self.model.centroids_tens.detach().cpu() if self.model.centroids_tens is not None else None
             M = self.model.M_tens.detach().cpu() if self.model.M_tens is not None else None
+            try:
+                self._trace_metric_statistics(
+                    centroids=centroids,
+                    matrices=M,
+                    stage="export_metric"
+                )
+            except Exception as trace_exc:
+                print(f"[METRIC TRACE] Export trace failed: {trace_exc}")
             payload = {
                 'centroids': centroids,
                 'M_tens': M,

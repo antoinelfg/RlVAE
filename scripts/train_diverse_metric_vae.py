@@ -275,6 +275,8 @@ def extract_diverse_metric(
     print(f"✅ Using DIVERSE parameters: T={temperature}, λ={regularization}")
     
     M_matrices = []
+    covariance_eigs = []
+    covariance_conds = []
     
     print("Computing diverse local metric matrices...")
     # Ensure all tensors involved in distance computations share the same device
@@ -303,6 +305,17 @@ def extract_diverse_metric(
             diffs = all_mus - mean.unsqueeze(0)
             weighted_cov = torch.einsum('n,ni,nj->ij', weights, diffs, diffs)
 
+        # Track raw covariance spectrum before regularisation
+        cond_cov = float('nan')
+        cov_eigs = None
+        try:
+            cov_eigs = torch.linalg.eigvalsh(weighted_cov)
+            covariance_eigs.append(cov_eigs.detach().cpu())
+            cond_cov = (cov_eigs.max() / cov_eigs.min().clamp_min(1e-12)).item()
+            covariance_conds.append(cond_cov)
+        except Exception as cov_exc:
+            print(f"[Metric DEBUG] Failed eigvalsh on raw covariance: {cov_exc}")
+
         # Regularize
         metric = weighted_cov + regularization * torch.eye(latent_dim, device=all_mus.device, dtype=all_mus.dtype)
         
@@ -327,8 +340,11 @@ def extract_diverse_metric(
         M_matrices.append(metric)
         
         if i % 10 == 0:
-            print(f"Centroid {i}: min eigenvalue = {min_eigenval:.6f}, "
-                  f"condition number = {torch.linalg.cond(metric).item():.2f}")
+            cond_metric = torch.linalg.cond(metric).item()
+            raw_min = cov_eigs.min().item() if isinstance(cov_eigs, torch.Tensor) else float('nan')
+            raw_max = cov_eigs.max().item() if isinstance(cov_eigs, torch.Tensor) else float('nan')
+            print(f"Centroid {i}: raw_cov_min={raw_min:.6e} raw_cov_max={raw_max:.6e} "
+                  f"raw_cond={cond_cov:.2e} | after_reg_min={min_eigenval:.6e} cond={cond_metric:.2e}")
     
     M_matrices = torch.stack(M_matrices, dim=0)  # [n_centroids, latent_dim, latent_dim]
     
@@ -348,6 +364,17 @@ def extract_diverse_metric(
     print(f"Max eigenvalue: {max_eigenvals.max().item():.6f}")
     print(f"Mean condition number: {cond_nums.mean().item():.2f}")
     print(f"Determinant range: [{dets.min().item():.3e}, {dets.max().item():.3e}]")
+    # Raw covariance diagnostics
+    try:
+        cov_eigs_all = torch.cat(covariance_eigs, dim=0)
+        cov_cond_tensor = torch.tensor(covariance_conds)
+        print("\n[Metric DEBUG] Raw covariance eigenvalue stats before regularisation:")
+        print(f"  min={cov_eigs_all.min().item():.6e}, max={cov_eigs_all.max().item():.6e}, "
+              f"mean={cov_eigs_all.mean().item():.6e}, std={cov_eigs_all.std().item():.6e}")
+        print(f"  condition numbers: min={cov_cond_tensor.min().item():.2e}, "
+              f"max={cov_cond_tensor.max().item():.2e}, mean={cov_cond_tensor.mean().item():.2e}")
+    except Exception as cov_summary_exc:
+        print(f"[Metric DEBUG] Failed to summarise raw covariance stats: {cov_summary_exc}")
     
     # Save metric data (include 2D projections for stage summary viz if latent_dim==2)
     save_path = Path(save_dir)
@@ -405,6 +432,42 @@ def extract_diverse_metric(
     print(f"   Latent dim: {latent_dim}")
     print(f"   Eigenvalue ratio: {eigenval_ratio.item():.2f}x")
     print(f"   Eigenvalue std: {eigenval_std.item():.6f}")
+
+    # Final diagnostics on stored precision matrices and assembled metrics
+    try:
+        from rlvae.models.components.metric_tensor import MetricTensor as _MetricTensor
+        device = next(model.parameters()).device
+        metric_tensor = _MetricTensor(
+            latent_dim=latent_dim,
+            device=device,
+            trainable=False,
+            temperature=temperature,
+            regularization=regularization
+        )
+        metric_tensor.load_pretrained(
+            centroids=centroids_mu.to(device=device),
+            metric_matrices=M_matrices.to(device=device),
+            temperature=temperature,
+            regularization=regularization,
+        )
+        print("\n[Metric DEBUG] Stored precision (G^{-1}) statistics:")
+        eigs_Ginv = torch.linalg.eigvalsh(M_matrices)
+        conds_Ginv = eigs_Ginv.max(dim=-1).values / eigs_Ginv.min(dim=-1).values.clamp_min(1e-12)
+        print(f"  eigen min={eigs_Ginv.min().item():.6e}, max={eigs_Ginv.max().item():.6e}, mean={eigs_Ginv.mean().item():.6e}")
+        print(f"  condition numbers: min={conds_Ginv.min().item():.2e}, max={conds_Ginv.max().item():.2e}, "
+              f"mean={conds_Ginv.mean().item():.2e}")
+        logdet_Ginv = torch.logdet(M_matrices)
+        print(f"  log|det G^{-1}| range=[{logdet_Ginv.min().item():.6e}, {logdet_Ginv.max().item():.6e}]")
+
+        G_at_centroids = metric_tensor.compute_metric(centroids_mu.to(device=device))
+        eigs_G = torch.linalg.eigvalsh(G_at_centroids)
+        conds_G = eigs_G.max(dim=-1).values / eigs_G.min(dim=-1).values.clamp_min(1e-12)
+        print("[Metric DEBUG] Assembled metric G statistics at centroids:")
+        print(f"  eigen min={eigs_G.min().item():.6e}, max={eigs_G.max().item():.6e}, mean={eigs_G.mean().item():.6e}")
+        print(f"  condition numbers: min={conds_G.min().item():.2e}, max={conds_G.max().item():.2e}, "
+              f"mean={conds_G.mean().item():.2e}")
+    except Exception as metric_diag_exc:
+        print(f"[Metric DEBUG] Failed to compute final metric diagnostics: {metric_diag_exc}")
     
     return str(metric_path)
 

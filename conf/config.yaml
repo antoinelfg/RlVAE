@@ -98,8 +98,8 @@ settings:
     type: modular_rlvae
     target: rlvae.models.modular_rlvae.ModularRiemannianFlowVAE
     latent_dim: 2
-    n_flows: 7
-    epsilon: 1.0e-6
+    n_flows: 0
+    epsilon: 1.0e-3
 
     encoder:
       architecture: mlp
@@ -116,7 +116,8 @@ settings:
       hidden_size: 256
       n_blocks: 2
       n_hidden: 1
-      safe_mode: false
+      output_clip: 10.0
+      logdet_clip: 5.0
 
     losses:
       beta: 1.0
@@ -125,34 +126,35 @@ settings:
       loop_penalty_weight: 0.0
       mu_l2_weight: 0
       kl_prior_mode: volume_gaussian
-      kl_metric_eval_point: z
-      kl_use_metric_normalization: false
-      kl_metric_norm_mode: none
+      kl_metric_eval_point: mu
+      kl_use_metric_normalization: true
+      kl_metric_norm_mode: geomean
+      use_riemannian_kl: true
 
     posterior:
       type: riemannian_rhmc
-      rhmc_steps: 4
-      rhmc_step_size: 0.02
-      rhmc_alpha: 0.2
-      rhmc_eps_reg: 1.0e-4
+      rhmc_steps: 2
+      rhmc_step_size: 0.001
+      rhmc_alpha: 0.05
+      rhmc_eps_reg: 1.0e-6
       max_momentum_norm: 3.0
       max_velocity_norm: 1.0
       max_position_step: 0.5
       max_position_norm: 0.0
       posterior_local_alpha: 0.5
       posterior_alpha_ramp_enabled: false
-      maha_clip: 3.0
+      maha_clip: 20.0
       cov_norm_mode: geomean
       rhmc_kl_mode: mc
       rhmc_kl_source: z0
       rhmc_kl_jacobian: false
 
     metric:
-      path: metric_T0.7_scaled.pt
+      path: outputs/stages/B_RHVAE_MLP_2_SPRITES/metric.pt
       trainable: false
       init_from_fixed: true
       temperature_override: 0.3
-      regularization_override: null
+      regularization_override: 0.01
       regularization_weight: 0.0
       update_frequency: null
 
@@ -163,6 +165,10 @@ settings:
     sampling:
       method: posterior_hmc
       use_riemannian: true
+
+    phase1_training: true
+    centroid_regularizer_enabled: true
+    centroid_regularizer_weight: 0.2
 
     pretrained:
       encoder_path: null
@@ -196,7 +202,7 @@ settings:
       patience: 5
       min_lr: 1.0e-7
       cooldown: 0
-      threshold: 1.0e-2
+      threshold: 1.0e-3
 
     early_stopping:
       enabled: false
@@ -226,19 +232,22 @@ settings:
       stage_b:
         enabled: true
         implementation: rhvae
-        n_centroids: 300
+        n_centroids: 100
         temperature: 0.5
         regularization: 0.01
         centroid_method: kmedoids
         neighbor_mode: global
-        knn_k: 300
+        knn_k: 100
         use_timestep: 0
         standardize_latents: false
       stage_c:
         enabled: true
         epochs: 200
-        lr: 2.0e-4
+        lr: 1.0e-4
         riemannian_beta: 1.0
+        posterior:
+          rhmc_alpha: 1.0
+          max_position_norm: 0.0
         allow_metric_updates: false
         update_metric_during_training: false
 
@@ -286,7 +295,7 @@ settings:
     enable_dynamics: true
     enable_flow_analysis: true
     enable_manifold: true
-    enable_interactive: false
+    enable_interactive: true
     max_sequences: 32
     save_local: true
     log_to_wandb: true
@@ -307,8 +316,8 @@ settings:
     n_steps: 100
     n_leapfrog: 50
     step_size: 0.001
-    temperature: 1.0
-    prior: volume_gaussian
+    temperature: 0.5
+    prior: uniform
     log_acceptance_rate: true
     log_energy: true
 

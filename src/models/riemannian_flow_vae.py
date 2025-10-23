@@ -1369,7 +1369,7 @@ class RiemannianFlowVAE(nn.Module):
         """
         Compute proper Riemannian KL divergence: KL[q(z|x) || p_R(z)]
         
-        For Riemannian prior: p_R(z) ∝ √det(G(z)) exp(-1/2 z^T G(z) z)
+        For the G convention: p_R(z) ∝ √det(G(z)) exp(-1/2 z^T G(z) z)
         
         Args:
             mu: Posterior mean [batch_size, latent_dim]
@@ -1388,33 +1388,34 @@ class RiemannianFlowVAE(nn.Module):
             log_var_clamped = torch.clamp(log_var, -10.0, 10.0)
             
             # Compute metric at sampled points
-            G_z = self.G(z_sample)  # [batch_size, latent_dim, latent_dim]
+            if hasattr(self, 'G'):
+                G_z = self.G(z_sample)  # [batch_size, latent_dim, latent_dim]
+            elif hasattr(self, 'G_inv'):
+                G_inv_z = self.G_inv(z_sample)
+                G_z = torch.linalg.inv(G_inv_z.float())
+            else:
+                raise RuntimeError("Model is missing G; cannot compute metric-based KL.")
             
             # 1. Standard terms from Gaussian posterior
-            # KL = 0.5 * (tr(Σ_prior^{-1} Σ_post) + (μ_prior - μ_post)^T Σ_prior^{-1} (μ_prior - μ_post) - k + log(det(Σ_prior)/det(Σ_post)))
-            
-            # For Riemannian case: Σ_prior^{-1} = G(z), μ_prior = 0, Σ_post = diag(exp(log_var))
-            
+            # KL = 0.5 * (tr(G(z) Σ_post) + μ^T G(z) μ - k + log(det(G(z))) - log(det(Σ_post)))
+
             # 1a. Trace term: tr(G(z) * diag(exp(log_var)))
-            trace_term = torch.sum(torch.diagonal(G_z, dim1=-2, dim2=-1) * torch.exp(log_var), dim=1)  # [batch_size]
+            Sigma_post = torch.diag_embed(torch.exp(log_var))
+            trace_term = torch.einsum('bij,bij->b', G_z, Sigma_post)  # [batch_size]
             
             # 1b. Quadratic term: μ^T G(z) μ (since μ_prior = 0)
-            mu_expanded = mu.unsqueeze(-1)  # [batch_size, latent_dim, 1]
-            quadratic_term = torch.bmm(mu.unsqueeze(1), torch.bmm(G_z, mu_expanded)).squeeze(-1)  # [batch_size]
-            if quadratic_term.dim() == 0:  # Handle scalar case
-                quadratic_term = quadratic_term.unsqueeze(0)
+            mu_quad = torch.einsum('bi,bij,bj->b', mu, G_z, mu)
             
             # 1c. Log determinant terms: log(det(G(z))) - log(det(diag(exp(log_var))))
-            det_G = torch.linalg.det(G_z)
-            det_G_clamped = torch.clamp(det_G, min=1e-10, max=1e10)
-            log_det_prior = torch.log(det_G_clamped)  # [batch_size]
+            sign, log_det_G = torch.slogdet(G_z.float())
+            log_det_prior = log_det_G.to(mu.dtype)  # [batch_size]
             log_det_post = torch.sum(log_var_clamped, dim=1)  # [batch_size]
             
             # 1d. Dimensionality term
             latent_dim = mu.shape[1]
             
             # Total Riemannian KL divergence
-            kl_riemannian = 0.5 * (trace_term + quadratic_term - latent_dim + log_det_prior - log_det_post)  # [batch_size]
+            kl_riemannian = 0.5 * (trace_term + mu_quad - latent_dim + log_det_prior - log_det_post)  # [batch_size]
             
             # 4. Numerical stability check
             kl_finite = torch.isfinite(kl_riemannian)

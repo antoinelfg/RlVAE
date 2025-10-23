@@ -35,7 +35,7 @@ stage_c:
   kl_use_metric_normalization: false
   kl_metric_norm_mode: none
   mu_l2_weight: 0.5
-  kl_prior_mode: uniform
+  kl_prior_mode: volume_gaussian
   latent_dim: 2
   component_validation:
     validate_encoder_compatibility: true
@@ -76,7 +76,7 @@ model:
   use_curvature_correction: true
   kl_metric_eval_point: z
   mu_l2_weight: 0.5
-  kl_prior_mode: uniform
+  kl_prior_mode: volume_gaussian
   sampling:
     method: posterior_hmc
   pretrained:
@@ -97,7 +97,7 @@ training:
     kl_use_metric_normalization: false
     kl_metric_norm_mode: none
     mu_l2_weight: 0.5
-    kl_prior_mode: uniform
+    kl_prior_mode: volume_gaussian
 visualization:
   level: three_stage_optimized
 wandb:

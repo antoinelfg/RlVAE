@@ -94,6 +94,24 @@ class ModRLVAE(nn.Module):
         self.flow_hidden_size = int(getattr(config, "flow_hidden_size", 64))
         self.flow_n_blocks = int(getattr(config, "flow_n_blocks", 2))
         self.flow_n_hidden = int(getattr(config, "flow_n_hidden", 1))
+        # Sequence-based model flag for visualization helpers
+        self.expects_sequence_input = True
+        # Optional flow clamps (default match FlowManager defaults)
+        flow_output_clip_cfg = getattr(config, "flow_output_clip", None)
+        if flow_output_clip_cfg is None and hasattr(config, "flows"):
+            try:
+                flow_output_clip_cfg = getattr(config.flows, "output_clip", None)
+            except Exception:
+                flow_output_clip_cfg = None
+        self.flow_output_clip = float(flow_output_clip_cfg) if flow_output_clip_cfg is not None else 50.0
+
+        flow_logdet_clip_cfg = getattr(config, "flow_logdet_clip", None)
+        if flow_logdet_clip_cfg is None and hasattr(config, "flows"):
+            try:
+                flow_logdet_clip_cfg = getattr(config.flows, "logdet_clip", None)
+            except Exception:
+                flow_logdet_clip_cfg = None
+        self.flow_logdet_clip = float(flow_logdet_clip_cfg) if flow_logdet_clip_cfg is not None else 20.0
 
         # Loss scalars
         self.beta: float = float(getattr(config, "beta", 1.0))
@@ -159,10 +177,16 @@ class ModRLVAE(nn.Module):
             trainable=bool(metric_cfg.get("trainable", False)),
             architecture=metric_cfg.get("architecture", "mlp"),
             arch_kwargs=metric_cfg.get("arch_kwargs", {}),
-            temperature=float(metric_cfg.get("temperature_override", 0.1) or 0.1),
-            regularization=float(metric_cfg.get("regularization_override", 0.01) or 0.01),
+            temperature=float(metric_cfg.get("temperature_override", 0.2) or 0.2),
+            regularization=float(metric_cfg.get("regularization_override", 1e-4) or 1e-4),
             init_from_fixed=bool(metric_cfg.get("init_from_fixed", False)),
             fixed_metric_path=metric_cfg.get("fixed_metric_path", None),
+            normalize_weight_sum=metric_cfg.get("normalize_weight_sum", False),
+            weight_kernel=metric_cfg.get("weight_kernel", "mahalanobis_normed"),
+            weight_metric_normalization=metric_cfg.get("weight_metric_normalization", "trace"),
+            topk_weights=metric_cfg.get("topk_weights", None),
+            regularization_mode=metric_cfg.get("regularization_mode", "precision"),
+            use_background_identity=metric_cfg.get("use_background_identity", False),
         )
         self.metric_loader = MetricLoader(device=device)
 
@@ -228,6 +252,8 @@ class ModRLVAE(nn.Module):
             flow_n_blocks=self.flow_n_blocks,
             flow_n_hidden=self.flow_n_hidden,
             device=device,
+            output_clip=self.flow_output_clip,
+            logdet_clip=self.flow_logdet_clip,
         )
 
         # Loss manager
@@ -383,6 +409,7 @@ class ModRLVAE(nn.Module):
             z_samples=z0,
             log_det_jacobians=log_det_jacobians,
             z_seq=z_seq_list,
+            flow_manager=self.flow_manager,
             loop_mode=self.loop_mode,
             metric_tensor=self.mod_metric,
             use_riemannian_kl=use_riem_kl,

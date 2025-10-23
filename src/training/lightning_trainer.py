@@ -18,6 +18,7 @@ from io import BytesIO
 import numpy as np
 import random
 import torchvision.utils as vutils
+from contextlib import contextmanager, nullcontext
 
 from training.plugins.metric_alternation import MetricAlternationPlugin
 from visualizations.manager import VisualizationManager, VisualizationLevel, VisualizationConfig
@@ -28,6 +29,29 @@ from inference.inference_pipeline import RlVAEInferencePipeline
 from models.factory import ModelFactory
 from config.validator import validate_model_config
 from config.settings_views import build_model_config_from_settings
+
+
+@contextmanager
+def safe_val_block(model: nn.Module, *, need_grad: bool = False, use_fp32: bool = True):
+    """
+    Preserve model training states while running validation routines that need grads/fp32.
+    """
+    prev_modes = [(module, module.training) for module in model.modules()]
+    model.eval()
+
+    grad_ctx = torch.enable_grad() if need_grad and not torch.is_grad_enabled() else nullcontext()
+    amp_ctx = nullcontext()
+    if use_fp32 and torch.cuda.is_available() and hasattr(torch.cuda, "amp"):
+        amp_ctx = torch.cuda.amp.autocast(enabled=False)
+
+    try:
+        with grad_ctx:
+            with amp_ctx:
+                yield
+    finally:
+        for module, was_training in prev_modes:
+            if module.training != was_training:
+                module.train(was_training)
 
 
 class LightningRlVAETrainer(L.LightningModule):
@@ -329,13 +353,14 @@ class LightningRlVAETrainer(L.LightningModule):
         posterior = getattr(self.model, 'posterior_sampler_rhmc', None)
         try:
             if posterior is not None:
-                ret = posterior.sample_riemannian_rhmc_posterior(
-                    mu, log_var,
-                    return_log_prob=True,
-                    return_initial=True,
-                    return_traj=True,
-                    alpha=alpha, eps_reg=eps_reg,
-                )
+                with torch.enable_grad():
+                    ret = posterior.sample_riemannian_rhmc_posterior(
+                        mu, log_var,
+                        return_log_prob=True,
+                        return_initial=True,
+                        return_traj=True,
+                        alpha=alpha, eps_reg=eps_reg,
+                    )
                 if isinstance(ret, tuple):
                     zK, log_q, z0, traj = ret
                 else:
@@ -788,6 +813,45 @@ class LightningRlVAETrainer(L.LightningModule):
             print(f"⚠️ Evaluation failed: {e}")
             return {}
     
+    def _get_rhmc_sampler(self):
+        return getattr(self.model, 'posterior_sampler_rhmc', None)
+
+    def _snapshot_sampler_state(self):
+        sampler = self._get_rhmc_sampler()
+        if sampler is not None and hasattr(sampler, 'snapshot_state'):
+            try:
+                return sampler.snapshot_state()
+            except Exception as exc:
+                print(f"[VAL SAFETY] Failed to snapshot RHMC sampler state: {exc}")
+        return None
+
+    def _prepare_sampler_for_validation(self, sampler):
+        if sampler is None:
+            return
+        try:
+            if hasattr(sampler, 'rhmc_step_size'):
+                sampler.rhmc_step_size = float(min(float(sampler.rhmc_step_size), 2e-4))
+            if hasattr(sampler, 'rhmc_steps'):
+                sampler.rhmc_steps = int(min(int(sampler.rhmc_steps), 10))
+            if hasattr(sampler, 'rhmc_alpha'):
+                sampler.rhmc_alpha = float(min(max(float(sampler.rhmc_alpha), 1e-3), 1.0))
+            if hasattr(sampler, 'eps_reg'):
+                sampler.eps_reg = float(max(float(sampler.eps_reg), 1e-6))
+            if hasattr(sampler, '_last_sigma_mu'):
+                sampler._last_sigma_mu = None
+        except Exception as exc:
+            print(f"[VAL SAFETY] Failed to adjust RHMC sampler for validation: {exc}")
+
+    def _restore_sampler_state(self, snapshot):
+        if snapshot is None:
+            return
+        sampler = self._get_rhmc_sampler()
+        if sampler is not None and hasattr(sampler, 'restore_state'):
+            try:
+                sampler.restore_state(snapshot)
+            except Exception as exc:
+                print(f"[VAL SAFETY] Failed to restore RHMC sampler state: {exc}")
+
     def forward(self, x):
         """Forward pass."""
         return self.model(x, compute_metrics=True)
@@ -881,18 +945,26 @@ class LightningRlVAETrainer(L.LightningModule):
             print(f"[DEBUG] Validation batch {batch_idx} contains NaN or Inf!")
         # Collect real images for FID computation
         self._collect_real_images_for_fid(x)
+        sampler_snapshot = self._snapshot_sampler_state()
+        sampler = self._get_rhmc_sampler()
+        if sampler is not None:
+            if sampler_snapshot is not None:
+                self._prepare_sampler_for_validation(sampler)
+            elif hasattr(sampler, '_last_sigma_mu'):
+                sampler._last_sigma_mu = None
+
         # Forward pass
         try:
-            # Enable detailed shape diagnostics for this step
-            os.environ["RLVAE_DEBUG_SHAPES"] = "1"
-            result = self.model(x)
-            os.environ["RLVAE_DEBUG_SHAPES"] = "0"
+            with safe_val_block(self.model, need_grad=True, use_fp32=True):
+                os.environ["RLVAE_DEBUG_SHAPES"] = "1"
+                try:
+                    result = self.model(x)
+                finally:
+                    os.environ["RLVAE_DEBUG_SHAPES"] = "0"
         except RuntimeError as e:
-            # Handle input shape mismatch for fallback MLP encoders from pythae
             if 'shape' in str(e) and 'invalid for input of size' in str(e):
                 print(f"[SHAPE-GUARD] Caught shape error in model forward: {e}")
                 print("[SHAPE-GUARD] Attempting a retry with sanitized input/encoder dims…")
-                # Try to coerce encoder/decoder input_dim to observed shape and retry
                 try:
                     x0 = x[:, 0]
                     obs_dim = tuple(x0.shape[1:])
@@ -900,12 +972,15 @@ class LightningRlVAETrainer(L.LightningModule):
                         setattr(self.model.encoder, 'input_dim', obs_dim)
                     if hasattr(self.model.decoder, 'input_dim'):
                         setattr(self.model.decoder, 'input_dim', obs_dim)
-                    result = self.model(x)
+                    with safe_val_block(self.model, need_grad=True, use_fp32=True):
+                        result = self.model(x)
                 except Exception as e2:
                     print(f"[SHAPE-GUARD] Retry failed: {e2}")
                     raise e
             else:
                 raise e
+        finally:
+            self._restore_sampler_state(sampler_snapshot)
         # Robust loss extraction
         if 'loss' in result:
             main_loss = result['loss']
@@ -955,8 +1030,18 @@ class LightningRlVAETrainer(L.LightningModule):
         # Collect real images for FID computation if not already done
         self._collect_real_images_for_fid(x)
         
-        # Forward pass
-        result = self.model(x)
+        sampler_snapshot = self._snapshot_sampler_state()
+        sampler = self._get_rhmc_sampler()
+        if sampler is not None:
+            if sampler_snapshot is not None:
+                self._prepare_sampler_for_validation(sampler)
+            elif hasattr(sampler, '_last_sigma_mu'):
+                sampler._last_sigma_mu = None
+        try:
+            with safe_val_block(self.model, need_grad=True, use_fp32=True):
+                result = self.model(x)
+        finally:
+            self._restore_sampler_state(sampler_snapshot)
         # Robust loss extraction
         if 'loss' in result:
             main_loss = result['loss']
@@ -1079,31 +1164,38 @@ class LightningRlVAETrainer(L.LightningModule):
         # Log recon vs real sequences snapshot each epoch
         try:
             if hasattr(self, 'validation_batch') and wandb.run is not None:
-                with torch.no_grad():
-                    x_val = self.validation_batch.to(self.device)
-                    # Limit to a few sequences for grid
-                    max_seqs = min(4, x_val.shape[0])
-                    x_vis = x_val[:max_seqs]
-                    result = self.model(x_vis)
-                    # Handle different model output formats
-                    if 'reconstruction' in result:
-                        recon = result['reconstruction'].clamp(0, 1)
-                    elif 'recon_x' in result:
-                        recon = result['recon_x'].clamp(0, 1)
-                    else:
-                        print(f"[RECON-LOG] ⚠️ No reconstruction found in result keys: {list(result.keys())}")
-                        return
-                    # Take full sequence for comparison
-                    # Shape: [B, T, C, H, W] -> [B*T, C, H, W]
-                    B, T = x_vis.shape[0], x_vis.shape[1]
-                    orig_frames = x_vis.reshape(B * T, *x_vis.shape[2:])
-                    recon_frames = recon.reshape(B * T, *recon.shape[2:])
-                    # Concatenate orig then recon, arrange rows by sequence with nrow=T
-                    grid = vutils.make_grid(torch.cat([orig_frames, recon_frames], dim=0), nrow=T, normalize=False)
-                    wandb.log({
-                        "stageC/recon_vs_real_epoch": wandb.Image(grid),
-                        "stageC/recon_sample_epoch": int(self.current_epoch)
-                    })
+                x_val = self.validation_batch.to(self.device)
+                max_seqs = min(4, x_val.shape[0])
+                x_vis = x_val[:max_seqs]
+                sampler_snapshot = self._snapshot_sampler_state()
+                sampler = self._get_rhmc_sampler()
+                if sampler is not None:
+                    if sampler_snapshot is not None:
+                        self._prepare_sampler_for_validation(sampler)
+                    elif hasattr(sampler, '_last_sigma_mu'):
+                        sampler._last_sigma_mu = None
+                try:
+                    with safe_val_block(self.model, need_grad=True, use_fp32=True):
+                        result = self.model(x_vis)
+                finally:
+                    self._restore_sampler_state(sampler_snapshot)
+
+                if 'reconstruction' in result:
+                    recon = result['reconstruction'].clamp(0, 1)
+                elif 'recon_x' in result:
+                    recon = result['recon_x'].clamp(0, 1)
+                else:
+                    print(f"[RECON-LOG] ⚠️ No reconstruction found in result keys: {list(result.keys())}")
+                    return
+
+                B, T = x_vis.shape[0], x_vis.shape[1]
+                orig_frames = x_vis.reshape(B * T, *x_vis.shape[2:])
+                recon_frames = recon.reshape(B * T, *recon.shape[2:])
+                grid = vutils.make_grid(torch.cat([orig_frames, recon_frames], dim=0), nrow=T, normalize=False)
+                wandb.log({
+                    "stageC/recon_vs_real_epoch": wandb.Image(grid),
+                    "stageC/recon_sample_epoch": int(self.current_epoch)
+                })
         except Exception as e:
             print(f"[RECON-LOG] ⚠️ Failed to log recon vs real: {e}")
         # Run visualizations

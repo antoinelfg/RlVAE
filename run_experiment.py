@@ -66,6 +66,10 @@ try:
 except Exception:
     from training.lightning_trainer import LightningRlVAETrainer
 from visualizations.manager import VisualizationManager
+try:
+    from rlvae.models.components.metric_utils import compute_metric_weights, normalize_metric_atoms, half_logdet_volume
+except Exception:
+    from models.components.metric_utils import compute_metric_weights, normalize_metric_atoms
 
 
 class ExperimentRunner:
@@ -161,6 +165,49 @@ class ExperimentRunner:
             except Exception:
                 cloned = cfg_value
             OmegaConf.update(cfg, settings_path, cloned, force_add=True)
+
+    @staticmethod
+    def _get_wandb_artifacts_cfg(cfg: DictConfig) -> Optional[DictConfig]:
+        """Safely retrieve the wandb.artifacts subsection if it exists."""
+        if cfg is None:
+            return None
+        try:
+            wandb_cfg = cfg.wandb
+        except Exception:
+            return None
+        if wandb_cfg is None:
+            return None
+        if isinstance(wandb_cfg, DictConfig):
+            return wandb_cfg.get('artifacts', None)
+        return getattr(wandb_cfg, 'artifacts', None)
+
+    @staticmethod
+    def _wandb_artifacts_enabled(cfg: DictConfig) -> bool:
+        """Return True when wandb artifact logging is enabled in the config."""
+        art_cfg = ExperimentRunner._get_wandb_artifacts_cfg(cfg)
+        if art_cfg is None:
+            return False
+        if isinstance(art_cfg, DictConfig):
+            return bool(art_cfg.get('enabled', False))
+        return bool(getattr(art_cfg, 'enabled', False))
+
+    @staticmethod
+    def _resolve_wandb_alias(cfg: DictConfig, alias_key: str, default: str) -> str:
+        """Resolve a wandb artifact alias with robust fallbacks."""
+        art_cfg = ExperimentRunner._get_wandb_artifacts_cfg(cfg)
+        if art_cfg is None:
+            return default
+        if isinstance(art_cfg, DictConfig):
+            aliases_cfg = art_cfg.get('aliases', None)
+        else:
+            aliases_cfg = getattr(art_cfg, 'aliases', None)
+        if aliases_cfg is None:
+            return default
+        if isinstance(aliases_cfg, DictConfig):
+            return aliases_cfg.get(alias_key, default)
+        if isinstance(aliases_cfg, dict):
+            return aliases_cfg.get(alias_key, default)
+        return default
 
     def __init__(self, config: DictConfig):
         # Keep a reference to the original Hydra config for display, but operate on
@@ -1483,7 +1530,8 @@ class ExperimentRunner:
                     yaml.dump(stageA_config, f)
                 print(f"[Stage A] ✅ Saved Stage A config to {stageA_paths['config_path']}")
                 # Log Stage A artifacts (encoder/decoder/model) to WandB for pipeline chaining
-                if cfg.wandb.mode != "disabled" and wandb.run is not None and getattr(cfg.wandb, 'artifacts', {}).get('enabled', False):
+                artifacts_enabled = self._wandb_artifacts_enabled(cfg)
+                if cfg.wandb.mode != "disabled" and wandb.run is not None and artifacts_enabled:
                     try:
                         art = wandb.Artifact(
                             name=f"stageA_vae_{arch}_ld{latent_dim}",
@@ -1493,7 +1541,8 @@ class ExperimentRunner:
                         if 'encoder' in comp_paths: art.add_file(comp_paths['encoder'])
                         if 'decoder' in comp_paths: art.add_file(comp_paths['decoder'])
                         if 'model' in comp_paths:   art.add_file(comp_paths['model'])
-                        aliases = [getattr(cfg.wandb.artifacts.aliases, 'stage_a_latest', 'stageA_latest')]
+                        alias = self._resolve_wandb_alias(cfg, 'stage_a_latest', 'stageA_latest')
+                        aliases = [alias]
                         wandb.log_artifact(art, aliases=aliases)
                     except Exception as e:
                         print(f"[Stage A] ⚠️ Artifact logging failed: {e}")
@@ -2242,7 +2291,7 @@ class ExperimentRunner:
                     )
                 
                 # Force 150 centroids for Stage B extraction (RHVAE implementation)
-                n_centroids_local = 300
+                n_centroids_local = 100
                 print(f"[Stage B] Overriding number of centroids to {n_centroids_local}")
                 metric_path = extract_diverse_metric(
                     model=stageB_model,
@@ -2276,7 +2325,7 @@ class ExperimentRunner:
                 
                 # Precision metric from posterior: reuse extraction with local KNN covariance -> invert
                 # Force 150 centroids for Stage B extraction (per request)
-                n_centroids_local = 300
+                n_centroids_local = 100
                 print(f"[Stage B] Overriding number of centroids to {n_centroids_local}")
                 metric_path = extract_diverse_metric(
                     model=stageB_model,
@@ -2371,7 +2420,7 @@ class ExperimentRunner:
                 'temperature': metric_temp_cfg,
                 'selected_temperature': metric_temp_selected,
                 'regularization': cfg.experiment.stage_b.regularization,
-                'n_centroids': 300,
+                'n_centroids': 100,
                 'centroid_method': cfg.experiment.stage_b.centroid_method,
                 'neighbor_mode': cfg.experiment.stage_b.neighbor_mode,
                 'knn_k': cfg.experiment.stage_b.knn_k,
@@ -2485,8 +2534,8 @@ class ExperimentRunner:
                 mt = _MetricTensor(latent_dim=Zgrid.shape[1], device=self.device)
                 mt.load_pretrained(C, M, blob['temperature'], blob['regularization'])
                 Ginvg = mt.compute_inverse_metric(Zgrid)
-                _, logdet = torch.linalg.slogdet(Ginvg)
-                det_vals = torch.exp(logdet).detach().cpu().numpy().reshape(XX.shape)
+                half_logdet = half_logdet_volume(Ginvg, 'ginv')
+                det_vals = torch.exp(2.0 * half_logdet).detach().cpu().numpy().reshape(XX.shape)
                 # RHMC samples overlay if available
                 rhmc_pts = None
                 try:
@@ -2531,7 +2580,8 @@ class ExperimentRunner:
                             metadata={"stage": "B", "architecture": arch, "latent_dim": latent_dim, "implementation": metric_impl}
                         )
                         art.add_file(str(metric_path))
-                        aliases = [getattr(cfg.wandb.artifacts.aliases, 'stage_b_latest', 'stageB_latest')]
+                        alias = self._resolve_wandb_alias(cfg, 'stage_b_latest', 'stageB_latest')
+                        aliases = [alias]
                         wandb.log_artifact(art, aliases=aliases)
                     except Exception as eart:
                         print(f"[Stage B] ⚠️ Artifact logging failed: {eart}")
@@ -2588,6 +2638,7 @@ class ExperimentRunner:
                         print("[Stage B] No t=0 latents in metric payload; using all centroids for visuals.")
                 except Exception as e:
                     print(f"[Stage B] ⚠️ t=0 centroid filtering skipped: {e}")
+                    
             class _MetricStub:
                 def __init__(
                     self,
@@ -2601,66 +2652,104 @@ class ExperimentRunner:
                     weight_metric_normalization: str = 'trace',
                     topk_weights: int | None = None,
                     metric_scale: float = 1.0,
+                    regularization_mode: str = 'precision',
                 ):
+                    self.device = device
                     self.centroids_tens = centroids.to(device)
                     self.M_raw = M.to(device)
-                    self.temperature = float(T)
-                    self.regularization = float(lbd)
-                    self.device = device
+                    base_dtype = self.M_raw.dtype
+                    self.temperature = torch.as_tensor(T, device=device, dtype=base_dtype)
+                    self.regularization = torch.as_tensor(lbd, device=device, dtype=base_dtype)
                     self.normalize_weight_sum = bool(normalize_weight_sum)
                     self.weight_kernel = (weight_kernel or 'mahalanobis_normed').lower()
                     self.weight_metric_normalization = (weight_metric_normalization or 'trace').lower()
                     self.topk_weights = int(topk_weights) if topk_weights is not None else None
+                    if self.topk_weights is not None and self.topk_weights <= 0:
+                        self.topk_weights = None
                     self.metric_scale = float(metric_scale)
+                    self.regularization_mode = str(regularization_mode).lower()
+                    if self.regularization_mode not in {'precision', 'metric'}:
+                        raise ValueError("Metric stub: regularization_mode must be 'precision' or 'metric'")
 
-                    # Precompute normalized metric matrices per chosen normalization
-                    if self.weight_metric_normalization == 'trace':
-                        traces = torch.einsum('kii->k', self.M_raw).unsqueeze(-1).unsqueeze(-1) + 1e-12
-                        self.M_normed = self.M_raw / traces
+                    self.M_normed = normalize_metric_atoms(self.M_raw, mode=self.weight_metric_normalization)
+                    if self.weight_kernel == 'mahalanobis_normed':
+                        self.weight_atoms = self.M_normed
+                        self.mix_atoms = self.metric_scale * self.M_normed
                     else:
-                        self.M_normed = self.M_raw
-                    self.M_tens = self.metric_scale * self.M_normed
-                # Provide a torch-like parameters iterator for sampler device detection
+                        self.weight_atoms = self.M_raw
+                        self.mix_atoms = self.metric_scale * self.M_raw
+                        
+                    # Allow samplers expecting Stage-B buffers and background params
+                    self.M_tens = self.mix_atoms
+                    self.bg_strength = 1e-2
+                    self.bg_radius = None
+                    self.use_background_identity = True
+
                 def parameters(self):
                     return iter([torch.empty(0, device=self.device)])
-                def _weights_and_mask(self, z):
-                    z = z.to(self.device)
-                    diff = z.unsqueeze(1) - self.centroids_tens.unsqueeze(0)  # [B, K, D]
-                    if self.weight_kernel == 'isotropic':
-                        d2 = torch.sum(diff * diff, dim=-1) / (self.temperature ** 2)
-                    else:
-                        # Mahalanobis variants
-                        # Using normalized matrices if requested
-                        tmp = torch.einsum('bkd,kde->bke', diff, self.M_normed)
-                        d2 = torch.sum(tmp * diff, dim=-1) / (self.temperature ** 2)
-                    # Top-k selection on distances (keep nearest centroids)
-                    if self.topk_weights is not None and self.topk_weights > 0 and self.topk_weights < d2.shape[1]:
-                        vals, idx = torch.topk(d2, k=self.topk_weights, dim=1, largest=False)
-                        mask = torch.full_like(d2, fill_value=float('inf'))
-                        mask.scatter_(1, idx, vals)
-                        d2 = mask
-                    w = torch.exp(-d2)
-                    if self.normalize_weight_sum:
-                        w = w / (w.sum(dim=1, keepdim=True) + 1e-12)
-                    return w
-                def G(self, z):
-                    # Regularized inverse and matrix inverse to get G
-                    w = self._weights_and_mask(z)
-                    Ginv = torch.einsum('bk,kij->bij', w, self.M_tens)
-                    eye = torch.eye(Ginv.shape[-1], device=self.device).unsqueeze(0).expand(Ginv.shape[0], -1, -1)
-                    Ginv = Ginv + self.regularization * eye
-                    return torch.linalg.inv(Ginv)
+
+                def _compute_weights(self, z: torch.Tensor) -> torch.Tensor:
+                    dtype = self.centroids_tens.dtype if not z.dtype.is_floating_point else z.dtype
+                    z_local = z.to(self.device, dtype=dtype)
+                    centroids = self.centroids_tens.to(dtype=dtype)
+                    atoms = self.weight_atoms.to(dtype=dtype)
+                    temp = self.temperature.to(dtype=dtype)
+                    return compute_metric_weights(
+                        z_local,
+                        centroids,
+                        atoms,
+                        temp,
+                        kernel=self.weight_kernel,
+                        normalize=self.normalize_weight_sum,
+                        topk=self.topk_weights,
+                    )
+
                 def G_inv(self, z):
-                    w = self._weights_and_mask(z)
-                    Ginv = torch.einsum('bk,kij->bij', w, self.M_tens)
-                    eye = torch.eye(Ginv.shape[-1], device=self.device).unsqueeze(0).expand(Ginv.shape[0], -1, -1)
-                    return Ginv + self.regularization * eye
+                    dtype = self.centroids_tens.dtype if not z.dtype.is_floating_point else z.dtype
+                    z_local = z.to(self.device, dtype=dtype)
+                    weights = self._compute_weights(z_local)
+                    if not self.normalize_weight_sum:
+                        weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-8)
+                    atoms = self.mix_atoms.to(dtype=weights.dtype)
+                    G_inv_mix = torch.einsum('bk,kij->bij', weights, atoms)
+                    G_inv_mix = 0.5 * (G_inv_mix + G_inv_mix.transpose(-1, -2))
+
+                    I = torch.eye(G_inv_mix.shape[-1], device=self.device, dtype=weights.dtype).unsqueeze(0)
+                    lam = self.regularization.to(dtype=weights.dtype).clamp_min(0.0)
+                    if lam.item() > 0:
+                        G_inv_mix = G_inv_mix + lam * I
+
+                    centroids = self.centroids_tens.to(dtype=dtype)
+                    diff = z_local.unsqueeze(1) - centroids.unsqueeze(0)
+                    if self.weight_kernel == 'isotropic':
+                        d2 = torch.sum(diff * diff, dim=-1)
+                    else:
+                        tmp = torch.einsum('bkd,kde->bke', diff, self.weight_atoms.to(dtype=dtype))
+                        d2 = torch.sum(tmp * diff, dim=-1)
+                    d2min = d2.min(dim=1).values
+                    temp_scalar = float(self.temperature)
+                    thresh = (4.0 * temp_scalar) ** 2
+                    far = torch.sigmoid((d2min - thresh) / (0.25 * thresh + 1e-12))
+                    if self.use_background_identity:
+                        G_inv_mix = G_inv_mix + self.bg_strength * far.view(-1, 1, 1) * I
+
+                    if self.regularization_mode == 'precision':
+                        return G_inv_mix
+                    G = torch.linalg.inv(G_inv_mix.float()).to(G_inv_mix.dtype)
+                    if lam.item() > 0:
+                        G = G + lam * I
+                    return torch.linalg.inv(G.float()).to(G.dtype)
+
+                def G(self, z):
+                    G_inv = self.G_inv(z)
+                    G = torch.linalg.inv(G_inv.float()).to(G_inv.dtype)
+                    return G
             # Match Stage A behavior if available (fallback False)
             model_cfg = getattr(cfg, 'model', None)
-            normalize_w = bool(getattr(model_cfg, 'normalize_weight_sum', False)) if model_cfg else False
+            normalize_w = bool(getattr(model_cfg, 'normalize_weight_sum', True)) if model_cfg else True
             weight_kernel = str(getattr(model_cfg, 'weight_kernel', 'mahalanobis_normed')) if model_cfg else 'mahalanobis_normed'
             weight_metric_norm = str(getattr(model_cfg, 'weight_metric_normalization', 'trace')) if model_cfg else 'trace'
-            topk_weights = getattr(model_cfg, 'topk_weights', None) if model_cfg else None
+            topk_weights = getattr(model_cfg, 'topk_weights', 8) if model_cfg else 8
             metric_scale = float(getattr(model_cfg, 'metric_scale', 1.0)) if model_cfg else 1.0
             metric_model = _MetricStub(
                 C_use,
@@ -2673,7 +2762,15 @@ class ExperimentRunner:
                 weight_metric_normalization=weight_metric_norm,
                 topk_weights=topk_weights,
                 metric_scale=metric_scale,
+                regularization_mode=str(getattr(model_cfg, 'regularization_mode', 'precision')).lower() if model_cfg else 'precision',
             )
+            if model_cfg is not None:
+                if hasattr(model_cfg, 'bg_strength') and model_cfg.bg_strength is not None:
+                    metric_model.bg_strength = float(model_cfg.bg_strength)
+                if hasattr(model_cfg, 'bg_radius') and model_cfg.bg_radius is not None:
+                    metric_model.bg_radius = float(model_cfg.bg_radius)
+                if hasattr(model_cfg, 'use_background_identity') and model_cfg.use_background_identity is not None:
+                    metric_model.use_background_identity = bool(model_cfg.use_background_identity)
             # Tune RHMC for better acceptance on Stage B diagnostic overlay
             step_size = float(getattr(cfg.sampling, 'step_size', 0.001)) if hasattr(cfg, 'sampling') else 0.001
             tuned_eps = min(0.005, max(1e-5, step_size))
@@ -2765,25 +2862,23 @@ class ExperimentRunner:
                 chunk = 2048
                 eye2 = torch.eye(2, device=self.device, dtype=blob['centroids'].dtype).unsqueeze(0)
                 T2 = (float(blob['temperature']) ** 2) + 1e-12
+                atoms_for_weights = S2 if S2 is not None else M2
+                temperature_tensor = torch.as_tensor(float(blob['temperature']), device=self.device, dtype=blob['centroids'].dtype)
+                lambda_tensor = torch.as_tensor(float(blob['regularization']), device=self.device, dtype=blob['centroids'].dtype)
                 for s in range(0, z2_all.shape[0], chunk):
                     z2 = z2_all[s:s+chunk]                                                    # [b, 2]
                     with torch.no_grad():
-                        diff2 = C2.unsqueeze(0) - z2.unsqueeze(1)                              # [b, K, 2]
-                        if weight_kernel == 'isotropic':
-                            d2 = torch.sum(diff2 * diff2, dim=-1)                              # [b, K]
-                        else:
-                            Sd = torch.einsum('bkd,kde->bke', diff2, S2)                      # [b, K, 2]
-                            d2 = torch.sum(Sd * diff2, dim=-1)                                 # [b, K]
-                        w = torch.exp(-d2 / T2)                                                # RAW weights
-                        if topk_weights is not None and topk_weights > 0 and topk_weights < w.shape[1]:
-                            ksel = min(int(topk_weights), w.shape[1])
-                            topv, topi = torch.topk(w, k=ksel, dim=1, largest=True, sorted=False)
-                            mask = torch.zeros_like(w)
-                            mask.scatter_(1, topi, 1.0)
-                            w = w * mask
-                        if normalize_w:
-                            w = w / (w.sum(dim=1, keepdim=True).clamp_min(1e-12))
-                        Ginv2 = torch.einsum('bk,kij->bij', w, M2) + blob['regularization'] * eye2  # [b, 2, 2]
+                        weights = compute_metric_weights(
+                            z2,
+                            C2,
+                            atoms_for_weights,
+                            temperature_tensor,
+                            kernel=weight_kernel,
+                            normalize=normalize_w,
+                            topk=topk_weights,
+                        )
+                        atoms_mix = M2.to(dtype=weights.dtype, device=self.device)
+                        Ginv2 = torch.einsum('bk,kij->bij', weights, atoms_mix) + lambda_tensor * eye2  # [b, 2, 2]
                         det2 = torch.linalg.det(Ginv2).clamp_min(1e-20)
                         det_map_sub[s:s+z2.shape[0]] = det2
                 det_img_sub = det_map_sub.detach().cpu().numpy().reshape(gx.shape)
@@ -3321,8 +3416,17 @@ class ExperimentRunner:
             try:
                 posterior_cfg = getattr(self.config.model, 'posterior', None)
                 def _posterior_get(attr, fallback=None):
-                    if posterior_cfg is not None and hasattr(posterior_cfg, attr):
-                        return getattr(posterior_cfg, attr)
+                    if posterior_cfg is None:
+                        return fallback
+                    try:
+                        # OmegaConf DictConfig exposes .get(); fall back to getattr for plain objects
+                        if hasattr(posterior_cfg, 'get'):
+                            val = posterior_cfg.get(attr, fallback)
+                        else:
+                            val = getattr(posterior_cfg, attr)
+                        return val
+                    except Exception:
+                        pass
                     return fallback
 
                 def _positive_or(default_value, fallback_value):
@@ -3349,7 +3453,7 @@ class ExperimentRunner:
                     rh_eps = 0.02
                 rh_alpha = _positive_or(
                     _posterior_get('rhmc_alpha', getattr(self.config.model, 'rhmc_alpha', None)),
-                    getattr(self.config.model, 'posterior_local_alpha', 0.5)
+                    getattr(self.config.model, 'posterior_local_alpha', 0.1)
                 )
                 rh_eps_reg = _positive_or(
                     _posterior_get('rhmc_eps_reg', getattr(self.config.model, 'rhmc_eps_reg', None)),
@@ -3371,9 +3475,9 @@ class ExperimentRunner:
                 kl_norm = getattr(self.config.model, 'kl_use_metric_normalization', False)
                 kl_norm_mode = getattr(self.config.model, 'kl_metric_norm_mode', 'none')
                 try:
-                    mu_l2_w = float(getattr(self.config.model, 'mu_l2_weight', 0.0))
+                    mu_l2_w = float(getattr(self.config.model, 'mu_l2_weight', 2.0))
                 except Exception:
-                    mu_l2_w = 0.0
+                    mu_l2_w = 2.0
 
                 # Mirror into posterior config mirrors
                 self._set_config_value_if_missing(self.config, "model.posterior.rhmc_steps", rh_steps)
@@ -3489,7 +3593,8 @@ class ExperimentRunner:
             if cfg.wandb.mode != "disabled" and getattr(cfg.wandb, 'artifacts', {}).get('enabled', False):
                 try:
                     # Use previously logged stageB artifact if present
-                    art_name = f"stageB_metric_{arch}_ld{latent_dim}:{getattr(cfg.wandb.artifacts.aliases, 'stage_b_latest', 'stageB_latest')}"
+                    alias = self._resolve_wandb_alias(cfg, 'stage_b_latest', 'stageB_latest')
+                    art_name = f"stageB_metric_{arch}_ld{latent_dim}:{alias}"
                     wandb.use_artifact(art_name)
                 except Exception as e:
                     print(f"[Stage C] ⚠️ Could not reference Stage B artifact: {e}")
@@ -3541,8 +3646,8 @@ class ExperimentRunner:
                     Zgrid = mean.unsqueeze(0) + torch.from_numpy(pts).to(mean.dtype) @ comp.T
                     Zgrid = Zgrid.to(self.device)
                     Ginv = model.modular_metric.compute_inverse_metric(Zgrid)
-                    _, logdet = torch.linalg.slogdet(Ginv)
-                    det_vals = torch.exp(logdet).detach().cpu().numpy().reshape(XX.shape)
+                    half_logdet = half_logdet_volume(Ginv, 'ginv')
+                    det_vals = torch.exp(2.0 * half_logdet).detach().cpu().numpy().reshape(XX.shape)
                     plt.figure(figsize=(7,6))
                     plt.imshow(det_vals, origin='lower', extent=[x_min, x_max, y_min, y_max], cmap='viridis', aspect='auto')
                     P = ((Z - mean) @ comp).numpy()
@@ -3583,7 +3688,8 @@ class ExperimentRunner:
                 yaml.dump(stageC_config, f)
             print(f"[Stage C] ✅ Saved Stage C config to {stageC_paths['config_path']}")
             # After Stage C, snapshot and log the trained metric (if trainable) as an artifact
-            if cfg.wandb.mode != "disabled" and getattr(cfg.wandb, 'artifacts', {}).get('enabled', False):
+            artifacts_enabled_c = self._wandb_artifacts_enabled(cfg)
+            if cfg.wandb.mode != "disabled" and artifacts_enabled_c:
                 try:
                     # Try to locate last saved snapshot
                     last_snap = None
@@ -3599,7 +3705,8 @@ class ExperimentRunner:
                             metadata={"stage": "C", "architecture": arch, "latent_dim": latent_dim}
                         )
                         art.add_file(str(last_snap))
-                        aliases = [getattr(cfg.wandb.artifacts.aliases, 'stage_c_latest', 'stageC_latest')]
+                        alias = self._resolve_wandb_alias(cfg, 'stage_c_latest', 'stageC_latest')
+                        aliases = [alias]
                         wandb.log_artifact(art, aliases=aliases)
                 except Exception as e:
                     print(f"[Stage C] ⚠️ Artifact logging failed: {e}")

@@ -46,7 +46,7 @@ class VisualizationConfig:
     # Category toggles
     enable_basic: bool = True
     enable_manifold: bool = True
-    enable_interactive: bool = False
+    enable_interactive: bool = True
     enable_flow_analysis: bool = False
     enable_dynamics: bool = False
     enable_geodesic_analysis: bool = False
@@ -111,11 +111,11 @@ class VisualizationConfig:
             VisualizationLevel.STANDARD: cls(
                 level=level,
                 enable_basic=True,
-                enable_manifold=True,
+                enable_manifold=False,
                 enable_interactive=False,
-                enable_flow_analysis=True,
-                enable_dynamics=True,
-                basic_frequency=1,
+                enable_flow_analysis=False,
+                enable_dynamics=False,
+                basic_frequency=5,
                 manifold_frequency=2,
                 flow_frequency=4,
                 dynamics_frequency=4
@@ -183,7 +183,7 @@ class VisualizationConfig:
                 level=level,
                 enable_basic=True,
                 enable_manifold=True,
-                enable_interactive=False,
+                enable_interactive=True,
                 enable_flow_analysis=True,
                 enable_dynamics=False,
                 enable_geodesic_analysis=True,
@@ -288,8 +288,6 @@ class VisualizationManager:
                     interactive.create_static_metric_heatmap(x_sample, epoch)
                     print("[DEBUG] Calling static metric heatmap timesteps visualization...")
                     interactive.create_static_metric_heatmap_timesteps(x_sample, epoch)
-                    print("[DEBUG] Calling interactive det G heatmap visualization...")
-                    interactive.create_time_curvature_heatmap(x_sample, epoch)
                 # det G plot (from manifold)
                 if 'manifold' in self.modules and epoch % self.viz_config.manifold_frequency == 0:
                     manifold = self.modules['manifold']
@@ -349,6 +347,12 @@ class VisualizationManager:
         except Exception as e:
             print(f"⚠️ Enhanced KL visualization failed: {e}")
         
+        # RHMC trajectory overlay (new dedicated plot)
+        try:
+            basic.create_rhmc_trajectory_overlay(x_sample, epoch)
+        except Exception as e:
+            print(f"⚠️ RHMC trajectory overlay failed: {e}")
+        
         # Reconstruction analysis less frequently
         if epoch % (self.viz_config.basic_frequency * 2) == 0:
             basic.create_reconstruction_analysis(x_sample, epoch)
@@ -385,8 +389,8 @@ class VisualizationManager:
         # Core interactive visualizations
         print("🎚️ Creating geodesic sliders...")
         interactive.create_geodesic_sliders(x_sample, epoch)
-        print("⛰️ Creating time curvature heatmap...")
-        interactive.create_time_curvature_heatmap(x_sample, epoch)
+        print("🧭 Creating RHMC flow slider...")
+        interactive.create_rhmc_flow_slider(x_sample, epoch)
         print("🎯 Creating 2D-focused curvature heatmap...")
         interactive.create_time_curvature_heatmap_2d_focused(x_sample, epoch)
         # Advanced interactive features

@@ -83,9 +83,9 @@ training:
     mode: min
   visualization:
     frequency: 1
-    level: minimal
+    level: three_stage_optimized
 visualization:
-  level: minimal
+  level: three_stage_optimized
   frequency: 1
   enable_basic: true
   enable_manifold: false

@@ -5,10 +5,13 @@ Baseline Riemannian RHMC Posterior - Simplified Version
 Minimal implementation without complex constraints or stability checks.
 """
 import math
+from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+
+from .metric_utils import half_logdet_volume
 
 
 def _symmetrize(matrix: torch.Tensor) -> torch.Tensor:
@@ -42,6 +45,34 @@ def _safe_cholesky(matrix: torch.Tensor, jitter: float) -> Tuple[torch.Tensor, t
         stabilized = matrix + jitter * eye
         chol, _ = _chol(stabilized)
         return chol, stabilized
+
+
+def _log_kinetic_density(
+    model: nn.Module,
+    z: torch.Tensor,
+    rho: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """log π_kin(ρ|z) with kinetic metric G(z)."""
+    if not hasattr(model, "G"):
+        raise RuntimeError("Model missing metric tensor G for kinetic density computation.")
+    G = model.G(z)
+    G = _symmetrize(G)
+    d = G.shape[-1]
+    eye = torch.eye(d, device=G.device, dtype=G.dtype).unsqueeze(0)
+    jitter = float(max(eps, 1e-8))
+    G = G + jitter * eye
+    G_inv = torch.linalg.inv(G.float())
+    quad = torch.einsum('bi,bij,bj->b', rho.float(), G_inv, rho.float())
+    half_logdet = half_logdet_volume(G, 'g', jitter=jitter)
+    if torch.isnan(half_logdet).any():
+        jitter = max(jitter * 10, 1e-5)
+        G = G + jitter * eye
+        G_inv = torch.linalg.inv(G.float())
+        quad = torch.einsum('bi,bij,bj->b', rho.float(), G_inv, rho.float())
+        half_logdet = half_logdet_volume(G, 'g', jitter=jitter)
+    const = z.shape[-1] * math.log(2 * math.pi)
+    return (-0.5 * quad + half_logdet - 0.5 * const).to(z.dtype)
 
 
 def log_q_riem(
@@ -193,112 +224,132 @@ class RiemannianRHMCPosterior(nn.Module):
             return_initial: Whether to return initial z₀ samples
             with_jacobian: Whether to request Jacobian accumulation (placeholder)
         """
-        # If grad is globally disabled (e.g., during validation), fall back to base potential only
-        if not torch.is_grad_enabled() and not self._warned_no_grad:
-            print("[RHMC WARN] Grad disabled; using base potential (no volume correction).")
-            self._warned_no_grad = True
-        # Route tracing: RHMC parameters (once)
-        if not hasattr(self, '_rhmc_traced'):
-            print(f"[ROUTE] RHMC: steps={self.rhmc_steps}, step_size={self.rhmc_step_size}, alpha={self.rhmc_alpha}, eps_reg={self.eps_reg}")
-            self._rhmc_traced = True
-        
-        # Resolve behaviour toggles with fallback to constructor defaults
-        log_prob_flag = self.default_return_log_prob if return_log_prob is None else bool(return_log_prob)
-        traj_flag = self.default_return_traj if return_traj is None else bool(return_traj)
-        initial_flag = self.default_return_initial if return_initial is None else bool(return_initial)
-        jac_flag = self.default_with_jacobian if with_jacobian is None else bool(with_jacobian)
+        grad_ctx = torch.enable_grad() if not torch.is_grad_enabled() else nullcontext()
+        amp_ctx = nullcontext()
+        if torch.cuda.is_available() and hasattr(torch.cuda, "amp"):
+            amp_ctx = torch.cuda.amp.autocast(enabled=False)
 
-        # Step 1: Riemannian initial sampling
-        alpha_eff = float(alpha) if (alpha is not None) else self._resolve_alpha()
-        # Allow per-call override of epsilon regularization
-        eps_backup = self.eps_reg
-        if eps_reg is not None:
+        def _run() -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
+            if not torch.is_grad_enabled():
+                raise RuntimeError(
+                    "RiemannianRHMCPosterior requires gradients; wrap call in torch.enable_grad() before sampling."
+                )
+            # Route tracing: RHMC parameters (once)
+            if not hasattr(self, '_rhmc_traced'):
+                print(f"[ROUTE] RHMC: steps={self.rhmc_steps}, step_size={self.rhmc_step_size}, alpha={self.rhmc_alpha}, eps_reg={self.eps_reg}")
+                self._rhmc_traced = True
+
+            # Resolve behaviour toggles with fallback to constructor defaults
+            log_prob_flag = self.default_return_log_prob if return_log_prob is None else bool(return_log_prob)
+            traj_flag = self.default_return_traj if return_traj is None else bool(return_traj)
+            initial_flag = self.default_return_initial if return_initial is None else bool(return_initial)
+            jac_flag = self.default_with_jacobian if with_jacobian is None else bool(with_jacobian)
+
+            # Step 1: Riemannian initial sampling
+            alpha_eff = float(alpha) if (alpha is not None) else self._resolve_alpha()
+            eps_backup = self.eps_reg
+            if eps_reg is not None:
+                try:
+                    self.eps_reg = float(eps_reg)
+                except Exception:
+                    pass
+            z0, Sigma_mu = self._sample_initial_riemannian(mu, log_var, alpha_eff)
+            self._last_sigma_mu = Sigma_mu.detach().clone()
+
+            # Step 2: RHMC exploration (differentiable pushforward)
+            z_final, traj_states = self._rhmc_exploration(z0, record_traj=traj_flag)
+
+            # TRACE: invariants and dtype diagnostics (first batch only)
             try:
-                self.eps_reg = float(eps_reg)
+                import os
+                if os.environ.get('RLVAE_TRACE', '0') == '1' and not self._trace_printed:
+                    z0_norm = torch.norm(z0, dim=1)
+                    zK_norm = torch.norm(z_final, dim=1)
+                    max_diff = (z_final - z0).abs().max().item()
+                    evals = torch.linalg.eigvalsh(Sigma_mu.float())
+                    eigmin = evals.min().item()
+                    eigmed = evals.median().item()
+                    cond = (evals.max() / evals.min().clamp_min(1e-12)).item()
+                    logdet_S = torch.logdet(Sigma_mu.float()).median().item()
+                    mu_dt = str(mu.dtype)
+                    try:
+                        Ginv_mu = self._get_inverse_metric(mu)
+                        Ginv_dt = str(Ginv_mu.dtype)
+                    except Exception:
+                        Ginv_dt = 'n/a'
+                    Sigma_dt = str(Sigma_mu.dtype)
+                    print(f"TRACE RHMC dtype: mu={mu_dt}, Ginv={Ginv_dt}, Sigma={Sigma_dt}")
+                    print(f"TRACE RHMC Σ(μ): eigmin={eigmin:.3e}, median={eigmed:.3e}, cond={cond:.3e}, logdet_med={logdet_S:.3e}")
+                    print(f"TRACE RHMC alpha, eps: alpha={float(alpha_eff):.6g}, eps_reg={float(self.eps_reg):.3g}, autocast={torch.is_autocast_enabled()}")
+                    if int(self.rhmc_steps) == 0:
+                        print(
+                            f"TRACE RHMC z0,zK norms: ||z0|| mean={z0_norm.mean().item():.4g} std={z0_norm.std().item():.4g}, "
+                            f"||zK|| mean={zK_norm.mean().item():.4g} std={zK_norm.std().item():.4g}, max|zK-z0|={max_diff:.3e}"
+                        )
+                    else:
+                        print(
+                            f"TRACE RHMC z0,zK norms: ||z0|| mean={z0_norm.mean().item():.4g} std={z0_norm.std().item():.4g}, "
+                            f"||zK|| mean={zK_norm.mean().item():.4g} std={zK_norm.std().item():.4g} (steps={int(self.rhmc_steps)})"
+                        )
+                    self._trace_printed = True
             except Exception:
                 pass
-        z0, Sigma_mu = self._sample_initial_riemannian(mu, log_var, alpha_eff)
 
-        # Step 2: RHMC exploration (differentiable pushforward)
-        z_final, traj_states = self._rhmc_exploration(z0, record_traj=traj_flag)
+            # Compute log-density if requested
+            log_q = None
+            if log_prob_flag:
+                base_points = z0 if initial_flag else z_final
+                log_q = self._compute_log_riemannian_gaussian(
+                    base_points,
+                    mu,
+                    log_var,
+                    covariance=Sigma_mu,
+                )
 
-        # TRACE: invariants and dtype diagnostics (first batch only)
-        try:
-            import os
-            if os.environ.get('RLVAE_TRACE', '0') == '1' and not self._trace_printed:
-                z0_norm = torch.norm(z0, dim=1)
-                zK_norm = torch.norm(z_final, dim=1)
-                max_diff = (z_final - z0).abs().max().item()
-                # eig diagnostics on Sigma
-                evals = torch.linalg.eigvalsh(Sigma_mu.float())
-                eigmin = evals.min().item()
-                eigmed = evals.median().item()
-                cond = (evals.max() / evals.min().clamp_min(1e-12)).item()
-                logdet_S = torch.logdet(Sigma_mu.float()).median().item()
-                # dtype trace
-                mu_dt = str(mu.dtype)
-                # Try computing G_inv(mu) for dtype
-                try:
-                    Ginv_mu = self._get_inverse_metric(mu)
-                    Ginv_dt = str(Ginv_mu.dtype)
-                except Exception:
-                    Ginv_dt = 'n/a'
-                Sigma_dt = str(Sigma_mu.dtype)
-                print(f"TRACE RHMC dtype: mu={mu_dt}, Ginv={Ginv_dt}, Sigma={Sigma_dt}")
-                print(f"TRACE RHMC Σ(μ): eigmin={eigmin:.3e}, median={eigmed:.3e}, cond={cond:.3e}, logdet_med={logdet_S:.3e}")
-                print(f"TRACE RHMC alpha, eps: alpha={float(alpha_eff):.6g}, eps_reg={float(self.eps_reg):.3g}, autocast={torch.is_autocast_enabled()}")
-                if int(self.rhmc_steps) == 0:
-                    print(
-                        f"TRACE RHMC z0,zK norms: ||z0|| mean={z0_norm.mean().item():.4g} std={z0_norm.std().item():.4g}, "
-                        f"||zK|| mean={zK_norm.mean().item():.4g} std={zK_norm.std().item():.4g}, max|zK-z0|={max_diff:.3e}"
-                    )
-                else:
-                    print(
-                        f"TRACE RHMC z0,zK norms: ||z0|| mean={z0_norm.mean().item():.4g} std={z0_norm.std().item():.4g}, "
-                        f"||zK|| mean={zK_norm.mean().item():.4g} std={zK_norm.std().item():.4g} (steps={int(self.rhmc_steps)})"
-                    )
-                self._trace_printed = True
-        except Exception:
-            pass
+            # Prepare trajectory info payload
+            traj_info = None
+            if traj_flag:
+                traj_info = {
+                    'with_jacobian': jac_flag,
+                    'rhmc_steps': int(self.rhmc_steps),
+                    'step_size': float(self.rhmc_step_size),
+                    'alpha': float(alpha_eff),
+                    'eps_reg': float(self.eps_reg),
+                    'jac_logdet': None if jac_flag else None,
+                    'trajectory': traj_states,
+                    'Sigma_mu': Sigma_mu.detach(),
+                    'delta_vol': torch.zeros(
+                        z_final.shape[0],
+                        device=z_final.device,
+                        dtype=z_final.dtype,
+                    ),
+                    'delta_kin': (
+                        _log_kinetic_density(self._ctx['model'], traj_states[0]['z'], traj_states[0]['rho'], self.eps_reg)
+                        - _log_kinetic_density(self._ctx['model'], traj_states[-1]['z'], traj_states[-1]['rho'], self.eps_reg)
+                    ) if len(traj_states) > 0 else torch.zeros(
+                        z_final.shape[0],
+                        device=z_final.device,
+                        dtype=z_final.dtype,
+                    ),
+                }
 
-        # Compute log-density if requested
-        log_q = None
-        if log_prob_flag:
-            base_points = z0 if initial_flag else z_final
-            log_q = self._compute_log_riemannian_gaussian(
-                base_points,
-                mu,
-                log_var,
-                covariance=Sigma_mu,
-            )
+            outputs = [z_final]
+            if log_prob_flag:
+                outputs.append(log_q)
+            if initial_flag:
+                outputs.append(z0)
+            if traj_flag:
+                outputs.append(traj_info)
 
-        # Prepare trajectory info payload
-        traj_info = None
-        if traj_flag:
-            traj_info = {
-                'with_jacobian': jac_flag,
-                'rhmc_steps': int(self.rhmc_steps),
-                'step_size': float(self.rhmc_step_size),
-                'alpha': float(alpha_eff),
-                'jac_logdet': None if jac_flag else None,
-                'trajectory': traj_states,
-            }
+            self.eps_reg = eps_backup
 
-        # Assemble return tuple following (zK, log_q?, z0?, traj_info?)
-        outputs = [z_final]
-        if log_prob_flag:
-            outputs.append(log_q)
-        if initial_flag:
-            outputs.append(z0)
-        if traj_flag:
-            outputs.append(traj_info)
+            if len(outputs) == 1:
+                return outputs[0]
+            return tuple(outputs)
 
-        # Restore epsilon regularization
-        self.eps_reg = eps_backup
-
-        if len(outputs) == 1:
-            return outputs[0]
-        return tuple(outputs)
+        with grad_ctx:
+            with amp_ctx:
+                return _run()
     
     def _sample_initial_riemannian(
         self,
@@ -307,7 +358,7 @@ class RiemannianRHMCPosterior(nn.Module):
         alpha: float,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Step 1: Sample z₀ ~ N_Riem(μ, Σ(μ)) with Σ = α·Ĝ⁻¹(μ) + εI.
+        Step 1: Sample z₀ ~ N_Riem(μ, Σ(μ)) with Σ = α·Ĝ^{-1}(μ) + εI.
         Returns both the samples and the covariance used (for log-density).
         """
         batch_size, latent_dim = mu.shape
@@ -363,7 +414,7 @@ class RiemannianRHMCPosterior(nn.Module):
     
     def _make_covariance(self, G_inv: torch.Tensor, alpha: float) -> torch.Tensor:
         """
-        Build SPD covariance Σ = α·Ĝ⁻¹ + εI with eigenvalue clipping for stability.
+        Build SPD covariance Σ = α·Ĝ^{-1} + εI with eigenvalue clipping for stability.
         """
         Sigma = alpha * _symmetrize(G_inv)
         d = Sigma.shape[-1]
@@ -446,7 +497,7 @@ class RiemannianRHMCPosterior(nn.Module):
         return 1e-3
 
     def _get_inverse_metric(self, pts: torch.Tensor) -> torch.Tensor:
-        """Fetch Ĝ⁻¹(pts) with symmetry and fallback safeguards."""
+        """Fetch Ĝ^{-1}(pts) with symmetry and fallback safeguards."""
         model = self._ctx['model']
         if hasattr(model, 'G_inv'):
             G_inv = model.G_inv(pts)
@@ -455,7 +506,27 @@ class RiemannianRHMCPosterior(nn.Module):
             G_inv = torch.linalg.inv(_symmetrize(G))
         else:
             raise AttributeError("Model must expose G_inv or G to compute RHMC posterior.")
-        return _symmetrize(G_inv)
+        G_inv = _symmetrize(G_inv)
+        G_inv = torch.nan_to_num(G_inv, nan=float('inf'), posinf=float('inf'), neginf=float('inf'))
+        if not torch.isfinite(G_inv).all():
+            if not hasattr(self, "_warned_metric_nan"):
+                print("[RHMC WARN] Inverse metric returned non-finite values; falling back to identity.")
+                self._warned_metric_nan = True
+            d = pts.shape[-1]
+            eye = torch.eye(d, device=pts.device, dtype=pts.dtype).unsqueeze(0)
+            return eye.expand(pts.shape[0], -1, -1)
+        try:
+            m32 = G_inv.float() if G_inv.dtype in (torch.float16, torch.bfloat16) else G_inv
+            evals, evecs = torch.linalg.eigh(m32)
+            floor = max(self.eps_reg, 1e-6)
+            evals = torch.clamp(evals, min=floor)
+            ceil = float(getattr(self, "metric_eig_ceiling", 1e6))
+            if math.isfinite(ceil) and ceil > 0:
+                evals = torch.clamp(evals, max=ceil)
+            G_inv = (evecs @ torch.diag_embed(evals) @ evecs.transpose(-1, -2)).to(G_inv.dtype)
+        except Exception:
+            pass
+        return _symmetrize(torch.nan_to_num(G_inv, nan=0.0, posinf=0.0, neginf=0.0))
 
     def _stabilize_spd(self, matrix: torch.Tensor, min_eig: float) -> torch.Tensor:
         """Clamp eigenvalues from below to guarantee SPD-ness."""
@@ -509,6 +580,7 @@ class RiemannianRHMCPosterior(nn.Module):
             eps = torch.randn_like(z, dtype=L.dtype)
             rho32 = torch.einsum('bij,bj->bi', L, eps)
             rho = rho32.to(z.dtype)
+            rho = torch.nan_to_num(rho, nan=0.0, posinf=0.0, neginf=0.0)
             # Momentum clipping for safety
             rho_norm = torch.norm(rho, dim=-1, keepdim=True)
             rho = torch.where(rho_norm > self.max_momentum_norm, rho * (self.max_momentum_norm / (rho_norm + 1e-12)), rho)
@@ -516,6 +588,7 @@ class RiemannianRHMCPosterior(nn.Module):
         except:
             # Fallback to isotropic sampling
             rho = torch.randn_like(z)
+            rho = torch.nan_to_num(rho, nan=0.0, posinf=0.0, neginf=0.0)
             rho_norm = torch.norm(rho, dim=-1, keepdim=True)
             rho = torch.where(rho_norm > self.max_momentum_norm, rho * (self.max_momentum_norm / (rho_norm + 1e-12)), rho)
             return rho
@@ -525,7 +598,7 @@ class RiemannianRHMCPosterior(nn.Module):
         Simple leapfrog integration step (approximate RMHMC).
 
         Notes:
-        - Omits the kinetic position‑dependence term −0.5 ∇_z [ρᵀ G⁻¹(z) ρ] for
+        - Omits the kinetic position-dependence term -0.5 ∇_z [ρᵀ G^{-1}(z) ρ] for
           simplicity and stability; use small steps and clipping.
         - Jacobian of the integrator is ignored (KL jacobian mode is a placeholder).
         """
@@ -535,7 +608,9 @@ class RiemannianRHMCPosterior(nn.Module):
                 z = z.clone().requires_grad_(True)
             # Half step for momentum
             grad_U = self._compute_potential_gradient(z)
+            grad_U = torch.nan_to_num(grad_U, nan=0.0, posinf=0.0, neginf=0.0)
             rho = rho - 0.5 * step_size * grad_U
+            rho = torch.nan_to_num(rho, nan=0.0, posinf=0.0, neginf=0.0)
             
             # Full step for position
             G_inv = self._get_inverse_metric(z)
@@ -544,12 +619,15 @@ class RiemannianRHMCPosterior(nn.Module):
             I = torch.eye(d, device=z.device, dtype=G_inv.dtype).unsqueeze(0)
             G_inv_reg = G_inv + self.eps_reg * I
             velocity = torch.einsum('bij,bj->bi', G_inv_reg, rho)
+            # Guard against non-finite velocity components
+            velocity = torch.nan_to_num(velocity, nan=0.0, posinf=0.0, neginf=0.0)
             # Clip velocity
             v_norm = torch.norm(velocity, dim=-1, keepdim=True)
             velocity = torch.where(v_norm > self.max_velocity_norm, velocity * (self.max_velocity_norm / (v_norm + 1e-12)), velocity)
             # Adaptive effective step to bound position change
             eff_step = torch.clamp(self.max_position_step / (v_norm + 1e-12), max=1.0) * step_size
             z = z + eff_step * velocity
+            z = torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
             # Clamp absolute position norm only if enabled (> 0).
             # Hard clamping here was causing samples to accumulate on a
             # spherical shell (ring) in PCA plots. Allow disabling by
@@ -571,7 +649,9 @@ class RiemannianRHMCPosterior(nn.Module):
             
             # Half step for momentum
             grad_U = self._compute_potential_gradient(z)
+            grad_U = torch.nan_to_num(grad_U, nan=0.0, posinf=0.0, neginf=0.0)
             rho = rho - 0.5 * step_size * grad_U
+            rho = torch.nan_to_num(rho, nan=0.0, posinf=0.0, neginf=0.0)
             
             return z, rho
             
@@ -617,12 +697,12 @@ class RiemannianRHMCPosterior(nn.Module):
     
     def _compute_log_prior(self, z: torch.Tensor) -> torch.Tensor:
         """
-        Compute log p(z) for Riemannian volume prior.
+        Compute log p(z) for Riemannian volume prior expressed via G.
         
-        p(z) ∝ √det(G(z)) · exp(-0.5 * zᵀ z)
+        p(z) ∝ √det(G(z)) · exp(-0.5 * zᵀ G(z) z)
         
         With proper normalization:
-        log p(z) = 0.5 * log det(G(z)) - 0.5 * ||z||² - 0.5*d*log(2π)
+        log p(z) = 0.5 * log det(G(z)) - 0.5 * zᵀ G(z) z - 0.5*d*log(2π)
         
         Args:
             z: Latent samples [B, D]
@@ -631,16 +711,31 @@ class RiemannianRHMCPosterior(nn.Module):
             log_p: Log prior probability [B]
         """
         try:
-            # model.G returns the metric tensor G(z)
-            G_z = self._ctx['model'].G(z)
-            # AMP‑safe logdet
+            model = self._ctx['model']
+            if hasattr(model, 'G'):
+                G_z = model.G(z)
+            elif hasattr(model, 'metric_tensor'):
+                mt = model.metric_tensor
+                if hasattr(mt, 'compute_metric'):
+                    G_z = mt.compute_metric(z)
+                elif hasattr(mt, 'compute_inverse_metric'):
+                    G_inv_z = mt.compute_inverse_metric(z)
+                    G_z = torch.linalg.inv(G_inv_z)
+                else:
+                    raise RuntimeError("Metric tensor does not provide G(z).")
+            elif hasattr(model, 'G_inv'):
+                G_inv_z = model.G_inv(z)
+                G_z = torch.linalg.inv(G_inv_z)
+            else:
+                raise RuntimeError("Model does not expose G(z) or G^{-1}(z).")            # AMP-safe logdet
             G_z32 = G_z.float() if G_z.dtype in (torch.float16, torch.bfloat16) else G_z
-            sign, log_det_G = torch.slogdet(G_z32)
-            
+            half_logdet = half_logdet_volume(G_z32, 'g', jitter=self.eps_reg)
+
             d = z.shape[-1]
-            z_norm_sq = torch.sum(z ** 2, dim=-1)
-            log_det_term = 0.5 * log_det_G.to(z_norm_sq.dtype)
-            gaussian_term = -0.5 * z_norm_sq.to(log_det_term.dtype) - 0.5 * float(d) * math.log(2 * math.pi)
+            G_z_cast = G_z32.to(z.dtype)
+            quad = torch.einsum('bi,bij,bj->b', z, G_z_cast, z)
+            log_det_term = (-half_logdet).to(z.dtype)
+            gaussian_term = -0.5 * quad.to(z.dtype) - 0.5 * float(d) * math.log(2 * math.pi)
 
             mode = getattr(self, 'kl_prior_mode', 'volume_gaussian')
             if mode in ('volume_gaussian', 'gaussian'):
@@ -688,8 +783,7 @@ class RiemannianRHMCPosterior(nn.Module):
         try:
             G = self._ctx['model'].G(z)
             G32 = G.float() if G.dtype in (torch.float16, torch.bfloat16) else G
-            sign, logdet = torch.slogdet(G32)
-            vol_term = -0.5 * logdet
+            vol_term = half_logdet_volume(G32, 'g', jitter=self.eps_reg)
             grad_vol, = torch.autograd.grad(
                 outputs=vol_term.sum(),
                 inputs=z,
@@ -700,11 +794,44 @@ class RiemannianRHMCPosterior(nn.Module):
             if grad_vol is None:
                 grad_vol = torch.zeros_like(z)
             grad = base + grad_vol
+            grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
             return grad.to(z.dtype)
         except Exception:
             # Safe fallback: standard Gaussian gradient only
-            return base
+            return torch.nan_to_num(base, nan=0.0, posinf=0.0, neginf=0.0)
     
+    def snapshot_state(self) -> Dict[str, Any]:
+        """Capture mutable sampler state for safe restoration."""
+        state = {
+            'rhmc_steps': int(getattr(self, 'rhmc_steps', 0)),
+            'rhmc_step_size': float(getattr(self, 'rhmc_step_size', 0.0)),
+            'rhmc_alpha': float(getattr(self, 'rhmc_alpha', 0.0)),
+            'eps_reg': float(getattr(self, 'eps_reg', 0.0)),
+            'min_cov_eig': float(getattr(self, 'min_cov_eig', 0.0)),
+        }
+        last_sigma = getattr(self, '_last_sigma_mu', None)
+        if isinstance(last_sigma, torch.Tensor):
+            state['_last_sigma_mu'] = last_sigma.detach().clone()
+        else:
+            state['_last_sigma_mu'] = None
+        return state
+
+    def restore_state(self, snapshot: Optional[Dict[str, Any]]) -> None:
+        """Restore sampler state captured by ``snapshot_state``."""
+        if not isinstance(snapshot, dict):
+            return
+        for key in ('rhmc_steps', 'rhmc_step_size', 'rhmc_alpha', 'eps_reg', 'min_cov_eig'):
+            if key in snapshot:
+                try:
+                    setattr(self, key, snapshot[key])
+                except Exception:
+                    pass
+        sigma = snapshot.get('_last_sigma_mu', None)
+        if isinstance(sigma, torch.Tensor):
+            self._last_sigma_mu = sigma.detach().clone()
+        else:
+            self._last_sigma_mu = None
+
     def get_config(self) -> Dict[str, Any]:
         """Return current configuration."""
         return {

@@ -102,6 +102,7 @@ class UnifiedRLVAEInterface(nn.Module):
         object.__setattr__(self, 'wrapped_model', model)
         object.__setattr__(self, 'model_type', model_type)
         object.__setattr__(self, '_device', None)
+        object.__setattr__(self, 'expects_sequence_input', getattr(model, 'expects_sequence_input', False))
         
         # Detect model capabilities
         self._detect_capabilities()

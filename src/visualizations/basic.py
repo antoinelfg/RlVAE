@@ -13,12 +13,120 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import wandb
+from pathlib import Path
+from typing import Optional, Tuple
 from .base import BaseVisualization
 
 
 class BasicVisualizations(BaseVisualization):
     """Basic visualization suite for essential analysis."""
-    
+
+    def _resolve_metric_path(self) -> Optional[Path]:
+        """Resolve the absolute path to the metric checkpoint used in Stage C."""
+        candidates = []
+        try:
+            metric_cfg = getattr(self.config.settings.model, 'metric', None)
+            if metric_cfg is not None and hasattr(metric_cfg, 'path'):
+                candidates.append(metric_cfg.path)
+        except AttributeError:
+            pass
+
+        try:
+            metric_cfg = getattr(getattr(self.config, 'model', None), 'metric', None)
+            if metric_cfg is not None and hasattr(metric_cfg, 'path'):
+                candidates.append(metric_cfg.path)
+        except AttributeError:
+            pass
+
+        if hasattr(self.model, 'metric_path'):
+            candidates.append(getattr(self.model, 'metric_path'))
+
+        repo_root = Path(__file__).resolve().parents[2]
+
+        for cand in candidates:
+            if not cand:
+                continue
+            cand_path = Path(str(cand))
+            # Direct absolute path
+            if cand_path.is_absolute() and cand_path.exists():
+                return cand_path
+            # Relative to current working directory (Hydra run dir)
+            run_path = (Path.cwd() / cand_path).resolve()
+            if run_path.exists():
+                return run_path
+            # Relative to repository root
+            repo_path = (repo_root / cand_path).resolve()
+            if repo_path.exists():
+                return repo_path
+            # Fallback to pretrained directory with filename only
+            if cand_path.parent == Path('.'):
+                pretrained_path = (repo_root / 'data' / 'pretrained' / cand_path.name).resolve()
+                if pretrained_path.exists():
+                    return pretrained_path
+        return None
+
+    def _load_stage_b_pca_basis(self, latent_dim: int) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        """
+        Load (or lazily compute) the PCA basis captured during Stage B.
+
+        Returns:
+            Tuple of (components, mean) if available, else None.
+        """
+        metric_path = self._resolve_metric_path()
+        if metric_path is None:
+            return None
+
+        cache_name = f"{metric_path.stem}_pca_ld{latent_dim}.npz"
+        cache_path = metric_path.parent / cache_name
+
+        if cache_path.exists():
+            try:
+                data = np.load(cache_path)
+                components = data['components']
+                mean = data['mean']
+                print(f"✅ Loaded Stage-B PCA basis from {cache_path}")
+                return components, mean
+            except Exception as exc:
+                print(f"⚠️ Failed to load cached PCA basis ({cache_path}): {exc}")
+
+        try:
+            metric_data = torch.load(metric_path, map_location='cpu')
+        except Exception as exc:
+            print(f"⚠️ Unable to load metric checkpoint at {metric_path}: {exc}")
+            return None
+
+        centroids = metric_data.get('centroids')
+        if centroids is None:
+            return None
+
+        if isinstance(centroids, torch.Tensor):
+            centroids_np = centroids.detach().cpu().numpy()
+        else:
+            centroids_np = np.asarray(centroids)
+
+        if centroids_np.ndim != 2 or centroids_np.shape[0] < 2:
+            return None
+
+        from sklearn.decomposition import PCA
+
+        n_components = min(2, centroids_np.shape[1])
+        if n_components < 1:
+            return None
+
+        pca = PCA(n_components=n_components)
+        pca.fit(centroids_np)
+
+        components = pca.components_.astype(np.float32)
+        mean = pca.mean_.astype(np.float32)
+
+        try:
+            np.savez(cache_path, components=components, mean=mean)
+            print(f"💾 Cached Stage-B PCA basis at {cache_path}")
+        except Exception as exc:
+            print(f"⚠️ Could not cache PCA basis ({cache_path}): {exc}")
+
+        return components, mean
+
     def create_cyclicity_analysis(self, x_sample: torch.Tensor, epoch: int):
         """Enhanced cyclicity analysis with velocity and energy metrics."""
 
@@ -331,6 +439,26 @@ Energy-Cyclicity: {energy_cyclicity_corr if len(temporal_energies) > 1 else 'N/A
             filename = f'enhanced_cyclicity_analysis_epoch_{epoch}.png'
             saved_file = self._safe_save_plt_figure(filename, dpi=200, bbox_inches='tight')
             self.last_cyclicity_path = saved_file
+
+            # Log latent histogram + stats prior to the image so we can track drift in W&B dashboards
+            if self.should_log_to_wandb():
+                try:
+                    z_tensor = torch.as_tensor(z_seq)
+                    if z_tensor.dim() == 3:
+                        # Histogram of timestep-0 latents (fallback to all if seq length < 1)
+                        z_for_hist = z_tensor[:, 0] if z_tensor.shape[1] > 0 else z_tensor.reshape(-1, z_tensor.shape[-1])
+                    else:
+                        z_for_hist = z_tensor
+                    z_flat = z_for_hist.reshape(-1).cpu().numpy()
+                    wandb.log({
+                        "basic/latent_hist_t0": wandb.Histogram(z_flat, num_bins=40),
+                        "basic/latent_stats_t0/mean": float(np.mean(z_flat)) if z_flat.size else 0.0,
+                        "basic/latent_stats_t0/std": float(np.std(z_flat)) if z_flat.size else 0.0,
+                        "basic/latent_stats_t0/min": float(np.min(z_flat)) if z_flat.size else 0.0,
+                        "basic/latent_stats_t0/max": float(np.max(z_flat)) if z_flat.size else 0.0,
+                    })
+                except Exception as exc:
+                    print(f"⚠️ Failed to log latent histogram: {exc}")
             
             # Log to WandB with comprehensive metrics
             if self.should_log_to_wandb() and saved_file:
@@ -951,49 +1079,50 @@ Timesteps: {n_obs}"""
                 # Get encoder output for posterior initialization
                 result = self.model_forward(x_sample)
                 
-                # Extract encoder output for posterior initialization
-                if hasattr(result, 'z'):
-                    z_encoder = result.z  # [batch_size, n_obs, latent_dim]
-                elif isinstance(result, dict):
-                    z_encoder = result.get('latent_samples', result.get('z', None))
+                # Extract encoder means aligned exactly as used in training
+                if isinstance(result, dict):
+                    z_posterior = result.get('latent_samples', result.get('z', None))
+                    mu_aligned = result.get('mu_aligned', result.get('mu', None))
                 else:
-                    print("⚠️ Could not extract encoder output for enhanced KL visualization")
-                    return
-                
-                # CRITICAL FIX: Get raw encoder means BEFORE mu alignment
-                # The visualization should show the actual encoder means, not the aligned ones
-                try:
-                    # Get raw encoder output directly from encoder
-                    raw_encoder_output = self.model.encoder(x_sample[:, 0])  # Use first timestep
-                    if hasattr(raw_encoder_output, 'embedding'):
-                        raw_mu = raw_encoder_output.embedding
-                    elif hasattr(raw_encoder_output, 'mu'):
-                        raw_mu = raw_encoder_output.mu
-                    elif isinstance(raw_encoder_output, dict) and 'mu' in raw_encoder_output:
-                        raw_mu = raw_encoder_output['mu']
+                    z_posterior = getattr(result, 'latent_samples', getattr(result, 'z', None))
+                    mu_aligned = getattr(result, 'mu_aligned', getattr(result, 'mu', None))
+
+                if mu_aligned is None:
+                    # Fallback: use latent samples from forward output
+                    if z_posterior is not None:
+                        mu_aligned = z_posterior
+                        print("⚠️ Using forward latent_samples as μ for visualization (mu_aligned missing)")
                     else:
-                        print("⚠️ Could not extract raw encoder means")
-                        raw_mu = z_encoder[:, 0, :]  # Fallback to aligned means
-                    
-                    # Use raw encoder means for visualization
-                    z_encoder = raw_mu.unsqueeze(1).expand(-1, z_encoder.shape[1], -1)  # [batch_size, n_obs, latent_dim]
-                    print(f"✅ Using raw encoder means for visualization (shape: {z_encoder.shape})")
-                except Exception as e:
-                    print(f"⚠️ Could not get raw encoder means: {e}, using aligned means")
-                    # Fallback to aligned means if raw extraction fails
-                
-                if z_encoder is None:
-                    print("⚠️ No encoder output available for enhanced KL visualization")
-                    return
-                
+                        try:
+                            enc_fallback = self.model.encoder(x_sample[:, 0])
+                            if hasattr(enc_fallback, 'embedding'):
+                                mu_aligned = enc_fallback.embedding.unsqueeze(1).expand(-1, x_sample.shape[1], -1)
+                                print("⚠️ Using encoder fallback μ for visualization")
+                            elif hasattr(enc_fallback, 'mu'):
+                                mu_aligned = enc_fallback.mu.unsqueeze(1).expand(-1, x_sample.shape[1], -1)
+                                print("⚠️ Using encoder fallback μ for visualization")
+                            else:
+                                raise AttributeError
+                        except Exception:
+                            print("⚠️ No aligned encoder means (mu_aligned) available for visualization")
+                            return
+                if z_posterior is None:
+                    z_posterior = mu_aligned  # fallback
+
                 # Ensure proper tensor format
-                if isinstance(z_encoder, list):
-                    z_encoder = torch.stack([torch.as_tensor(z) for z in z_encoder], dim=0)
-                elif isinstance(z_encoder, tuple):
-                    z_encoder = torch.stack([torch.as_tensor(z) for z in list(z_encoder)], dim=0)
-                
-                # Flatten encoder output
-                z_encoder_flat = z_encoder.reshape(-1, z_encoder.shape[-1])  # [N, latent_dim]
+                if isinstance(mu_aligned, list):
+                    mu_aligned = torch.stack([torch.as_tensor(z) for z in mu_aligned], dim=0)
+                elif isinstance(mu_aligned, tuple):
+                    mu_aligned = torch.stack([torch.as_tensor(z) for z in list(mu_aligned)], dim=0)
+                if isinstance(z_posterior, list):
+                    z_posterior = torch.stack([torch.as_tensor(z) for z in z_posterior], dim=0)
+                elif isinstance(z_posterior, tuple):
+                    z_posterior = torch.stack([torch.as_tensor(z) for z in list(z_posterior)], dim=0)
+
+                # Flatten tensors
+                mu_aligned_flat = mu_aligned.reshape(-1, mu_aligned.shape[-1])  # [N, latent_dim]
+                z_posterior_flat = z_posterior.reshape(-1, z_posterior.shape[-1])
+                z_encoder_flat = mu_aligned_flat.clone()
                 
                 # Create RHMC sampler for both prior and posterior samples
                 rhmc_sampler = RHVAEVolumeElementHMCSampler(
@@ -1018,11 +1147,11 @@ Timesteps: {n_obs}"""
                             log_var = enc_out_vis.log_var
                         else:
                             # Fallback to reasonable variance
-                            log_var = torch.full_like(z_encoder_flat, -1.0)  # std ≈ 0.6
+                            log_var = torch.full_like(mu_aligned_flat, -1.0)  # std ≈ 0.6
                         # Perform RHMC sampling with gradients enabled
                         with torch.enable_grad():
                             rhmc_result = self.model.posterior_sampler_rhmc.sample_riemannian_rhmc_posterior(
-                                mu=z_encoder_flat,
+                                mu=mu_aligned_flat,
                                 log_var=log_var,
                                 return_log_prob=False,
                                 return_traj=False,
@@ -1039,19 +1168,19 @@ Timesteps: {n_obs}"""
                         elif hasattr(enc_out_vis, 'log_var'):
                             log_var = enc_out_vis.log_var
                         else:
-                            log_var = torch.full_like(z_encoder_flat, -1.0)
+                            log_var = torch.full_like(mu_aligned_flat, -1.0)
                         z_posterior_flat = self.model.sample_metric_aware_posterior(
-                            mu=z_encoder_flat,
+                            mu=mu_aligned_flat,
                             log_var=log_var
                         )
                         print(f"✅ Metric-aware posterior samples shape: {z_posterior_flat.shape}")
                     else:
                         # Fallback to encoder output
-                        z_posterior_flat = z_encoder_flat
-                        print("⚠️ Using encoder means as fallback")
+                        z_posterior_flat = mu_aligned_flat
+                        print("⚠️ Using aligned encoder means as fallback")
                 except Exception as e:
                     print(f"⚠️ Posterior sampling failed: {e}, using encoder means")
-                    z_posterior_flat = z_encoder_flat
+                    z_posterior_flat = mu_aligned_flat
                 
                 # ADD MORE ENCODER MEANS FOR BETTER COVERAGE
                 # Sample additional encoder means from the dataset for better visualization
@@ -1062,15 +1191,19 @@ Timesteps: {n_obs}"""
                     additional_x = x_sample[:n_additional_samples] if len(x_sample) >= n_additional_samples else x_sample
                     
                     # Get encoder means for additional samples
-                    additional_encoder_out = self.model.encoder(additional_x[:, 0])
-                    if hasattr(additional_encoder_out, 'embedding'):
-                        additional_mu = additional_encoder_out.embedding
-                    elif hasattr(additional_encoder_out, 'mu'):
-                        additional_mu = additional_encoder_out.mu
-                    elif isinstance(additional_encoder_out, dict) and 'mu' in additional_encoder_out:
-                        additional_mu = additional_encoder_out['mu']
+                    additional_result = self.model_forward(additional_x)
+                    if isinstance(additional_result, dict):
+                        additional_mu = additional_result.get('mu_aligned', additional_result.get('mu', None))
                     else:
+                        additional_mu = getattr(additional_result, 'mu_aligned', getattr(additional_result, 'mu', None))
+                    if additional_mu is None:
                         additional_mu = z_encoder_flat[:n_additional_samples]
+                    else:
+                        if isinstance(additional_mu, list):
+                            additional_mu = torch.stack([torch.as_tensor(z) for z in additional_mu], dim=0)
+                        elif isinstance(additional_mu, tuple):
+                            additional_mu = torch.stack([torch.as_tensor(z) for z in list(additional_mu)], dim=0)
+                        additional_mu = additional_mu.reshape(-1, additional_mu.shape[-1])
                     
                     # Combine with original encoder means
                     z_encoder_flat = torch.cat([z_encoder_flat, additional_mu], dim=0)
@@ -1094,20 +1227,45 @@ Timesteps: {n_obs}"""
                 X, Y = torch.meshgrid(z_grid, z_grid, indexing='ij')
                 Z_grid = torch.stack([X.flatten(), Y.flatten()], dim=1)  # [10000, 2]
                 
-                # For 16D latent space, we need to project to 2D for visualization
-                # Use PCA on the combined samples to get the projection
-                all_samples = torch.cat([z_posterior_flat, z_prior], dim=0).cpu().numpy()
-                from sklearn.decomposition import PCA
-                pca = PCA(n_components=2)
-                pca.fit(all_samples)
-                
-                # Project all data to 2D
-                z_posterior_2d = pca.transform(z_posterior_flat.cpu().numpy())
-                z_prior_2d = pca.transform(z_prior.cpu().numpy())
-                if len(centroids) > 0:
-                    centroids_2d = pca.transform(centroids)
+                # Prepare 2D projection using Stage-B PCA basis when available
+                posterior_np = z_posterior_flat.cpu().numpy()
+                prior_np = z_prior.cpu().numpy()
+                if isinstance(centroids, np.ndarray) and centroids.ndim == 2:
+                    centroids_np = centroids
                 else:
-                    centroids_2d = np.array([])
+                    centroids_np = np.empty((0, posterior_np.shape[1]))
+
+                stage_b_pca = self._load_stage_b_pca_basis(latent_dim=posterior_np.shape[1])
+                if stage_b_pca is not None:
+                    components, mean = stage_b_pca
+                    print("✅ Using Stage-B PCA basis for enhanced KL visualization")
+
+                    def project(arr: np.ndarray) -> np.ndarray:
+                        return (arr - mean) @ components.T
+
+                    def inverse(arr: np.ndarray) -> np.ndarray:
+                        return arr @ components + mean
+
+                    z_posterior_2d = project(posterior_np)
+                    z_prior_2d = project(prior_np)
+                    centroids_2d = project(centroids_np) if centroids_np.size else np.empty((0, components.shape[0]))
+                else:
+                    from sklearn.decomposition import PCA
+                    all_samples = np.vstack([posterior_np, prior_np])
+                    if centroids_np.size:
+                        all_samples = np.vstack([all_samples, centroids_np])
+                    pca = PCA(n_components=min(2, posterior_np.shape[1]))
+                    pca.fit(all_samples)
+
+                    def project(arr: np.ndarray, pca_obj=pca) -> np.ndarray:
+                        return pca_obj.transform(arr)
+
+                    def inverse(arr: np.ndarray, pca_obj=pca) -> np.ndarray:
+                        return pca_obj.inverse_transform(arr)
+
+                    z_posterior_2d = project(posterior_np)
+                    z_prior_2d = project(prior_np)
+                    centroids_2d = project(centroids_np) if centroids_np.size else np.empty((0, pca.n_components_))
                 
                 # FIX: Create grid for manifold structure visualization with DYNAMIC RANGE
                 # Compute the actual range of all data in PCA space
@@ -1134,13 +1292,19 @@ Timesteps: {n_obs}"""
                 for i, z_2d in enumerate(Z_grid_2d):
                     try:
                         # Project back to full latent space (approximate)
-                        z_full = pca.inverse_transform(z_2d.reshape(1, -1))
+                        z_full = inverse(z_2d.reshape(1, -1))
                         z_tensor = torch.tensor(z_full, dtype=torch.float32, device=self.device)
                         
                         # Prefer orientation in precision space: log det(G^{-1})
                         logdetGinv = None
                         try:
-                            if hasattr(self.model, 'G_inv'):
+                            if hasattr(self.model, 'modular_metric') and hasattr(self.model.modular_metric, 'compute_log_det_inverse_metric'):
+                                logdet_tensor = self.model.modular_metric.compute_log_det_inverse_metric(z_tensor)
+                                logdetGinv = logdet_tensor.reshape(-1)[0].item()
+                            elif hasattr(self.model, 'metric') and hasattr(self.model.metric, 'compute_log_det_inverse_metric'):
+                                logdet_tensor = self.model.metric.compute_log_det_inverse_metric(z_tensor)
+                                logdetGinv = logdet_tensor.reshape(-1)[0].item()
+                            elif hasattr(self.model, 'G_inv'):
                                 G_inv = self.model.G_inv(z_tensor)
                                 _, logdet_inv = torch.slogdet(G_inv.float())
                                 logdetGinv = logdet_inv.item()
@@ -1183,28 +1347,7 @@ Timesteps: {n_obs}"""
                 det_min = np.min(det_G_grid)
                 det_max = np.max(det_G_grid)
                 
-                # If the range is too small, create artificial variation for visualization
-                if det_max - det_min < 1e-6:
-                    # Create a synthetic gradient based on distance from centroids
-                    if len(centroids_2d) > 0:
-                        synthetic_gradient = np.zeros_like(det_G_grid)
-                        for i in range(X_grid.shape[0]):
-                            for j in range(X_grid.shape[1]):
-                                point = np.array([X_grid[i, j], Y_grid[i, j]])
-                                # Compute distance to nearest centroid
-                                distances = [np.linalg.norm(point - centroid) for centroid in centroids_2d]
-                                min_dist = min(distances)
-                                # Create gradient: closer to centroids = higher values
-                                synthetic_gradient[i, j] = np.exp(-min_dist / 2.0)
-                        det_G_grid = synthetic_gradient
-                    else:
-                        # Fallback: create a radial gradient from center
-                        center_x, center_y = 0, 0
-                        for i in range(X_grid.shape[0]):
-                            for j in range(X_grid.shape[1]):
-                                dist = np.sqrt((X_grid[i, j] - center_x)**2 + (Y_grid[i, j] - center_y)**2)
-                                det_G_grid[i, j] = np.exp(-dist / 3.0)
-
+                # preserve raw determinant values even if the range is small to avoid artificial gradients
                 det_G_grid = det_G_grid.reshape(X_grid.shape)
                 
                 # Create visualization
@@ -1245,27 +1388,27 @@ Timesteps: {n_obs}"""
                     pass
                 
                 # Plot posterior samples
-                ax.scatter(z_posterior_2d[:, 0], z_posterior_2d[:, 1], 
+                ax.scatter(z_posterior_2d[:, 0], z_posterior_2d[:, 1],
                           c='blue', s=20, alpha=0.6, label='Posterior Samples (Metric-Aware)')
-                
+
                 # Plot encoder means μ (green crosses) - these are the centers
-                z_encoder_2d = pca.transform(z_encoder_flat.cpu().numpy())
-                ax.scatter(z_encoder_2d[:, 0], z_encoder_2d[:, 1], 
-                          c='green', s=50, marker='x', alpha=0.8, linewidth=2, 
+                z_encoder_2d = project(z_encoder_flat.cpu().numpy())
+                ax.scatter(z_encoder_2d[:, 0], z_encoder_2d[:, 1],
+                          c='green', s=50, marker='x', alpha=0.8, linewidth=2,
                           label='Encoder Means μ (Centers)', zorder=4)
-                
+
                 # Plot prior samples
-                ax.scatter(z_prior_2d[:, 0], z_prior_2d[:, 1], 
+                ax.scatter(z_prior_2d[:, 0], z_prior_2d[:, 1],
                           c='red', s=20, alpha=0.6, label='Prior Samples (UNIFIED RHMC)')
-                
+
                 # Plot centroids
                 if len(centroids_2d) > 0:
-                    ax.scatter(centroids_2d[:, 0], centroids_2d[:, 1], 
-                              c='cyan', s=100, edgecolors='black', linewidth=2, 
+                    ax.scatter(centroids_2d[:, 0], centroids_2d[:, 1],
+                              c='cyan', s=100, edgecolors='black', linewidth=2,
                               label='Centroids (Final)', zorder=5)
-                
-                ax.set_xlabel('PCA Component 1')
-                ax.set_ylabel('PCA Component 2')
+
+                ax.set_xlabel('Stage-B PCA Component 1')
+                ax.set_ylabel('Stage-B PCA Component 2')
                 ax.set_title(f'Enhanced KL Visualization: UNIFIED RHMC Sampling (Epoch {epoch})')
                 ax.legend()
                 ax.grid(True, alpha=0.3)
@@ -1293,6 +1436,311 @@ Timesteps: {n_obs}"""
             print(f"⚠️ Enhanced KL visualization failed: {e}")
             import traceback
             traceback.print_exc()
+
+    def create_rhmc_trajectory_overlay(
+        self,
+        x_sample: torch.Tensor,
+        epoch: int,
+        n_paths: int = 15
+    ) -> None:
+        """
+        Create a dedicated visualization that overlays RHMC trajectories as arrows on top of
+        the latent manifold. This complements the enhanced KL plot without modifying it.
+        """
+        print(f"🧭 Creating RHMC trajectory overlay (Epoch {epoch})")
+
+        if not hasattr(self.model, 'posterior_sampler_rhmc'):
+            print("⚠️ RHMC posterior sampler not available; skipping trajectory overlay.")
+            return
+
+        try:
+            from matplotlib.patches import FancyArrowPatch
+        except Exception:
+            print("⚠️ Matplotlib arrow patches unavailable; skipping trajectory overlay.")
+            return
+
+        try:
+            self.model.eval()
+            device = self.device
+
+            # Forward pass (no grad) to obtain encoder outputs
+            with torch.no_grad():
+                result = self.model_forward(x_sample)
+
+            # Extract encoder latents
+            if isinstance(result, dict):
+                z_encoder = result.get('latent_samples', None)
+            else:
+                z_encoder = getattr(result, 'z', None)
+
+            if z_encoder is None:
+                print("⚠️ Could not extract encoder latents for trajectory overlay")
+                return
+
+            batch_size, n_obs, latent_dim = z_encoder.shape
+            z_encoder_flat = z_encoder[:, 0].detach()  # Use first observation
+
+            # Obtain log variance for RHMC sampler
+            encoder_out = self.model.encoder(x_sample[:, 0])
+            if hasattr(encoder_out, 'log_covariance'):
+                log_var = encoder_out.log_covariance.detach()
+            elif hasattr(encoder_out, 'log_var'):
+                log_var = encoder_out.log_var.detach()
+            elif isinstance(encoder_out, dict) and 'log_var' in encoder_out:
+                log_var = encoder_out['log_var'].detach()
+            else:
+                log_var = torch.full_like(z_encoder_flat, -1.0)  # fallback variance
+
+            # Posterior samples (context)
+            try:
+                with torch.enable_grad():
+                    mu_for_samples = z_encoder_flat.clone().detach().requires_grad_(True)
+                    log_var_samples = log_var.clone().detach()
+                    posterior_samples = self.model.posterior_sampler_rhmc.sample_riemannian_rhmc_posterior(
+                        mu=mu_for_samples,
+                        log_var=log_var_samples,
+                        return_log_prob=False,
+                        return_traj=False,
+                        return_initial=False
+                    )
+                z_posterior_flat = posterior_samples.detach()
+            except Exception as e:
+                print(f"⚠️ Posterior sampling failed ({e}); using encoder means as fallback")
+                z_posterior_flat = z_encoder_flat
+
+            # Prior samples (same volume-element sampler as enhanced KL)
+            try:
+                from src.models.samplers.hmc_sampler import RHVAEVolumeElementHMCSampler
+                if not hasattr(self, '_rhmc_prior_sampler'):
+                    self._rhmc_prior_sampler = RHVAEVolumeElementHMCSampler(self.model)
+                rhmc_sampler = self._rhmc_prior_sampler
+                z_prior = rhmc_sampler.sample(n_samples=200)
+            except Exception:
+                z_prior = torch.randn_like(z_posterior_flat)
+
+            num_paths = min(n_paths, z_encoder_flat.shape[0])
+            if num_paths == 0:
+                print("⚠️ No encoder samples available for trajectories.")
+                return
+            idx_paths = torch.randperm(z_encoder_flat.shape[0], device=z_encoder_flat.device)[:num_paths]
+            mu_selected = z_encoder_flat[idx_paths]
+            log_var_selected = log_var[idx_paths]
+
+            sampler = self.model.posterior_sampler_rhmc
+            original_steps = int(getattr(sampler, 'rhmc_steps', 0))
+            original_step_size = float(getattr(sampler, 'rhmc_step_size', 0.02))
+            viz_steps = max(1, original_steps)
+            viz_step_size = original_step_size if original_step_size > 0 else 0.02
+
+            with torch.enable_grad():
+                mu_req = mu_selected.detach().clone().requires_grad_(True)
+                log_var_req = log_var_selected.detach().clone()
+                try:
+                    sampler.rhmc_steps = viz_steps
+                    sampler.rhmc_step_size = viz_step_size
+                    rhmc_output = sampler.sample_riemannian_rhmc_posterior(
+                        mu=mu_req,
+                        log_var=log_var_req,
+                        return_log_prob=False,
+                        return_traj=True,
+                        return_initial=True
+                    )
+                finally:
+                    sampler.rhmc_steps = original_steps
+                    sampler.rhmc_step_size = original_step_size
+
+            if isinstance(rhmc_output, tuple):
+                z_final_sel = rhmc_output[0]
+                z0_sel = None
+                traj_info = None
+                for item in rhmc_output[1:]:
+                    if isinstance(item, torch.Tensor) and item.shape == z_final_sel.shape and z0_sel is None:
+                        z0_sel = item
+                    elif isinstance(item, dict):
+                        traj_info = item
+                if z0_sel is None:
+                    z0_sel = mu_selected
+            else:
+                z_final_sel = rhmc_output
+                z0_sel = mu_selected
+                traj_info = None
+
+            trajectory_points = []
+            if isinstance(traj_info, dict) and 'trajectory' in traj_info:
+                traj_states = traj_info['trajectory']
+                for path_id in range(num_paths):
+                    states = []
+                    for entry in traj_states:
+                        z_entry = entry.get('z', None)
+                        if z_entry is None:
+                            continue
+                        states.append(z_entry[path_id].detach().cpu())
+                    if states:
+                        trajectory_points.append(torch.stack(states))
+                    else:
+                        trajectory_points.append(torch.stack([z0_sel[path_id].detach().cpu(),
+                                                              z_final_sel[path_id].detach().cpu()]))
+            else:
+                for path_id in range(num_paths):
+                    start = z0_sel[path_id].detach().cpu()
+                    end = z_final_sel[path_id].detach().cpu()
+                    trajectory_points.append(torch.stack([start, end]))
+
+            samples_for_pca = [
+                z_posterior_flat.detach().cpu().numpy(),
+                z_prior.detach().cpu().numpy(),
+                z_encoder_flat.detach().cpu().numpy(),
+            ]
+
+            if hasattr(self.model, 'centroids_tens') and self.model.centroids_tens is not None:
+                centroids_np = self.model.centroids_tens.detach().cpu().numpy()
+            else:
+                centroids_np = np.empty((0, latent_dim))
+
+            if centroids_np.size:
+                samples_for_pca.append(centroids_np)
+
+            traj_concat = []
+            for pts in trajectory_points:
+                traj_concat.append(pts.numpy())
+            if traj_concat:
+                samples_for_pca.append(np.concatenate(traj_concat, axis=0))
+
+            all_for_pca = np.concatenate(samples_for_pca, axis=0)
+            from sklearn.decomposition import PCA
+            pca_components = min(2, latent_dim)
+            pca = PCA(n_components=pca_components)
+            pca.fit(all_for_pca)
+
+            z_posterior_2d = pca.transform(z_posterior_flat.detach().cpu().numpy())
+            z_prior_2d = pca.transform(z_prior.detach().cpu().numpy())
+            z_encoder_2d = pca.transform(z_encoder_flat.detach().cpu().numpy())
+            centroids_2d = pca.transform(centroids_np) if centroids_np.size else np.empty((0, 2))
+
+            traj_proj = [pca.transform(pts.numpy()) for pts in trajectory_points]
+
+            all_2d_points = [z_posterior_2d, z_prior_2d, z_encoder_2d]
+            if centroids_2d.size:
+                all_2d_points.append(centroids_2d)
+            if traj_proj:
+                all_2d_points.extend(traj_proj)
+
+            all_concat = np.concatenate(all_2d_points, axis=0)
+            data_min = np.percentile(all_concat, 1, axis=0)
+            data_max = np.percentile(all_concat, 99, axis=0)
+            padding = 0.15 * (data_max - data_min + 1e-6)
+            x_min, x_max = data_min[0] - padding[0], data_max[0] + padding[0]
+            y_min, y_max = data_min[1] - padding[1], data_max[1] + padding[1]
+
+            grid_res = 160
+            x_grid = np.linspace(x_min, x_max, grid_res)
+            y_grid = np.linspace(y_min, y_max, grid_res)
+            X_grid, Y_grid = np.meshgrid(x_grid, y_grid)
+            Z_grid_2d = np.column_stack([X_grid.flatten(), Y_grid.flatten()])
+
+            latent_grid = pca.inverse_transform(Z_grid_2d)
+
+            latent_grid_tensor = torch.tensor(latent_grid, dtype=torch.float32, device=device)
+            with torch.no_grad():
+                if hasattr(self.model, 'G_inv'):
+                    G_eval = self.model.G_inv(latent_grid_tensor)
+                    sign, logdet = torch.linalg.slogdet(G_eval.float())
+                    det_log = logdet.cpu().numpy()
+                elif hasattr(self.model, 'G'):
+                    G_eval = self.model.G(latent_grid_tensor)
+                    sign, logdet = torch.linalg.slogdet(G_eval.float())
+                    det_log = (-logdet).cpu().numpy()
+                elif hasattr(self.model, 'modular_metric'):
+                    G_eval = self.model.modular_metric.compute_inverse_metric(latent_grid_tensor)
+                    sign, logdet = torch.linalg.slogdet(G_eval.float())
+                    det_log = logdet.cpu().numpy()
+                else:
+                    det_log = np.zeros(len(latent_grid_tensor))
+
+            det_log = (det_log.reshape(X_grid.shape)) / np.log(10.0)
+
+            fig, ax = plt.subplots(figsize=(10, 9))
+
+            levels = np.linspace(det_log.min(), det_log.max(), 120)
+            contour = ax.contourf(
+                X_grid, Y_grid, det_log,
+                levels=levels, cmap='viridis', alpha=0.92
+            )
+            plt.colorbar(contour, ax=ax, label='log₁₀(det(G⁻¹(z)))')
+
+            ax.scatter(z_posterior_2d[:, 0], z_posterior_2d[:, 1],
+                       c='royalblue', s=16, alpha=0.6, label='Posterior Samples')
+            ax.scatter(z_prior_2d[:, 0], z_prior_2d[:, 1],
+                       c='tomato', s=18, alpha=0.42, label='Prior Samples')
+            ax.scatter(z_encoder_2d[:, 0], z_encoder_2d[:, 1],
+                       c='lime', marker='x', s=50, linewidths=1.7, label='Encoder Means')
+            if centroids_2d.size:
+                ax.scatter(centroids_2d[:, 0], centroids_2d[:, 1],
+                           facecolors='cyan', edgecolors='black', s=100, linewidths=1.2,
+                           label='Centroids', zorder=5)
+
+            cmap = plt.get_cmap('tab20')
+            colors = [cmap(i % cmap.N) for i in range(len(traj_proj))]
+            for idx_path, points_2d in enumerate(traj_proj):
+                color = colors[idx_path]
+                ax.plot(points_2d[:, 0], points_2d[:, 1],
+                        color=color, linewidth=1.5, alpha=0.92, label=None)
+                for step_idx in range(len(points_2d) - 1):
+                    start = points_2d[step_idx]
+                    end = points_2d[step_idx + 1]
+                    if np.allclose(start, end):
+                        continue
+                    arrow = FancyArrowPatch(
+                        posA=start, posB=end,
+                        arrowstyle='->', mutation_scale=12,
+                        color=color, linewidth=1.6, alpha=0.95
+                    )
+                    ax.add_patch(arrow)
+                ax.scatter(points_2d[0, 0], points_2d[0, 1],
+                           facecolors='none', edgecolors=color, s=75, linewidths=1.8)
+                ax.scatter(points_2d[-1, 0], points_2d[-1, 1],
+                           facecolors=color, edgecolors='white', s=55, linewidths=1.0)
+
+            ax.set_xlim(x_min, x_max)
+            ax.set_ylim(y_min, y_max)
+            ax.set_xlabel('PCA Component 1')
+            ax.set_ylabel('PCA Component 2')
+            ax.set_title(f'RHMC Trajectory Overlay (Epoch {epoch})')
+            ax.grid(True, alpha=0.25)
+            ax.legend(loc='upper right')
+
+            summary_text = (
+                f"Trajectory Paths: {len(traj_proj)}\n"
+                f"RHMC steps per path (viz): {viz_steps}\n"
+                f"Posterior alpha: {getattr(sampler, 'rhmc_alpha', 'n/a')}\n"
+                f"Latent dim: {latent_dim}, PCA dim: {pca_components}"
+            )
+            ax.text(
+                0.02, 0.02, summary_text,
+                transform=ax.transAxes,
+                fontsize=8, verticalalignment='bottom',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.72)
+            )
+
+            plt.tight_layout()
+            filename = f'rhmc_trajectory_overlay.png'
+            saved_file = self._safe_save_plt_figure(filename, dpi=200, bbox_inches='tight')
+            if self.should_log_to_wandb() and saved_file:
+                wandb.log({
+                    f"enhanced_kl/rhmc_trajectory_overlay": wandb.Image(
+                        saved_file,
+                        caption=f"RHMC Trajectory Overlay (Epoch {epoch})"
+                    )
+                })
+            plt.close(fig)
+            print(f"✅ RHMC trajectory overlay saved: {filename}")
+
+        except Exception as e:
+            print(f"⚠️ RHMC trajectory overlay failed: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self.model.train()
 
     def create_comprehensive_generation_visualization(self, generation_results: dict, fid_scores: dict = None, num_samples_per_method: int = 4, epoch: int = 0):
         """

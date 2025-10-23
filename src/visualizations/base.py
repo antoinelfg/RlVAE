@@ -78,38 +78,36 @@ class BaseVisualization:
         device = next(self.model.parameters()).device
         x = x.to(device)
         
-        # Handle different model types
-        if hasattr(self.model, 'n_flows') and self.model.n_flows > 0:
-            # This is an RLVAE - expects 5D input [batch, timesteps, channels, height, width]
+        # Handle sequence-aware models first (RLVAE and modular interfaces)
+        expects_sequence = getattr(self.model, 'expects_sequence_input', False)
+        has_sequence_attrs = any(
+            hasattr(self.model, attr) for attr in ('n_flows', 'loop_mode', 'posterior_type')
+        )
+        if len(x.shape) == 5 and (expects_sequence or has_sequence_attrs):
             return self.model(x)
-        else:
-            # This is a vanilla VAE - expects 4D input [batch, channels, height, width]
-            # Take only the first timestep for vanilla VAE
-            if len(x.shape) == 5:  # [batch, timesteps, channels, height, width]
-                x_0 = x[:, 0]  # [batch, channels, height, width]
-                result = self.model(x_0)
-                
-                # For vanilla VAE, we need to create a sequence-like output
-                batch_size, n_obs = x.shape[:2]
-                
-                # Create sequence of reconstructions by repeating the first timestep
-                recon_x = result.recon_x.unsqueeze(1).expand(-1, n_obs, -1, -1, -1)  # [batch, timesteps, channels, height, width]
-                
-                # Create sequence of latents by repeating the first latent
-                z = result.z.unsqueeze(1).expand(-1, n_obs, -1)  # [batch, timesteps, latent_dim]
-                
-                # Create a result object that matches the expected format
+
+        # Fallback: treat as vanilla VAE (4D input)
+        if len(x.shape) == 5:
+            x_0 = x[:, 0]
+            result = self.model(x_0)
+
+            # Repeat outputs to match sequence shape when possible
+            if hasattr(result, 'recon_x') and hasattr(result, 'z'):
                 from types import SimpleNamespace
+                batch_size, n_obs = x.shape[:2]
+                recon_x = result.recon_x.unsqueeze(1).expand(-1, n_obs, -1, -1, -1)
+                z = result.z.unsqueeze(1).expand(-1, n_obs, -1)
                 return SimpleNamespace(
                     recon_x=recon_x,
                     z=z,
-                    loss=result.loss,
-                    reconstruction_loss=result.reconstruction_loss,
-                    reg_loss=result.reg_loss
+                    loss=getattr(result, 'loss', None),
+                    reconstruction_loss=getattr(result, 'reconstruction_loss', None),
+                    reg_loss=getattr(result, 'reg_loss', None)
                 )
-            else:
-                # Already 4D, pass directly
-                return self.model(x)
+            return result
+
+        # Already 4D input
+        return self.model(x)
         
     def _prepare_pca_data(self, z_seq, n_components=3):
         """Prepare PCA projection of latent sequences."""

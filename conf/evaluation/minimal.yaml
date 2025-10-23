@@ -11,7 +11,7 @@ run_at_end_only: true
 
 # FID Score Configuration (reduced)
 fid:
-  enabled: true
+  enabled: false
   compute_fid: true
   n_generated_samples: 500    # Fewer samples for speed
   n_real_samples: 1000       # Added to fix missing key error
@@ -38,7 +38,7 @@ save_visualizations: false
 
 # Generation Configuration (reduced)
 generation:
-  enabled: true
+  enabled: false
   methods: ["geodesic"]       # Only test best method
   n_samples_per_method: 50    # Fewer samples
   comprehensive_n_samples: 200
@@ -54,7 +54,7 @@ reconstruction:
 
 # Inference Pipeline Evaluation (reduced)
 inference:
-  enabled: true
+  enabled: false
   n_samples: 50               # Fewer samples
   analyze_geometry: false     # Skip expensive analysis
   compute_effective_dim: true

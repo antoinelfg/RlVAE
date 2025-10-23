@@ -9,15 +9,15 @@ frequency: 10  # Visualize every 10 epochs to reduce noise
 # Module toggles - carefully selected for three-stage pipeline
 enable_basic: true          # Essential: reconstruction, loss curves
 enable_manifold: true       # Critical for 2D latent space analysis
-enable_interactive: false   # Disable: too heavy for pipeline
+enable_interactive: true   # Disable: too heavy for pipeline
 enable_flow_analysis: true  # Important: flow diagnostics
 enable_dynamics: false     # Disable: redundant with manifold
-enable_geodesic_analysis: true  # NEW: geodesic trajectory visualization
+enable_geodesic_analysis: false  # NEW: geodesic trajectory visualization
 
 # Stage-specific frequency controls
 basic_frequency: 5          # Frequent: core metrics
 manifold_frequency: 10      # Moderate: 2D latent visualization
-interactive_frequency: 999  # Disabled
+interactive_frequency: 5  # Disabled
 flow_frequency: 15         # Less frequent: flow diagnostics
 dynamics_frequency: 999    # Disabled
 geodesic_frequency: 20     # NEW: geodesic visualization every 20 epochs

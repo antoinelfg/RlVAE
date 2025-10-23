@@ -11,7 +11,7 @@ run_at_end_only: true      # Only run comprehensive evaluation at the end
 
 # FID Score Configuration
 fid:
-  enabled: true
+  enabled: false
   compute_fid: true
   n_generated_samples: 1000  # Number of samples to generate for FID computation
   batch_size: 50            # Batch size for FID computation (memory management)
@@ -26,7 +26,7 @@ fid:
 
 # Generation Configuration  
 generation:
-  enabled: true
+  enabled: false
   methods: ["geodesic", "enhanced", "basic"]  # Sampling methods to evaluate
   n_samples_per_method: 100  # Samples per method for quick evaluation
   comprehensive_n_samples: 500  # Samples for comprehensive end-of-training evaluation
@@ -46,7 +46,7 @@ reconstruction:
 
 # Inference Pipeline Evaluation
 inference:
-  enabled: true
+  enabled: false
   n_samples: 100           # Samples for latent space analysis
   analyze_geometry: true   # Run geometric analysis of latent space
   compute_effective_dim: true  # Compute effective dimensionality
