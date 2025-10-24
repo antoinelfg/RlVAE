@@ -5,6 +5,7 @@ Baseline Riemannian RHMC Posterior - Simplified Version
 Minimal implementation without complex constraints or stability checks.
 """
 import math
+import os
 from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -85,16 +86,63 @@ def log_q_riem(
     """
     Compute log-density log N_Riem(z | μ, Σ) with Σ assumed SPD.
     """
-    Sigma = _symmetrize(Sigma)
-    chol, stabilized_sigma = _safe_cholesky(Sigma, min_eig)
-    diff = (z - mu).unsqueeze(-1)
+    # Accept inputs with arbitrary leading batch dims [..., D] and [..., D, D]
+    # Broadcast mu and Sigma to z's leading shape if necessary
+    D = z.shape[-1]
+    lead_z = z.shape[:-1]
+
+    # Make mu broadcastable to z
+    if mu.shape[:-1] != lead_z:
+        ndiff = len(lead_z) - (mu.dim() - 1)
+        if ndiff > 0:
+            mu = mu.view(*mu.shape[:-1], *([1] * ndiff), mu.shape[-1])
+        try:
+            mu = mu.expand(*lead_z, D)
+        except RuntimeError as e:
+            # Handle dimension mismatch by reshaping
+            if mu.dim() > len(lead_z) + 1:
+                # Too many dimensions, reshape to match
+                mu = mu.reshape(-1, D)
+                if mu.shape[0] == 1:
+                    mu = mu.expand(lead_z[0], D)
+                else:
+                    mu = mu[:lead_z[0]]
+            else:
+                raise e
+
+    # Make Sigma broadcastable to z
+    if Sigma.shape[:-2] != lead_z:
+        ndiffS = len(lead_z) - (Sigma.dim() - 2)
+        if ndiffS > 0:
+            Sigma = Sigma.view(*Sigma.shape[:-2], *([1] * ndiffS), *Sigma.shape[-2:])
+        try:
+            Sigma = Sigma.expand(*lead_z, D, D)
+        except RuntimeError as e:
+            # Handle dimension mismatch by reshaping
+            if Sigma.dim() > len(lead_z) + 2:
+                # Too many dimensions, reshape to match
+                Sigma = Sigma.reshape(-1, D, D)
+                if Sigma.shape[0] == 1:
+                    Sigma = Sigma.expand(lead_z[0], D, D)
+                else:
+                    Sigma = Sigma[:lead_z[0]]
+            else:
+                raise e
+
+    z_flat = z.reshape(-1, D)
+    mu_flat = mu.reshape(-1, D)
+    Sigma_flat = Sigma.reshape(-1, D, D)
+    Sigma_flat = _symmetrize(Sigma_flat)
+    chol, stabilized_sigma = _safe_cholesky(Sigma_flat, min_eig)
+    diff = (z_flat - mu_flat).unsqueeze(-1)
     diff32 = diff.float() if diff.dtype != chol.dtype else diff
     sol32 = torch.cholesky_solve(diff32, chol)
     quad_form = torch.einsum('bij,bij->b', diff32, sol32)
     log_det = 2.0 * torch.log(torch.diagonal(chol, dim1=-2, dim2=-1) + 1e-18).sum(dim=-1)
-    const = 0.5 * mu.shape[-1] * math.log(2 * math.pi)
+    const = 0.5 * D * math.log(2 * math.pi)
     out = -0.5 * quad_form - 0.5 * log_det - const
-    return out.to(mu.dtype)
+    out = out.to(mu.dtype)
+    return out.reshape(z.shape[:-1])
 
 
 def log_q_riem_from_G(
@@ -177,6 +225,17 @@ class RiemannianRHMCPosterior(nn.Module):
             print(f"[RHMC INIT] ⚠️ Unknown kl_prior_mode='{self.kl_prior_mode}', falling back to 'volume_gaussian'")
             self.kl_prior_mode = 'volume_gaussian'
         self.uniform_prior_log_norm = float(_cfg_get('uniform_prior_log_norm', 0.0))
+        self.volume_bias_weight = float(_cfg_get('volume_bias_weight', 1.0))
+        self.volume_grad_scale = float(_cfg_get('volume_grad_scale', 1.0))
+        # New stability/geometry options
+        self.soft_position_norm = float(_cfg_get('soft_position_norm', 5.5))
+        self.kinetic_grad_enabled = bool(_cfg_get('kinetic_grad_enabled', False))
+        self.kinetic_grad_weight = float(_cfg_get('kinetic_grad_weight', 1.0))
+        self.projection_step_scale = float(_cfg_get('projection_step_scale', 0.05))
+        self.initial_max_norm = float(_cfg_get('initial_max_norm', 1.5))
+        # Control how the volume force is computed (diagnostics/toggles)
+        self.volume_force_representation = str(_cfg_get('volume_force_representation', 'g')).lower()  # 'g' or 'ginv'
+        self.volume_force_sign = float(_cfg_get('volume_force_sign', 1.0))  # +1 or -1
 
         # Default return behaviour
         self.default_return_initial = True
@@ -259,9 +318,58 @@ class RiemannianRHMCPosterior(nn.Module):
             # Step 2: RHMC exploration (differentiable pushforward)
             z_final, traj_states = self._rhmc_exploration(z0, record_traj=traj_flag)
 
+            debug_mode = os.environ.get("RLVAE_DEBUG", "0") == "1"
+            if debug_mode:
+                with torch.no_grad():
+                    model = self._ctx['model']
+
+                    def _metric_stats(label: str, pts: torch.Tensor) -> None:
+                        try:
+                            if hasattr(model, "G"):
+                                G = _symmetrize(model.G(pts))
+                            elif hasattr(model, "G_inv"):
+                                G_inv = _symmetrize(model.G_inv(pts))
+                                G = torch.linalg.inv(G_inv.double()).to(G_inv.dtype)
+                            else:
+                                print(f"[RHMC DEBUG] {label}: model missing G/G_inv.")
+                                return
+                            eigvals = torch.linalg.eigvalsh(G.double())
+                            min_eig = eigvals.min().item()
+                            max_eig = eigvals.max().item()
+                            cond = float(max_eig / max(min_eig, 1e-12))
+                            logdet = torch.log(torch.clamp(eigvals, min=1e-18)).sum(-1).mean().item()
+                            print(
+                                f"[RHMC DEBUG] {label}: eig_min={min_eig:.3e}, eig_max={max_eig:.3e}, "
+                                f"cond={cond:.3e}, log|G|={logdet:.3e}"
+                            )
+                        except Exception as exc:
+                            print(f"[RHMC DEBUG] {label}: metric stats failed ({exc})")
+
+                    _metric_stats("G(z0)", z0.detach())
+                    _metric_stats("G(zK)", z_final.detach())
+
+                    diff_mu = torch.norm(z_final - mu, dim=-1)
+                    diff_start = torch.norm(z_final - z0, dim=-1)
+                    mu_norm = torch.norm(mu, dim=-1)
+                    print(
+                        "[RHMC DEBUG] latent drift: "
+                        f"||mu|| mean={mu_norm.mean().item():.3e}, "
+                        f"||zK-mu|| mean={diff_mu.mean().item():.3e} (max={diff_mu.max().item():.3e}), "
+                        f"||zK-z0|| mean={diff_start.mean().item():.3e} (max={diff_start.max().item():.3e})"
+                    )
+                    if traj_states:
+                        rho0 = traj_states[0]['rho']
+                        rhoS = traj_states[-1]['rho']
+                        rho0_norm = torch.norm(rho0, dim=-1)
+                        rhoS_norm = torch.norm(rhoS, dim=-1)
+                        print(
+                            "[RHMC DEBUG] momentum norms: "
+                            f"initial mean={rho0_norm.mean().item():.3e}, "
+                            f"final mean={rhoS_norm.mean().item():.3e}"
+                        )
+
             # TRACE: invariants and dtype diagnostics (first batch only)
             try:
-                import os
                 if os.environ.get('RLVAE_TRACE', '0') == '1' and not self._trace_printed:
                     z0_norm = torch.norm(z0, dim=1)
                     zK_norm = torch.norm(z_final, dim=1)
@@ -373,34 +481,116 @@ class RiemannianRHMCPosterior(nn.Module):
                 G_mu = self._ctx['model'].G(mu)
                 G_mu = _symmetrize(G_mu)
                 C, _ = _safe_cholesky(G_mu + self.eps_reg * I, self.min_cov_eig)
-                # 2) Sample two independent noises
-                xi1 = torch.randn_like(mu, dtype=C.dtype)
-                xi2 = torch.randn_like(mu, dtype=mu.dtype)
-                # 3) Solve C^T y = xi1  => y = C^{-T} xi1
+                # 2) Multi-try sampling
+                if C.ndim == 2:
+                    C = C.unsqueeze(0)
+                B, D = mu.shape
+                K = int(getattr(self, 'initial_n_candidates', 8))
+                K = max(1, K)
+                xi1 = torch.randn(B, K, D, device=mu.device, dtype=C.dtype)
+                xi2 = torch.randn(B, K, D, device=mu.device, dtype=mu.dtype)
+                Ct = C.transpose(-1, -2).unsqueeze(1)  # [B,1,D,D]
+                y = torch.linalg.solve_triangular(Ct, xi1.unsqueeze(-1), upper=True).squeeze(-1)
+                z_cand = mu.float().unsqueeze(1) + (alpha ** 0.5) * y + (self.eps_reg ** 0.5) * xi2.float()
+                with torch.no_grad():
+                    z_eval = z_cand.reshape(B * K, D)
+                    from .metric_utils import half_logdet_volume
+                    Gz = self._ctx['model'].G(z_eval)
+                    h = half_logdet_volume(Gz, 'g', jitter=self.eps_reg).reshape(B, K)
+                best = torch.argmax(h, dim=1)
+                z0 = z_cand[torch.arange(B, device=mu.device), best].to(mu.dtype)
+                # Optional radial cap on initial displacement
                 try:
-                    y = torch.linalg.solve_triangular(C.transpose(-1, -2), xi1, upper=True)
+                    max_norm = float(getattr(self, 'initial_max_norm', 0.0))
                 except Exception:
-                    # Fallback to generic solver
-                    y = torch.linalg.solve(C.transpose(-1, -2), xi1)
-                # 4) Compose z0
-                z032 = mu.float() + (alpha ** 0.5) * y + (self.eps_reg ** 0.5) * xi2.float()
-                z0 = z032.to(mu.dtype)
+                    max_norm = 0.0
+                if max_norm and max_norm > 0:
+                    delta = z0 - mu
+                    dnorm = torch.norm(delta, dim=-1, keepdim=True)
+                    scale = torch.clamp(max_norm / (dnorm + 1e-12), max=1.0)
+                    z0 = mu + scale * delta
                 # 5) Prepare Σ for return (for log q computations)
                 # Compute G^{-1}(μ) in float32 for stability
                 G_inv_mu = torch.linalg.inv(G_mu.float())
                 Sigma = self._make_covariance(G_inv_mu.to(mu.dtype), alpha)
+                # Optional manifold-aware acceptance: require non-decrease in log|G^{-1}|
+                z0 = self._initial_accept_volume(z0, mu)
                 return z0, Sigma
             else:
-                # Standard covariance-based path
+                # Standard covariance-based path with multi-try sampling
                 G_inv_mu = self._get_inverse_metric(mu)
                 Sigma = self._make_covariance(G_inv_mu, alpha)
                 chol, Sigma = _safe_cholesky(Sigma, self.min_cov_eig)
-                eps = torch.randn_like(mu, dtype=chol.dtype)
-                z032 = mu.float() + torch.bmm(chol, eps.unsqueeze(-1)).squeeze(-1)
-                z0 = z032.to(mu.dtype)
+                
+                B, D = mu.shape
+                K = int(getattr(self, 'initial_n_candidates', 8))
+                K = max(1, K)
+                
+                # Ensure chol has the correct shape [B, D, D]
+                if chol.ndim == 2:
+                    chol = chol.unsqueeze(0)  # [1, D, D] -> [B, D, D]
+                elif chol.ndim > 3:
+                    # Handle unexpected extra dimensions by reshaping
+                    # First, try to infer the correct dimensions
+                    total_elements = chol.numel()
+                    expected_elements = B * D * D
+                    if total_elements == expected_elements:
+                        chol = chol.reshape(B, D, D)
+                    else:
+                        # If dimensions don't match, try to infer from the tensor
+                        # Find the square root of the last two dimensions
+                        last_two_dims = chol.shape[-2:]
+                        if last_two_dims[0] == last_two_dims[1]:  # Square matrix
+                            inferred_D = last_two_dims[0]
+                            inferred_B = total_elements // (inferred_D * inferred_D)
+                            if inferred_B == B:
+                                chol = chol.reshape(B, inferred_D, inferred_D)
+                                D = inferred_D  # Update D to match the actual dimension
+                            else:
+                                # Fallback: use the last two dimensions as D x D
+                                chol = chol.reshape(-1, inferred_D, inferred_D)
+                                if chol.shape[0] != B:
+                                    chol = chol[:B] if chol.shape[0] > B else chol.expand(B, -1, -1)
+                                D = inferred_D
+                        else:
+                            raise RuntimeError(f"Cannot reshape chol tensor of shape {chol.shape} to [B={B}, D={D}, D={D}]. Total elements: {total_elements}, expected: {B * D * D}")
+                elif chol.shape[0] != B:
+                    # Handle batch size mismatch
+                    if chol.shape[0] == 1:
+                        chol = chol.expand(B, -1, -1)
+                    else:
+                        chol = chol[:B]  # Truncate or pad as needed
+                
+                eps = torch.randn(B, K, D, device=mu.device, dtype=chol.dtype)
+                
+                # Use batch matrix multiplication for efficiency
+                # chol: [B, D, D], eps: [B, K, D]
+                # We want: chol @ eps.transpose(-1, -2) -> [B, D, K]
+                # Then transpose to get [B, K, D]
+                transformed = torch.bmm(chol, eps.transpose(-1, -2)).transpose(-1, -2)  # [B, K, D]
+                z_cand = mu.float().unsqueeze(1) + transformed
+                # Evaluate 0.5 log|G^{-1}| at candidates and pick best per batch
+                with torch.enable_grad():
+                    z_eval = z_cand.reshape(B * K, D).detach().requires_grad_(False)
+                    Gz = self._ctx['model'].G(z_eval)
+                    from .metric_utils import half_logdet_volume
+                    h = half_logdet_volume(Gz, 'g', jitter=self.eps_reg).reshape(B, K)  # 0.5 log|G^{-1}|
+                best_idx = torch.argmax(h, dim=1)
+                z0 = z_cand[torch.arange(B, device=mu.device), best_idx]
+                z0 = z0.to(mu.dtype)
+                # Optional radial cap on initial displacement
+                try:
+                    max_norm = float(getattr(self, 'initial_max_norm', 0.0))
+                except Exception:
+                    max_norm = 0.0
+                if max_norm and max_norm > 0:
+                    delta = z0 - mu
+                    dnorm = torch.norm(delta, dim=-1, keepdim=True)
+                    scale = torch.clamp(max_norm / (dnorm + 1e-12), max=1.0)
+                    z0 = mu + scale * delta
+                z0 = self._initial_accept_volume(z0, mu)
                 return z0, Sigma
         except Exception as exc:
-            import os
             if getattr(self, '_ctx', None) and getattr(self._ctx.get('model', None), 'riemannian_strict', False) or os.environ.get('RLVAE_STRICT', '0') == '1':
                 raise RuntimeError(f"RiemannianRHMCPosterior: initial sampling failed under strict mode: {exc}")
             print(f"⚠️ Riemannian sampling failed: {exc}, using Gaussian fallback")
@@ -414,13 +604,48 @@ class RiemannianRHMCPosterior(nn.Module):
     
     def _make_covariance(self, G_inv: torch.Tensor, alpha: float) -> torch.Tensor:
         """
-        Build SPD covariance Σ = α·Ĝ^{-1} + εI with eigenvalue clipping for stability.
+        Build SPD covariance Σ = α·Ĝ^{-1} + εI with eigenvalue clipping and
+        optional normalization so that initial draws have a predictable radius.
         """
-        Sigma = alpha * _symmetrize(G_inv)
-        d = Sigma.shape[-1]
-        eye = torch.eye(d, device=Sigma.device, dtype=Sigma.dtype).unsqueeze(0)
-        Sigma = Sigma + self.eps_reg * eye
-        return self._stabilize_spd(Sigma, self.min_cov_eig)
+        Ginv = _symmetrize(G_inv)
+        if Ginv.ndim == 2:
+            Ginv = Ginv.unsqueeze(0)
+        d = Ginv.shape[-1]
+        # Clamp spectrum for robustness
+        try:
+            evals, evecs = torch.linalg.eigh(Ginv.float())
+            evals = torch.clamp(evals, min=self.min_cov_eig)
+            # Optional normalization by geometric mean so det(Ginv_norm)=1
+            mode = str(getattr(self, 'sigma_normalization_mode', 'geomean')).lower()
+            if mode == 'geomean':
+                gm = torch.exp(torch.log(torch.clamp(evals, min=1e-12)).mean(dim=-1, keepdim=True))
+                evals = evals / gm
+            elif mode == 'trace':
+                tr = evals.sum(dim=-1, keepdim=True)
+                evals = d * evals / torch.clamp(tr, min=1e-12)
+            # Recompose normalized precision
+            Ginv_norm = (evecs @ torch.diag_embed(evals) @ evecs.transpose(-1, -2)).to(Ginv.dtype)
+        except Exception:
+            Ginv_norm = Ginv
+
+        eye = torch.eye(d, device=Ginv.device, dtype=Ginv.dtype).unsqueeze(0)
+
+        # Adapt alpha to hit a target Euclidean radius for initial draws
+        target_r = float(getattr(self, 'initial_target_radius', 1.0))
+        if target_r > 0:
+            try:
+                tr_ginv = torch.einsum('bii->b', Ginv_norm.float()).unsqueeze(-1)
+                # E||δ||^2 ≈ trace(Sigma) = alpha*trace(Ginv_norm)+ d*eps
+                alpha_eff = ((target_r ** 2) - d * self.eps_reg) / torch.clamp(tr_ginv, min=1e-12)
+                # Keep batch-shapes aligned
+                alpha_eff = alpha_eff.clamp(min=1e-6).to(Ginv_norm.dtype)
+                Sigma = alpha_eff.unsqueeze(-1).unsqueeze(-1) * Ginv_norm + self.eps_reg * eye
+            except Exception:
+                Sigma = alpha * Ginv_norm + self.eps_reg * eye
+        else:
+            Sigma = alpha * Ginv_norm + self.eps_reg * eye
+
+        return self._stabilize_spd(_symmetrize(Sigma), self.min_cov_eig)
 
     def _resolve_alpha(self) -> float:
         """
@@ -434,7 +659,6 @@ class RiemannianRHMCPosterior(nn.Module):
                 if math.isfinite(alpha) and alpha > 0:
                     # TRACE: log source of alpha
                     try:
-                        import os
                         if os.environ.get('RLVAE_TRACE', '0') == '1' and not self._trace_printed:
                             print(f"TRACE OVERRIDE α source=model.rhmc_alpha -> {alpha}")
                     except Exception:
@@ -449,7 +673,6 @@ class RiemannianRHMCPosterior(nn.Module):
                 alpha = float(model.get_current_posterior_alpha(current_epoch))
                 if math.isfinite(alpha) and alpha > 0:
                     try:
-                        import os
                         if os.environ.get('RLVAE_TRACE', '0') == '1' and not self._trace_printed:
                             print(f"TRACE OVERRIDE α source=get_current_posterior_alpha -> {alpha}")
                     except Exception:
@@ -471,7 +694,6 @@ class RiemannianRHMCPosterior(nn.Module):
                 alpha = float(cfg_alpha)
                 if math.isfinite(alpha) and alpha > 0:
                     try:
-                        import os
                         if os.environ.get('RLVAE_TRACE', '0') == '1' and not self._trace_printed:
                             print(f"TRACE OVERRIDE α source=config.rhmc_alpha -> {alpha}")
                     except Exception:
@@ -495,6 +717,31 @@ class RiemannianRHMCPosterior(nn.Module):
                 continue
         # Final safety: small positive epsilon
         return 1e-3
+
+    def _initial_accept_volume(self, z0: torch.Tensor, mu: torch.Tensor) -> torch.Tensor:
+        try:
+            tol = float(getattr(self, 'initial_volume_tolerance', 0.0))
+            kmax = int(getattr(self, 'initial_max_retries', 3))
+            if tol <= 0 and kmax <= 0:
+                return z0
+            from .metric_utils import half_logdet_volume
+            G_mu = self._ctx['model'].G(mu)
+            h_mu = half_logdet_volume(G_mu, 'g', jitter=self.eps_reg)  # 0.5 log|G^{-1}(mu)|
+            z = z0
+            for _ in range(max(0, kmax)):
+                z_req = z.clone().detach().requires_grad_(True)
+                Gz = self._ctx['model'].G(z_req)
+                hz = half_logdet_volume(Gz, 'g', jitter=self.eps_reg)
+                if (hz >= h_mu - tol).all():
+                    return z_req.detach()
+                grad_h, = torch.autograd.grad(hz.sum(), z_req, retain_graph=False, create_graph=False, allow_unused=True)
+                if grad_h is None:
+                    break
+                step = float(getattr(self, 'projection_step_scale', 0.05))
+                z = (z_req + step * grad_h).detach()
+            return z
+        except Exception:
+            return z0
 
     def _get_inverse_metric(self, pts: torch.Tensor) -> torch.Tensor:
         """Fetch Ĝ^{-1}(pts) with symmetry and fallback safeguards."""
@@ -609,6 +856,18 @@ class RiemannianRHMCPosterior(nn.Module):
             # Half step for momentum
             grad_U = self._compute_potential_gradient(z)
             grad_U = torch.nan_to_num(grad_U, nan=0.0, posinf=0.0, neginf=0.0)
+            # Optional kinetic position-dependent gradient term
+            if self.kinetic_grad_enabled:
+                try:
+                    z_req = z
+                    G_inv_k = self._get_inverse_metric(z_req)
+                    s = torch.einsum('bi,bij,bj->b', rho, G_inv_k, rho)
+                    kin_grad = torch.autograd.grad(s.sum(), z_req, retain_graph=True, create_graph=False, allow_unused=True)[0]
+                    if kin_grad is None:
+                        kin_grad = torch.zeros_like(z_req)
+                    grad_U = grad_U + self.kinetic_grad_weight * kin_grad
+                except Exception:
+                    pass
             rho = rho - 0.5 * step_size * grad_U
             rho = torch.nan_to_num(rho, nan=0.0, posinf=0.0, neginf=0.0)
             
@@ -626,8 +885,39 @@ class RiemannianRHMCPosterior(nn.Module):
             velocity = torch.where(v_norm > self.max_velocity_norm, velocity * (self.max_velocity_norm / (v_norm + 1e-12)), velocity)
             # Adaptive effective step to bound position change
             eff_step = torch.clamp(self.max_position_step / (v_norm + 1e-12), max=1.0) * step_size
+            # Geometry-aware scaling by stiffness: scale by sqrt(min_eig(G^{-1})) = 1/sqrt(lambda_max(G))
+            try:
+                evals_Ginv = torch.linalg.eigvalsh(G_inv_reg.float())
+                min_eig_Ginv = evals_Ginv.min(dim=-1, keepdim=True).values.to(z.dtype)
+                stiff_scale = torch.sqrt(torch.clamp(min_eig_Ginv, min=1e-6))
+                eff_step = eff_step * stiff_scale
+            except Exception:
+                pass
             z = z + eff_step * velocity
             z = torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
+            # Soft braking on momentum when approaching norm boundary
+            soft_limit = float(getattr(self, "soft_position_norm", 5.5))
+            if soft_limit > 0:
+                z_norm_soft = torch.norm(z, dim=-1, keepdim=True)
+                soft_mask = z_norm_soft > soft_limit
+                if soft_mask.any():
+                    scale = torch.tanh(z_norm_soft / soft_limit)
+                    rho = rho * scale
+            # Optional single-step projection toward high log|G^{-1}|
+            try:
+                tau = float(self.projection_step_scale) * float(step_size)
+                if tau > 0:
+                    z_req = z.clone().detach().requires_grad_(True)
+                    # grad log|G^{-1}| = -2 * grad(half_logdet_volume(G, 'g'))
+                    G_proj = self._ctx['model'].G(z_req)
+                    from .metric_utils import half_logdet_volume
+                    vol_g = half_logdet_volume(G_proj, 'g', jitter=self.eps_reg)
+                    grad_vol_g = torch.autograd.grad(vol_g.sum(), z_req, retain_graph=False, create_graph=False, allow_unused=True)[0]
+                    if grad_vol_g is not None:
+                        grad_logdet_ginv = -2.0 * grad_vol_g
+                        z = (z_req + tau * grad_logdet_ginv).detach()
+            except Exception:
+                pass
             # Clamp absolute position norm only if enabled (> 0).
             # Hard clamping here was causing samples to accumulate on a
             # spherical shell (ring) in PCA plots. Allow disabling by
@@ -650,6 +940,17 @@ class RiemannianRHMCPosterior(nn.Module):
             # Half step for momentum
             grad_U = self._compute_potential_gradient(z)
             grad_U = torch.nan_to_num(grad_U, nan=0.0, posinf=0.0, neginf=0.0)
+            if self.kinetic_grad_enabled:
+                try:
+                    z_req = z
+                    G_inv_k = self._get_inverse_metric(z_req)
+                    s = torch.einsum('bi,bij,bj->b', rho, G_inv_k, rho)
+                    kin_grad = torch.autograd.grad(s.sum(), z_req, retain_graph=True, create_graph=False, allow_unused=True)[0]
+                    if kin_grad is None:
+                        kin_grad = torch.zeros_like(z_req)
+                    grad_U = grad_U + self.kinetic_grad_weight * kin_grad
+                except Exception:
+                    pass
             rho = rho - 0.5 * step_size * grad_U
             rho = torch.nan_to_num(rho, nan=0.0, posinf=0.0, neginf=0.0)
             
@@ -686,7 +987,6 @@ class RiemannianRHMCPosterior(nn.Module):
                 Sigma = self._make_covariance(G_inv_mu, alpha)
             return log_q_riem(z, mu, Sigma, min_eig=self.min_cov_eig)
         except Exception as exc:
-            import os
             if getattr(self, '_ctx', None) and getattr(self._ctx.get('model', None), 'riemannian_strict', False) or os.environ.get('RLVAE_STRICT', '0') == '1':
                 raise RuntimeError(f"RiemannianRHMCPosterior: log q_Riem failed under strict mode: {exc}")
             print(f"⚠️ Log q_Riem computation failed: {exc}, using isotropic fallback")
@@ -734,7 +1034,7 @@ class RiemannianRHMCPosterior(nn.Module):
             d = z.shape[-1]
             G_z_cast = G_z32.to(z.dtype)
             quad = torch.einsum('bi,bij,bj->b', z, G_z_cast, z)
-            log_det_term = (-half_logdet).to(z.dtype)
+            log_det_term = (-half_logdet * self.volume_bias_weight).to(z.dtype)
             gaussian_term = -0.5 * quad.to(z.dtype) - 0.5 * float(d) * math.log(2 * math.pi)
 
             mode = getattr(self, 'kl_prior_mode', 'volume_gaussian')
@@ -764,7 +1064,8 @@ class RiemannianRHMCPosterior(nn.Module):
     
     def _compute_potential_gradient(self, z: torch.Tensor) -> torch.Tensor:
         """
-        ∇U(z) with volume correction: U(z) = 0.5 ||z||^2 - 0.5 log det G(z)
+        ∇U(z) with volume correction designed to attract to HIGH log|G^{-1}| regions.
+        We minimize: U(z) = 0.5||z||^2 - w · 0.5 log det G^{-1}(z) = 0.5||z||^2 + w · 0.5 log det G(z).
 
         Robust to cases where G does not depend on z (allow_unused=True).
         Falls back to zero volume-gradient in that case.
@@ -779,21 +1080,30 @@ class RiemannianRHMCPosterior(nn.Module):
         # Base grad of 0.5 ||z||^2 is simply z
         base = z
 
-        # Volume term: ∇_z [ -0.5 log det G(z) ]
+        # Volume term: attract to high log|G^{-1}|. Two equivalent ways:
+        #  - using G:   +∇(0.5 log|G|) with positive sign in grad_U and descent will reduce log|G|
+        #  - using G⁻¹: -∇(0.5 log|G⁻¹|).
+        #  Controlled by self.volume_force_representation + self.volume_force_sign for quick A/B.
         try:
-            G = self._ctx['model'].G(z)
-            G32 = G.float() if G.dtype in (torch.float16, torch.bfloat16) else G
-            vol_term = half_logdet_volume(G32, 'g', jitter=self.eps_reg)
-            grad_vol, = torch.autograd.grad(
-                outputs=vol_term.sum(),
-                inputs=z,
-                retain_graph=True,        # used twice per step
-                create_graph=True,        # higher-order safe
-                allow_unused=True         # if G is constant wrt z
-            )
+            rep = getattr(self, 'volume_force_representation', 'g')
+            rep = rep if rep in ('g', 'ginv') else 'g'
+            if rep == 'g':
+                G = self._ctx['model'].G(z)
+                G32 = G.float() if G.dtype in (torch.float16, torch.bfloat16) else G
+                target = -half_logdet_volume(G32, 'g', jitter=self.eps_reg)  # +0.5 log|G|
+                grad_vol, = torch.autograd.grad(target.sum(), z, retain_graph=True, create_graph=True, allow_unused=True)
+            else:
+                Ginv = self._get_inverse_metric(z)
+                Ginv32 = Ginv.float() if Ginv.dtype in (torch.float16, torch.bfloat16) else Ginv
+                target = half_logdet_volume(Ginv32, 'ginv', jitter=self.eps_reg)  # +0.5 log|G^{-1}|
+                # We want to minimize -0.5 log|G^{-1}|, so grad contribution is -∇target
+                grad_vol_raw, = torch.autograd.grad(target.sum(), z, retain_graph=True, create_graph=True, allow_unused=True)
+                grad_vol = -grad_vol_raw
             if grad_vol is None:
                 grad_vol = torch.zeros_like(z)
-            grad = base + grad_vol
+            sign = float(getattr(self, 'volume_force_sign', 1.0))
+            scale = sign * float(getattr(self, 'volume_grad_scale', 1.0)) * float(getattr(self, 'volume_bias_weight', 1.0))
+            grad = base + scale * grad_vol
             grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
             return grad.to(z.dtype)
         except Exception:

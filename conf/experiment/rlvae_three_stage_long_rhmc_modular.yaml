@@ -35,7 +35,9 @@ stage_c:
   kl_use_metric_normalization: false
   kl_metric_norm_mode: none
   mu_l2_weight: 0.5
-  kl_prior_mode: volume_gaussian
+  kl_prior_mode: uniform
+  volume_bias_weight: 1.6
+  volume_grad_scale: 2.2
   latent_dim: 2
   component_validation:
     validate_encoder_compatibility: true
@@ -50,10 +52,15 @@ model:
   latent_dim: 2
   posterior:
     type: riemannian_rhmc
-    rhmc_steps: 4
-    rhmc_step_size: 0.02
-    rhmc_alpha: 0.2
-    rhmc_eps_reg: 1e-4
+    rhmc_steps: 10
+    rhmc_step_size: 0.008
+    rhmc_alpha: 3
+    rhmc_eps_reg: 3e-6
+    soft_position_norm: 5.5
+    kinetic_grad_enabled: true
+    kinetic_grad_weight: 1.0
+    projection_step_scale: 0.05
+    initial_max_norm: 1.5
     eps_regularization: 1e-6
     max_momentum_norm: 3.0
     max_velocity_norm: 1.0
@@ -67,16 +74,23 @@ model:
   # Disable mu alignment to prevent normalization issues
   mu_alignment_enabled: false
   posterior_type: riemannian_rhmc
-  rhmc_steps: 4
-  rhmc_step_size: 0.02
-  rhmc_alpha: 0.2
-  rhmc_eps_reg: 1e-4
+  rhmc_steps: 10
+  rhmc_step_size: 0.008
+  rhmc_alpha: 3
+  rhmc_eps_reg: 3e-6
+  soft_position_norm: 5.5
+  kinetic_grad_enabled: true
+  kinetic_grad_weight: 1.0
+  projection_step_scale: 0.05
+  initial_max_norm: 1.5
   kl_use_metric_normalization: false
   kl_metric_norm_mode: none
   use_curvature_correction: true
   kl_metric_eval_point: z
   mu_l2_weight: 0.5
-  kl_prior_mode: volume_gaussian
+  kl_prior_mode: uniform
+  volume_bias_weight: 1.6
+  volume_grad_scale: 2.2
   sampling:
     method: posterior_hmc
   pretrained:
@@ -88,16 +102,16 @@ training:
     latent_dim: 2
     posterior:
       type: riemannian_rhmc
-      rhmc_steps: 4
-      rhmc_step_size: 0.02
-      rhmc_alpha: 0.2
-      rhmc_eps_reg: 1e-4
+      rhmc_steps: 10
+      rhmc_step_size: 0.008
+      rhmc_alpha: 3
+      rhmc_eps_reg: 3e-6
     posterior_type: riemannian_rhmc
     kl_metric_eval_point: z
     kl_use_metric_normalization: false
     kl_metric_norm_mode: none
     mu_l2_weight: 0.5
-    kl_prior_mode: volume_gaussian
+    kl_prior_mode: uniform
 visualization:
   level: three_stage_optimized
 wandb:

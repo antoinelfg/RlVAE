@@ -124,24 +124,31 @@ settings:
       riemannian_beta: 1.0
       flow_weight: 1.0
       loop_penalty_weight: 0.0
-      mu_l2_weight: 0
-      kl_prior_mode: volume_gaussian
+      mu_l2_weight: 0.5
+      kl_prior_mode: uniform
       kl_metric_eval_point: mu
       kl_use_metric_normalization: true
       kl_metric_norm_mode: geomean
+      volume_bias_weight: 3.
+      volume_grad_scale: 3.
       use_riemannian_kl: true
 
     posterior:
       type: riemannian_rhmc
-      rhmc_steps: 2
-      rhmc_step_size: 0.001
-      rhmc_alpha: 0.05
-      rhmc_eps_reg: 1.0e-6
+      rhmc_steps: 0
+      rhmc_step_size: 0.008
+      rhmc_alpha: 0.01
+      rhmc_eps_reg: 3.0e-6
+      soft_position_norm: 5.5
+      kinetic_grad_enabled: true
+      kinetic_grad_weight: 1.0
+      projection_step_scale: 0.05
+      initial_max_norm: 1.5
       max_momentum_norm: 3.0
       max_velocity_norm: 1.0
       max_position_step: 0.5
       max_position_norm: 0.0
-      posterior_local_alpha: 0.5
+      posterior_local_alpha: 0.01
       posterior_alpha_ramp_enabled: false
       maha_clip: 20.0
       cov_norm_mode: geomean
@@ -246,7 +253,7 @@ settings:
         lr: 1.0e-4
         riemannian_beta: 1.0
         posterior:
-          rhmc_alpha: 1.0
+          rhmc_alpha: 0.01
           max_position_norm: 0.0
         allow_metric_updates: false
         update_metric_during_training: false

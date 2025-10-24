@@ -346,7 +346,13 @@ class VisualizationManager:
             basic.create_enhanced_kl_visualization(x_sample, epoch)
         except Exception as e:
             print(f"⚠️ Enhanced KL visualization failed: {e}")
-        
+
+        # Latent metric dashboard (new multi-panel summary)
+        try:
+            basic.create_latent_metric_dashboard(x_sample, epoch)
+        except Exception as e:
+            print(f"⚠️ Latent metric dashboard failed: {e}")
+
         # RHMC trajectory overlay (new dedicated plot)
         try:
             basic.create_rhmc_trajectory_overlay(x_sample, epoch)

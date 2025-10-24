@@ -1437,6 +1437,227 @@ Timesteps: {n_obs}"""
             import traceback
             traceback.print_exc()
 
+    def create_latent_metric_dashboard(
+        self,
+        x_sample: torch.Tensor,
+        epoch: int,
+        grid_resolution: int = 200,
+    ) -> None:
+        """
+        Generate a 2×2 dashboard summarising posterior/prior samples, encoder means,
+        and the log-determinant geometry (latent_dim == 2 assumed).
+        """
+        print(f"📊 Creating latent metric dashboard (Epoch {epoch})")
+
+        try:
+            from sklearn.decomposition import PCA
+        except Exception:
+            print("⚠️ sklearn.decomposition.PCA unavailable; skipping dashboard.")
+            return
+
+        try:
+            self.model.eval()
+            device = self.device
+            latent_dim = int(getattr(self.model, "latent_dim", x_sample.shape[-1]))
+
+            with torch.no_grad():
+                result = self.model_forward(x_sample)
+
+            # Extract encoder outputs
+            if isinstance(result, dict):
+                z_posterior = result.get('latent_samples', result.get('z', None))
+                mu_aligned = result.get('mu_aligned', result.get('mu', None))
+            else:
+                z_posterior = getattr(result, 'latent_samples', getattr(result, 'z', None))
+                mu_aligned = getattr(result, 'mu_aligned', getattr(result, 'mu', None))
+
+            if mu_aligned is None:
+                if z_posterior is not None:
+                    mu_aligned = z_posterior
+                    print("⚠️ Using forward latent_samples as μ for dashboard (mu_aligned missing)")
+                else:
+                    enc_out = self.model.encoder(x_sample[:, 0])
+                    if hasattr(enc_out, 'embedding'):
+                        mu_aligned = enc_out.embedding.unsqueeze(1).expand(-1, x_sample.shape[1], -1)
+                    elif hasattr(enc_out, 'mu'):
+                        mu_aligned = enc_out.mu.unsqueeze(1).expand(-1, x_sample.shape[1], -1)
+                    else:
+                        print("⚠️ No encoder means available; skipping dashboard.")
+                        return
+            if z_posterior is None:
+                z_posterior = mu_aligned
+
+            # Flatten tensors
+            mu_aligned_flat = mu_aligned.reshape(-1, mu_aligned.shape[-1]).detach().to(device)
+            z_posterior_flat = z_posterior.reshape(-1, z_posterior.shape[-1]).detach().to(device)
+            z_encoder_flat = mu_aligned_flat.clone()
+
+            # Obtain RHMC posterior samples for context (requires gradients enabled)
+            posterior_samples = None
+            encoder_log_var = None
+            try:
+                encoder_out = self.model.encoder(x_sample[:, 0])
+                if hasattr(encoder_out, 'log_covariance'):
+                    encoder_log_var = encoder_out.log_covariance.detach()
+                elif hasattr(encoder_out, 'log_var'):
+                    encoder_log_var = encoder_out.log_var.detach()
+                else:
+                    encoder_log_var = torch.full_like(mu_aligned_flat, -1.0)
+
+                if hasattr(self.model, 'posterior_sampler_rhmc'):
+                    with torch.enable_grad():
+                        mu_grad = mu_aligned_flat.clone().detach().requires_grad_(True)
+                        posterior_samples = self.model.posterior_sampler_rhmc.sample_riemannian_rhmc_posterior(
+                            mu=mu_grad,
+                            log_var=encoder_log_var,
+                            return_log_prob=False,
+                            return_initial=False,
+                            return_traj=False,
+                        )
+                        posterior_samples = posterior_samples.detach()
+                if posterior_samples is None:
+                    posterior_samples = z_posterior_flat
+            except Exception as exc:
+                print(f"⚠️ RHMC posterior sampling unavailable ({exc}); using encoder means.")
+                posterior_samples = z_posterior_flat
+
+            posterior_samples = posterior_samples.reshape(-1, latent_dim)
+
+            # Prior samples via RHMC prior sampler (falls back to normal if unavailable)
+            try:
+                from src.models.samplers.hmc_sampler import RHVAEVolumeElementHMCSampler
+                rhmc_sampler = RHVAEVolumeElementHMCSampler(
+                    model=self.model,
+                    mcmc_steps_nbr=200,
+                    n_lf=30,
+                    eps_lf=0.001,
+                    beta_zero=1.0,
+                )
+                with torch.no_grad():
+                    z_prior = rhmc_sampler.sample(n_samples=posterior_samples.shape[0])
+                z_prior = z_prior.to(device)
+            except Exception as exc:
+                print(f"⚠️ RHMC prior sampler unavailable ({exc}); using Gaussian fallback.")
+                z_prior = torch.randn_like(posterior_samples)
+
+            # Collect centroids if available
+            centroids_tensor = getattr(self.model, 'centroids_tens', None)
+            if centroids_tensor is not None:
+                centroids_flat = centroids_tensor.detach().to(device)
+            else:
+                centroids_flat = torch.empty(0, latent_dim, device=device)
+
+            # Determine projection to 2D (PCA on combined data)
+            combined = torch.cat([
+                posterior_samples,
+                z_prior,
+                mu_aligned_flat,
+                centroids_flat if centroids_flat.numel() > 0 else torch.empty(0, latent_dim, device=device),
+            ], dim=0).cpu().numpy()
+            if combined.shape[0] < 2:
+                print("⚠️ Not enough points for PCA projection; skipping dashboard.")
+                return
+            pca = PCA(n_components=2)
+            pca.fit(combined)
+
+            def project(tensor: torch.Tensor) -> np.ndarray:
+                if tensor.numel() == 0:
+                    return np.zeros((0, 2), dtype=np.float32)
+                return pca.transform(tensor.detach().cpu().numpy())
+
+            posterior_2d = project(posterior_samples)
+            prior_2d = project(z_prior)
+            mu_2d = project(mu_aligned_flat)
+            centroids_2d = project(centroids_flat) if centroids_flat.numel() > 0 else np.zeros((0, 2))
+
+            # Grid for log|G| background
+            metric = getattr(self.model, 'modular_metric', None)
+            if metric is None:
+                metric = getattr(self.model, 'metric_tensor', None)
+            if metric is None:
+                print("⚠️ Metric tensor not available; skipping dashboard.")
+                return
+
+            all_points = np.vstack([posterior_2d, prior_2d, mu_2d]) if prior_2d.size > 0 else posterior_2d
+            if all_points.size == 0:
+                print("⚠️ No points to visualise; skipping dashboard.")
+                return
+            pad = 0.75
+            x_min, x_max = all_points[:, 0].min() - pad, all_points[:, 0].max() + pad
+            y_min, y_max = all_points[:, 1].min() - pad, all_points[:, 1].max() + pad
+
+            xs = np.linspace(x_min, x_max, grid_resolution)
+            ys = np.linspace(y_min, y_max, grid_resolution)
+            grid_x, grid_y = np.meshgrid(xs, ys)
+            grid_points = np.stack([grid_x.ravel(), grid_y.ravel()], axis=-1)
+            # Map grid points back into latent space via inverse PCA transform
+            comp = pca.components_
+            mean_vec = pca.mean_
+            latent_grid_np = grid_points @ comp + mean_vec
+            grid_torch = torch.from_numpy(latent_grid_np).to(device=device, dtype=mu_aligned_flat.dtype)
+
+            with torch.no_grad():
+                if hasattr(metric, 'compute_log_det_metric'):
+                    logdet = metric.compute_log_det_metric(grid_torch).detach().cpu().numpy()
+                else:
+                    G = metric.compute_metric(grid_torch)
+                    logdet = torch.logdet(G.float()).detach().cpu().numpy()
+            logdet_grid = logdet.reshape(grid_x.shape)
+
+            # Build figure
+            fig, axes = plt.subplots(2, 2, figsize=(14, 12), sharex=True, sharey=True)
+            cmap = plt.get_cmap('viridis')
+
+            logdet_inv_grid = -logdet_grid
+            heat = axes[0, 0].contourf(grid_x, grid_y, logdet_inv_grid, levels=60, cmap=cmap)
+            axes[0, 0].set_title('Log|G^{-1}(z)| Field')
+            fig.colorbar(heat, ax=axes[0, 0], label='log|det G^{-1}(z)|')
+
+            def _overlay(ax, title, points, color, label):
+                ax.contourf(grid_x, grid_y, logdet_inv_grid, levels=60, cmap=cmap, alpha=0.75)
+                if points.shape[0] > 0:
+                    ax.scatter(points[:, 0], points[:, 1], c=color, s=12, alpha=0.7, label=label)
+                ax.set_title(title)
+                ax.grid(True, alpha=0.2)
+                ax.legend(loc='upper right')
+
+            _overlay(axes[0, 1], 'Posterior Samples', posterior_2d, 'tab:blue', 'Posterior')
+            _overlay(axes[1, 0], 'Prior Samples', prior_2d, 'tab:red', 'Prior')
+
+            axes[1, 1].contourf(grid_x, grid_y, logdet_inv_grid, levels=60, cmap=cmap, alpha=0.75)
+            if mu_2d.shape[0] > 0:
+                axes[1, 1].scatter(mu_2d[:, 0], mu_2d[:, 1], marker='x', s=35, c='tab:green', alpha=0.8, label='Encoder μ')
+            if centroids_2d.shape[0] > 0:
+                axes[1, 1].scatter(centroids_2d[:, 0], centroids_2d[:, 1], s=70, edgecolors='black',
+                                   facecolors='cyan', alpha=0.9, linewidth=1.5, label='Centroids')
+            axes[1, 1].set_title('Encoder Centers & Centroids')
+            axes[1, 1].grid(True, alpha=0.2)
+            axes[1, 1].legend(loc='upper right')
+
+            for ax in axes.flat:
+                ax.set_xlabel('Component 1')
+                ax.set_ylabel('Component 2')
+
+            fig.suptitle(f'Latent Metric Dashboard (Epoch {epoch})', fontsize=14, fontweight='bold')
+            plt.tight_layout()
+
+            filename = f'latent_metric_dashboard_epoch_{epoch:04d}.png'
+            saved_file = self._safe_save_plt_figure(filename, dpi=200, bbox_inches='tight')
+            if self.should_log_to_wandb() and saved_file:
+                wandb.log({
+                    "latent_dashboard": wandb.Image(
+                        saved_file,
+                        caption=f"Latent Metric Dashboard (Epoch {epoch})"
+                    )
+                })
+            plt.close(fig)
+            print(f"✅ Latent metric dashboard saved: {filename}")
+
+        except Exception as e:
+            print(f"⚠️ Latent metric dashboard failed: {e}")
+            import traceback
+            traceback.print_exc()
+
     def create_rhmc_trajectory_overlay(
         self,
         x_sample: torch.Tensor,

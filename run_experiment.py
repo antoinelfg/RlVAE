@@ -3440,7 +3440,7 @@ class ExperimentRunner:
                     except Exception:
                         return fallback_value
 
-                rh_steps = _posterior_get('rhmc_steps', getattr(self.config.model, 'rhmc_steps', 4))
+                rh_steps = _posterior_get('rhmc_steps', getattr(self.config.model, 'rhmc_steps', 0))
                 try:
                     rh_steps = int(rh_steps)
                 except Exception:

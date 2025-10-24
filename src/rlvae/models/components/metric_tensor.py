@@ -48,7 +48,8 @@ def _cholesky_spd(M: torch.Tensor, jitter: float = 1e-6, max_tries: int = 6) -> 
     # Ensure symmetry
     M = 0.5 * (M + M.transpose(-1, -2))
     
-    current_jitter = jitter
+    base_jitter = float(max(jitter, 0.0))
+    current_jitter = 0.0
     for attempt in range(max_tries):
         try:
             # Add jitter to diagonal
@@ -68,7 +69,10 @@ def _cholesky_spd(M: torch.Tensor, jitter: float = 1e-6, max_tries: int = 6) -> 
             pass
             
         # Increase jitter for next attempt
-        current_jitter *= 10.0
+        if current_jitter == 0.0:
+            current_jitter = base_jitter if base_jitter > 0 else 1e-6
+        else:
+            current_jitter *= 10.0
     
     # Final fallback with large jitter
     M_final = M + 1e-3 * torch.eye(d, device=device, dtype=dtype).unsqueeze(0)
@@ -409,10 +413,17 @@ class MetricTensor(nn.Module):
             raise ValueError(f"Metric matrix shape {metric_matrices.shape[1:]} != ({self.latent_dim}, {self.latent_dim})")
         
         # Load parameters using proper buffer registration
-        self.register_buffer('centroids', centroids.to(self.device))
+        C = centroids.to(self.device)
+        # Auto-fix common shape issues: expect [K, D]. If we get [D, K], transpose.
+        if C.dim() == 2 and C.shape[1] != self.latent_dim and C.shape[0] == self.latent_dim:
+            C = C.transpose(0, 1)
+        self.register_buffer('centroids', C)
         
         # Enforce SPD atoms before registering
         M = metric_matrices.to(self.device)
+        # Expect [K, D, D]. If we get [D, D, K], permute.
+        if M.dim() == 3 and M.shape[0] == self.latent_dim and M.shape[1] == self.latent_dim and M.shape[2] != self.latent_dim:
+            M = M.permute(2, 0, 1)
         M = 0.5 * (M + M.transpose(-1, -2))
         diag = torch.diagonal(M, dim1=-2, dim2=-1)
         diag = torch.nn.functional.softplus(diag) + 1e-6
@@ -451,8 +462,10 @@ class MetricTensor(nn.Module):
             raise RuntimeError("Metric tensor not loaded. Call load_pretrained() first.")
 
         B, d = z.shape[0], self.latent_dim
-        centroids = self.centroids.to(device=z.device, dtype=z.dtype)
-        atoms_raw = self.metric_matrices.to(dtype=z.dtype)
+        device = z.device
+        z64 = z.to(device=device, dtype=torch.float64)
+        centroids = self.centroids.to(device=device, dtype=torch.float64)
+        atoms_raw = self.metric_matrices.to(device=device, dtype=torch.float64)
 
         if self.weight_kernel == 'isotropic':
             weight_atoms = atoms_raw
@@ -461,9 +474,13 @@ class MetricTensor(nn.Module):
         else:
             raise ValueError(f"Unknown weight kernel '{self.weight_kernel}'")
 
-        temperature = self.temperature.to(dtype=z.dtype) if hasattr(self, 'temperature') else torch.tensor(0.2, device=z.device, dtype=z.dtype)
+        temperature = (
+            self.temperature.to(device=device, dtype=torch.float64)
+            if hasattr(self, 'temperature')
+            else torch.tensor(0.2, device=device, dtype=torch.float64)
+        )
         weights = compute_metric_weights(
-            z,
+            z64,
             centroids,
             weight_atoms,
             temperature,
@@ -476,13 +493,17 @@ class MetricTensor(nn.Module):
         G_inv_mix = torch.einsum('bk,kij->bij', weights, atoms_raw)
         G_inv_mix = 0.5 * (G_inv_mix + G_inv_mix.transpose(-1, -2))
 
-        I = torch.eye(d, device=z.device, dtype=z.dtype).unsqueeze(0)
-        lambda_reg = self.regularization.to(z.dtype) if isinstance(self.regularization, torch.Tensor) else torch.tensor(float(self.regularization), device=z.device, dtype=z.dtype)
+        I = torch.eye(d, device=device, dtype=torch.float64).unsqueeze(0)
+        lambda_reg = (
+            self.regularization.to(device=device, dtype=torch.float64)
+            if isinstance(self.regularization, torch.Tensor)
+            else torch.tensor(float(self.regularization), device=device, dtype=torch.float64)
+        )
         lambda_reg = lambda_reg.clamp_min(0.0)
         if lambda_reg.item() > 0:
             G_inv_mix = G_inv_mix + lambda_reg * I
 
-        diff = z.unsqueeze(1) - centroids.unsqueeze(0)
+        diff = z64.unsqueeze(1) - centroids.unsqueeze(0)
         if self.weight_kernel == 'isotropic':
             d2 = torch.sum(diff * diff, dim=-1)
         else:
@@ -495,35 +516,34 @@ class MetricTensor(nn.Module):
         if self.use_background_identity:
             G_inv_mix = G_inv_mix + self.bg_strength * far.view(-1, 1, 1) * I
 
-        target_dtype = G_inv_mix.dtype
-        promote_back = target_dtype in (torch.float16, torch.bfloat16)
-        G_inv_work = G_inv_mix.float() if promote_back else G_inv_mix
-
-        evals, evecs = torch.linalg.eigh(G_inv_work)
-        floor = torch.tensor(self.eig_floor_abs, device=z.device, dtype=G_inv_work.dtype)
+        evals, evecs = torch.linalg.eigh(G_inv_mix)
+        floor = torch.tensor(self.eig_floor_abs, device=device, dtype=torch.float64)
         evals = torch.clamp(evals, min=floor)
         if self.eig_ceiling is not None:
-            ceil = torch.tensor(self.eig_ceiling, device=z.device, dtype=G_inv_work.dtype)
+            ceil = torch.tensor(self.eig_ceiling, device=device, dtype=torch.float64)
             evals = torch.clamp(evals, max=ceil)
-        G_inv_work = evecs @ (evals.unsqueeze(-1) * evecs.transpose(-1, -2))
-        G_inv = G_inv_work.to(target_dtype) if promote_back else G_inv_work
+        G_inv64 = evecs @ (evals.unsqueeze(-1) * evecs.transpose(-1, -2))
 
-        if not torch.isfinite(G_inv).all():
+        if not torch.isfinite(G_inv64).all():
             warnings.warn("G_inv contained non-finite values! Clamping.")
-            G_inv = torch.nan_to_num(G_inv, nan=1.0, posinf=1e3, neginf=1e-3)
+            G_inv64 = torch.nan_to_num(G_inv64, nan=1.0, posinf=1e3, neginf=1e-3)
+
+        target_dtype = z.dtype if z.dtype.is_floating_point else torch.float32
+        if target_dtype in (torch.float16, torch.bfloat16):
+            target_dtype = torch.float32
+        G_inv = G_inv64.to(target_dtype)
 
         G_metric: Optional[torch.Tensor] = None
         if return_metric:
-            G_metric = _robust_inverse_from_cholesky(G_inv.float() if promote_back else G_inv)
-            if promote_back:
-                G_metric = G_metric.to(target_dtype)
+            G_metric64 = _robust_inverse_from_cholesky(G_inv64)
+            G_metric = G_metric64.to(target_dtype)
             if not torch.isfinite(G_metric).all():
                 warnings.warn("G contained non-finite values! Clamping.")
                 G_metric = torch.nan_to_num(G_metric, nan=1.0, posinf=1e3, neginf=1e-3)
 
         if os.getenv("RLVAE_METRIC_DEBUG", "0") == "1":
             with torch.no_grad():
-                G_dbg = G_metric if G_metric is not None else _robust_inverse_from_cholesky(G_inv.float())
+                G_dbg = G_metric if G_metric is not None else _robust_inverse_from_cholesky(G_inv64).to(target_dtype)
                 prod = G_dbg @ G_inv.float()
                 err = (prod - torch.eye(d, device=z.device)).norm(dim=(1, 2)).mean().item()
                 logdet = self.compute_log_det_inverse_metric(z).mean().item()

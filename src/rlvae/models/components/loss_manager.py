@@ -11,13 +11,15 @@ Handles all loss computations for Riemannian VAE models including:
 """
 
 import math
+import os
+from contextlib import nullcontext
+from pathlib import Path
+from typing import Dict, Any, Optional, Tuple, Union
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Any, Optional, Tuple, Union
-import numpy as np
-import os
-from contextlib import nullcontext
 
 from .metric_utils import half_logdet_volume as _global_half_logdet_volume
 from .metric_tensor import inverse_fallback_count
@@ -39,6 +41,9 @@ class LossManager(nn.Module):
         metric_representation: str = "ginv",
         # Prior mode for KL: 'uniform' (default, cancels volume) or 'volume_gaussian'
         kl_prior_mode: str = 'uniform',
+        # Optional amplification of volume terms / gradients
+        volume_bias_weight: float = 1.0,
+        volume_grad_scale: float = 1.0,
         # Riemannian KL options (to mirror original model behavior)
         kl_use_metric_normalization: bool = True,
         kl_metric_norm_mode: str = 'geomean',   # 'geomean' | 'trace' | 'none'
@@ -65,6 +70,8 @@ class LossManager(nn.Module):
         if self.metric_representation not in {"g", "ginv"}:
             raise ValueError("LossManager: metric_representation must be 'G' or 'Ginv'")
         self.kl_prior_mode = str(kl_prior_mode)
+        self.volume_bias_weight = float(volume_bias_weight)
+        self.volume_grad_scale = float(volume_grad_scale)
         self.kl_use_metric_normalization = kl_use_metric_normalization
         self.kl_metric_norm_mode = kl_metric_norm_mode
         self.kl_amp_safe = kl_amp_safe
@@ -88,6 +95,8 @@ class LossManager(nn.Module):
         }
         self._inverse_fallbacks_seen = inverse_fallback_count()
         self._debug_prev_sigma_stats: Dict[str, Dict[str, float]] = {}
+        self._latent_debug_step = 0
+        self._latent_debug_header_written = False
 
     def _monitor_inverse_fallbacks(self) -> None:
         current = inverse_fallback_count()
@@ -577,6 +586,125 @@ class LossManager(nn.Module):
         rep_effective = (rep or self.metric_representation).lower()
         return _global_half_logdet_volume(G_or_Ginv, rep_effective, jitter=jitter)
 
+    def _tensor_to_metric(
+        self,
+        tensor: torch.Tensor,
+        rep: str,
+        *,
+        jitter: float = 1e-6,
+    ) -> torch.Tensor:
+        rep = (rep or self.metric_representation).lower()
+        if rep == "g":
+            return 0.5 * (tensor + tensor.transpose(-1, -2))
+        if rep == "ginv":
+            chol, _ = self._cholesky_spd(tensor, jitter=jitter)
+            d = tensor.shape[-1]
+            eye = torch.eye(d, device=tensor.device, dtype=tensor.dtype).unsqueeze(0).expand_as(tensor)
+            metric = torch.cholesky_solve(eye, chol)
+            return 0.5 * (metric + metric.transpose(-1, -2))
+        raise ValueError(f"Unknown representation '{rep}'.")
+
+    def _debug_metric_stats(
+        self,
+        label: str,
+        tensor: torch.Tensor,
+        rep: str,
+        *,
+        jitter: float = 1e-6,
+    ) -> None:
+        if os.environ.get("RLVAE_DEBUG", "0") != "1":
+            return
+        try:
+            with torch.no_grad():
+                metric = self._tensor_to_metric(tensor, rep, jitter=jitter).double()
+                precision = tensor.double() if rep.lower() == "ginv" else torch.linalg.inv(metric)
+                eig_metric = torch.linalg.eigvalsh(metric)
+                eig_precision = torch.linalg.eigvalsh(precision)
+                min_eig = eig_metric.min().item()
+                max_eig = eig_metric.max().item()
+                cond_metric = float(max_eig / max(min_eig, 1e-12))
+                min_eig_inv = eig_precision.min().item()
+                max_eig_inv = eig_precision.max().item()
+                cond_precision = float(max_eig_inv / max(min_eig_inv, 1e-12))
+                eye = torch.eye(metric.shape[-1], device=metric.device, dtype=metric.dtype).unsqueeze(0)
+                prod_err = torch.linalg.norm(metric @ precision - eye, dim=(1, 2)).mean().item()
+                logdet_metric = torch.log(torch.clamp(eig_metric, min=1e-18)).sum(-1).mean().item()
+                logdet_precision = torch.log(torch.clamp(eig_precision, min=1e-18)).sum(-1).mean().item()
+                print(
+                    f"[METRIC DEBUG] {label}: rep={rep.lower()} | "
+                    f"eig_min={min_eig:.3e}, eig_max={max_eig:.3e}, cond(G)={cond_metric:.3e} | "
+                    f"eig_min_inv={min_eig_inv:.3e}, eig_max_inv={max_eig_inv:.3e}, cond(G⁻¹)={cond_precision:.3e} | "
+                    f"log|G|={logdet_metric:.3e}, log|G⁻¹|={logdet_precision:.3e} | "
+                    f"||G·G⁻¹-I||_F={prod_err:.3e}"
+                )
+        except Exception as exc:
+            print(f"[METRIC DEBUG] {label}: failed to gather stats ({exc})")
+
+    def _debug_latent_anisotropy(
+        self,
+        label: str,
+        samples: Optional[torch.Tensor],
+        *,
+        reference: Optional[torch.Tensor] = None,
+    ) -> Optional[Dict[str, float]]:
+        if os.environ.get("RLVAE_DEBUG", "0") != "1":
+            return None
+        if not isinstance(samples, torch.Tensor) or samples.ndim != 2 or samples.shape[0] < 2:
+            return None
+        try:
+            with torch.no_grad():
+                data = samples
+                if isinstance(reference, torch.Tensor):
+                    data = samples - reference
+                centered = data - data.mean(dim=0, keepdim=True)
+                denom = max(centered.shape[0] - 1, 1)
+                cov = centered.t().matmul(centered) / denom
+                evals = torch.linalg.eigvalsh(cov.double()).clamp_min(0.0)
+                total = evals.sum().item()
+                if total <= 0:
+                    print(f"[LATENT DEBUG] {label}: degenerate covariance (total variance ≈ 0)")
+                    return {
+                        "pc1_ratio": float("nan"),
+                        "pc2_ratio": float("nan"),
+                        "eig_min": 0.0,
+                        "eig_max": 0.0,
+                        "trace": 0.0,
+                    }
+                sorted_evals, _ = torch.sort(evals, descending=True)
+                ratios = sorted_evals / total
+                pc1 = ratios[0].item()
+                pc2 = ratios[1].item() if ratios.numel() > 1 else float("nan")
+                stats = {
+                    "pc1_ratio": pc1,
+                    "pc2_ratio": pc2,
+                    "eig_min": evals.min().item(),
+                    "eig_max": evals.max().item(),
+                    "trace": total,
+                }
+                print(
+                    f"[LATENT DEBUG] {label}: pc1_ratio={pc1:.3f}, "
+                    f"pc2_ratio={pc2:.3f}, eig_min={evals.min().item():.3e}, "
+                    f"eig_max={evals.max().item():.3e}, trace={total:.3e}"
+                )
+                return stats
+        except Exception as exc:
+            print(f"[LATENT DEBUG] {label}: PCA computation failed ({exc})")
+        return None
+
+    def _log_latent_debug_row(self, row: Dict[str, float]) -> None:
+        try:
+            path = Path("outputs/probes")
+            path.mkdir(parents=True, exist_ok=True)
+            file = path / "latent_diagnostics.csv"
+            keys = list(row.keys())
+            with file.open("a", encoding="utf-8") as fh:
+                if not self._latent_debug_header_written:
+                    fh.write(",".join(keys) + "\n")
+                    self._latent_debug_header_written = True
+                fh.write(",".join(str(row[k]) for k in keys) + "\n")
+        except Exception as exc:
+            print(f"[LATENT DEBUG] failed to log diagnostics ({exc})")
+
     def _quad_with_G(
         self,
         v: torch.Tensor,
@@ -853,6 +981,24 @@ class LossManager(nn.Module):
         # 6) Select the transported tensor for downstream, matching configured rep
         GT_sel = GT_g if rep == "g" else GT_ginv
 
+        if os.environ.get("RLVAE_DEBUG", "0") == "1":
+            try:
+                with torch.no_grad():
+                    eig_metric = torch.linalg.eigvalsh(GT_g.double())
+                    eig_precision = torch.linalg.eigvalsh(GT_ginv.double())
+                    cond_metric = float(eig_metric.max().item() / max(eig_metric.min().item(), 1e-12))
+                    cond_precision = float(eig_precision.max().item() / max(eig_precision.min().item(), 1e-12))
+                    min_sv_val = float(min_sv.min().item()) if min_sv is not None and torch.isfinite(min_sv).any() else float('nan')
+                    prod_err = torch.linalg.norm(GT_g.double() @ GT_ginv.double() - torch.eye(D, device=GT_g.device, dtype=torch.float64), dim=(1, 2)).mean().item()
+                    print(
+                        "[PUSH DEBUG] transported metric stats: "
+                        f"eig_min={eig_metric.min().item():.3e}, eig_max={eig_metric.max().item():.3e}, "
+                        f"cond(G')={cond_metric:.3e}, cond(G'^{-1})={cond_precision:.3e}, "
+                        f"min_sv(J)={min_sv_val:.3e}, ||G'·G'^{-1}-I||_F={prod_err:.3e}"
+                    )
+            except Exception as exc:
+                print(f"[PUSH DEBUG] failed to gather stats ({exc})")
+
         return (
             (GT_sel.to(z0.dtype).detach(), rep),
             min_sv.to(z0.dtype),
@@ -1049,11 +1195,22 @@ class LossManager(nn.Module):
                 if G_source is None or rep_source is None:
                     raise RuntimeError("Stage C uniform prior requires metric evaluation at z0.")
                 half_logdet_source_ginv = self._half_logdet_volume(G_source, rep_source.lower(), jitter=eps_reg).to(mu.dtype)
+                debug_mode = os.environ.get("RLVAE_DEBUG", "0") == "1"
+                if debug_mode:
+                    self._debug_metric_stats("G(z0)", G_source, rep_source, jitter=eps_reg)
+                    metric_source = self._tensor_to_metric(G_source, rep_source, jitter=eps_reg).double()
+                else:
+                    metric_source = None
 
                 G_target, rep_target = self._evaluate_metric(zS_effective, metric_tensor, rhmc_posterior, with_rep=True)
                 if G_target is None or rep_target is None:
                     raise RuntimeError("Stage C uniform prior requires metric evaluation at zS.")
                 half_logdet_target_ginv = self._half_logdet_volume(G_target, rep_target.lower(), jitter=eps_reg).to(mu.dtype)
+                if debug_mode:
+                    self._debug_metric_stats("G(zS)", G_target, rep_target, jitter=eps_reg)
+                    metric_target = self._tensor_to_metric(G_target, rep_target, jitter=eps_reg).double()
+                else:
+                    metric_target = None
 
                 flow_term = sum_logdet_flow.to(mu.dtype)
                 flow_term = torch.nan_to_num(flow_term, nan=0.0, posinf=0.0, neginf=0.0)
@@ -1082,13 +1239,125 @@ class LossManager(nn.Module):
 
                 kl_terms = (
                     log_q.to(x.dtype)
-                    - half_logdet_target_ginv.to(x.dtype)
+                    - (self.volume_bias_weight * half_logdet_target_ginv).to(x.dtype)
                     - flow_term.to(x.dtype)           # ✅ fixed sign
                     + (delta_kin.to(x.dtype) - delta_vol.to(x.dtype))
                 )
                 kl_loss = kl_terms.mean().to(x.dtype)
                 kl_weight = self.riemannian_beta
                 flow_loss = torch.zeros((), device=x.device, dtype=x.dtype)
+
+                if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                    with torch.no_grad():
+                        rhs = half_logdet_source_ginv + flow_term
+                        vol_residual = (half_logdet_target_ginv - rhs).abs()
+                        diff_z_mu = torch.norm(zS_effective - mu, dim=-1)
+                        diff_z0_mu = torch.norm(stage_z0 - mu, dim=-1)
+                        diff_z = torch.norm(zS_effective - stage_z0, dim=-1)
+                        mu_norm = torch.norm(mu, dim=-1)
+                        corr_value = float("nan")
+                        max_eig_mean = float("nan")
+                        if metric_target is not None and metric_target.ndim == 3:
+                            try:
+                                eig_target = torch.linalg.eigvalsh(metric_target)
+                                max_eig = eig_target[:, -1]
+                                max_eig_mean = max_eig.mean().item()
+                                if diff_z_mu.numel() > 1:
+                                    stacked = torch.stack([diff_z_mu.double(), max_eig.double()])
+                                    corr_matrix = torch.corrcoef(stacked)
+                                    corr_value = corr_matrix[0, 1].item()
+                                print(
+                                    f"[KL DEBUG] corr(||zS-mu||, max_eig(G(zS)))={corr_value:.3e}, "
+                                    f"max_eig_mean={max_eig_mean:.3e}"
+                                )
+                            except Exception as exc:
+                                print(f"[KL DEBUG] correlation computation failed ({exc})")
+                                max_eig_mean = float("nan")
+                        else:
+                            max_eig_mean = float("nan")
+                        stats_zs = self._debug_latent_anisotropy("StageC (zS - mu)", zS_effective, reference=mu)
+                        stats_mu = self._debug_latent_anisotropy("StageC mu", mu)
+                        if metric_target is not None and metric_target.ndim == 3:
+                            try:
+                                eig_target = torch.linalg.eigvalsh(metric_target)
+                                max_eig = eig_target[:, -1]
+                                if diff_z_mu.numel() > 1:
+                                    stacked = torch.stack([diff_z_mu.double(), max_eig.double()])
+                                    corr = torch.corrcoef(stacked)[0, 1].item()
+                                else:
+                                    corr = float("nan")
+                                print(
+                                    f"[KL DEBUG] corr(||zS-mu||, max_eig(G(zS)))={corr:.3e}, "
+                                    f"max_eig_mean={max_eig.mean().item():.3e}"
+                                )
+                            except Exception as exc:
+                                print(f"[KL DEBUG] correlation computation failed ({exc})")
+                        self._debug_latent_anisotropy("StageC (zS - mu)", zS_effective, reference=mu)
+                        self._debug_latent_anisotropy("StageC mu", mu)
+                        print(
+                            "[KL DEBUG] latent norms: "
+                            f"||mu|| mean={torch.norm(mu, dim=-1).mean().item():.3e}, "
+                            f"||z0-mu|| mean={diff_z0_mu.mean().item():.3e}, "
+                            f"||zS-mu|| mean={diff_z_mu.mean().item():.3e}, "
+                            f"||zS-z0|| mean={diff_z.mean().item():.3e}"
+                        )
+                        print(
+                            "[KL DEBUG] flow stats: "
+                            f"log_q mean={log_q.mean().item():.3e}, "
+                            f"sum_logdet_flow mean={flow_term.mean().item():.3e}, "
+                            f"delta_kin mean={delta_kin.mean().item():.3e}, "
+                            f"delta_vol mean={delta_vol.mean().item():.3e}"
+                        )
+                        print(
+                            "[KL DEBUG] volume identity residual: "
+                            f"mean={vol_residual.mean().item():.3e}, "
+                            f"max={vol_residual.max().item():.3e}"
+                        )
+                        kin_start = kin_end = None
+                        if isinstance(rhmc_traj_info, dict):
+                            traj = rhmc_traj_info.get('trajectory', None)
+                            if isinstance(traj, list) and len(traj) > 1:
+                                rho0 = traj[0].get('rho', None)
+                                rhoS = traj[-1].get('rho', None)
+                                z_traj0 = traj[0].get('z', stage_z0)
+                                z_trajS = traj[-1].get('z', zS_effective)
+                                if isinstance(rho0, torch.Tensor) and isinstance(rhoS, torch.Tensor):
+                                    try:
+                                        kin_start = self._log_kinetic_density(rho0, z_traj0, metric_tensor, rhmc_posterior)
+                                        kin_end = self._log_kinetic_density(rhoS, z_trajS, metric_tensor, rhmc_posterior)
+                                    except Exception as exc:
+                                        print(f"[KL DEBUG] kinetic density computation failed ({exc})")
+                        kin_residual = float("nan")
+                        if kin_start is not None and kin_end is not None:
+                            kin_diff = kin_start - kin_end
+                            kin_residual = (delta_kin - kin_diff.to(delta_kin.dtype)).abs().mean().item()
+                            print(
+                                "[KL DEBUG] kinetic density: "
+                                f"start_mean={kin_start.mean().item():.3e}, "
+                                f"end_mean={kin_end.mean().item():.3e}, "
+                                f"diff_mean={kin_diff.mean().item():.3e}, "
+                                f"delta_kin_residual={kin_residual:.3e}"
+                            )
+
+                        row = {
+                            "step": float(self._latent_debug_step),
+                            "mu_norm_mean": float(mu_norm.mean().item()),
+                            "z0_mu_norm_mean": float(diff_z0_mu.mean().item()),
+                            "zS_mu_norm_mean": float(diff_z_mu.mean().item()),
+                            "zS_z0_norm_mean": float(diff_z.mean().item()),
+                            "max_eig_mean": float(max_eig_mean),
+                            "corr_zS_mu_max_eig": float(corr_value),
+                            "volume_residual_mean": float(vol_residual.mean().item()),
+                            "volume_residual_max": float(vol_residual.max().item()),
+                            "delta_kin_mean": float(delta_kin.mean().item()),
+                            "delta_kin_residual": float(kin_residual),
+                            "pc1_zS_minus_mu": float(stats_zs.get("pc1_ratio", float("nan")) if stats_zs else float("nan")),
+                            "pc1_mu": float(stats_mu.get("pc1_ratio", float("nan")) if stats_mu else float("nan")),
+                            "trace_zS_minus_mu": float(stats_zs.get("trace", float("nan")) if stats_zs else float("nan")),
+                            "trace_mu": float(stats_mu.get("trace", float("nan")) if stats_mu else float("nan")),
+                        }
+                        self._log_latent_debug_row(row)
+                        self._latent_debug_step += 1
 
                 log_q_key = 'log_q0' if _src == "z0" else 'log_qS'
                 volume_key = 'half_logdet_ginv_source'
@@ -1124,6 +1393,9 @@ class LossManager(nn.Module):
                         rep_push = rep_push.lower()
                         half_logdet_push = half_logdet_push_ginv if rep_push == "ginv" else half_logdet_push_g
                         consistency = (half_logdet_push - target_rhs)
+
+                        if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                            self._debug_metric_stats("Pushforward G'", G_pushforward, rep_push, jitter=eps_reg)
 
                         if not hasattr(self, "_vol_triplet_printed"):
                             print(f"[VOL CHECK] rep_push={rep_push} mean(source)={half_logdet_source_ginv.mean().item():.3f}, "
@@ -1175,6 +1447,13 @@ class LossManager(nn.Module):
                     kl_components_sample['pushforward_consistency'] = consistency_sample
                 if push_target_gap_sample is not None:
                     kl_components_sample['pushforward_vs_target'] = push_target_gap_sample
+                if os.environ.get("RLVAE_DEBUG", "0") == "1" and consistency_sample is not None:
+                    with torch.no_grad():
+                        print(
+                            "[KL DEBUG] pushforward consistency: "
+                            f"mean={consistency_sample.mean().item():.3e}, "
+                            f"max={consistency_sample.abs().max().item():.3e}"
+                        )
             else:
                 # Legacy RHMC KL path (volume Gaussian / diagnostics)
                 log_q = None

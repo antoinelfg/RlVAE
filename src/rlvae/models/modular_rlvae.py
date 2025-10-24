@@ -349,6 +349,10 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         kl_metric_eval_point = loss_cfg.get('kl_metric_eval_point', getattr(self.config, 'kl_metric_eval_point', 'z'))
         mu_l2_weight = float(loss_cfg.get('mu_l2_weight', getattr(self.config, 'mu_l2_weight', 0.0)))
         kl_prior_mode_cfg = loss_cfg.get('kl_prior_mode', getattr(self.config, 'kl_prior_mode', 'uniform'))
+        volume_bias_weight = float(loss_cfg.get('volume_bias_weight', getattr(self.config, 'volume_bias_weight', 1.0)))
+        volume_grad_scale = float(loss_cfg.get('volume_grad_scale', getattr(self.config, 'volume_grad_scale', 1.0)))
+        self._volume_bias_weight_cfg = volume_bias_weight
+        self._volume_grad_scale_cfg = volume_grad_scale
         
         # Route tracing: LossManager config
         if not hasattr(self, '_loss_config_traced'):
@@ -371,6 +375,8 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             kl_metric_norm_mode=kl_metric_norm_mode,
             kl_amp_safe=kl_amp_safe,
             kl_metric_eval_point=kl_metric_eval_point,
+            volume_bias_weight=volume_bias_weight,
+            volume_grad_scale=volume_grad_scale,
         )
         # Route tracing: LossManager created successfully
         if not hasattr(self, '_loss_created_traced'):
@@ -805,7 +811,10 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             # Pass the actual config dict, not the model object
             rhmc_config = {}
             if hasattr(self.config, 'posterior') and self.config.posterior is not None:
-                rhmc_config.update(dict(self.config.posterior))
+                try:
+                    rhmc_config.update(OmegaConf.to_container(self.config.posterior, resolve=True))
+                except Exception:
+                    rhmc_config.update(dict(self.config.posterior))
             # Top-level fallbacks override if provided
             for k in (
                 'rhmc_steps', 'rhmc_step_size', 'rhmc_alpha', 'rhmc_eps_reg',
@@ -814,6 +823,8 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             ):
                 if hasattr(self.config, k):
                     rhmc_config[k] = getattr(self.config, k)
+            rhmc_config.setdefault('volume_grad_scale', self._volume_grad_scale_cfg)
+            rhmc_config.setdefault('volume_bias_weight', self._volume_bias_weight_cfg)
             if 'kl_prior_mode' not in rhmc_config:
                 try:
                     mode = None
@@ -831,14 +842,15 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             try:
                 for k in ('rhmc_steps','rhmc_step_size','rhmc_alpha','rhmc_eps_reg',
                           'max_momentum_norm','max_velocity_norm','max_position_step','max_position_norm',
-                          'min_cov_eig','eps_regularization','use_factorized_G_mu'):
+                          'min_cov_eig','eps_regularization','use_factorized_G_mu',
+                          'volume_grad_scale','volume_bias_weight'):
                     if k in rhmc_config:
                         setattr(self.posterior_sampler_rhmc, k if k != 'eps_regularization' else 'eps_reg', rhmc_config[k])
             except Exception:
                 pass
         except Exception as e:
             print(f"[RHMC CONFIG] Failed to create RHMC posterior: {e}")
-            self.posterior_sampler_rhmc = None
+            raise
         
         print("✅ Setup modular sampling components")
         self._sampling_components_initialized = True
