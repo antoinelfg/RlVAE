@@ -1,0 +1,33 @@
+# Standalone debug config - Baseline (K=5, volume acceptance ON)
+name: rlvae_debug_baseline
+description: "DEBUG Baseline: multi-try ON (K=5), volume acceptance ON. Short 5-epoch run for z0 investigation."
+
+# Override posterior sampling parameters
+model:
+  latent_dim: 2
+  posterior:
+    type: riemannian_rhmc
+    rhmc_steps: 4
+    rhmc_step_size: 0.12
+    rhmc_alpha: 0.1
+    rhmc_eps_reg: 1.0e-3
+    sigma_normalization_mode: 'none'
+    initial_target_radius: 0.0
+    # Baseline: Enable both multi-try selection and volume acceptance
+    volume_force_sign: 1.0  # FIXED: +1.0 to move TOWARD high volume regions
+    initial_n_candidates: 5
+    initial_volume_tolerance: 0.05
+    initial_max_retries: 3
+
+stage_c:
+  epochs: 5
+
+wandb:
+  project: rlvae-z0-investigation
+  run_name_template: DEBUG_BASELINE_K5_VOL_{data.name}_ld{model.latent_dim}
+  tags:
+  - z0_investigation
+  - baseline
+  - multi_try_on
+  - volume_acc_on
+

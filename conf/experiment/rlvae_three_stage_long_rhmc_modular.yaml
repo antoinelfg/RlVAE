@@ -34,10 +34,10 @@ stage_c:
   kl_metric_eval_point: z
   kl_use_metric_normalization: false
   kl_metric_norm_mode: none
-  mu_l2_weight: 0.5
+  mu_l2_weight: 0.
   kl_prior_mode: uniform
-  volume_bias_weight: 1.6
-  volume_grad_scale: 2.2
+  volume_bias_weight: 1.0
+  volume_grad_scale: 1.0
   latent_dim: 2
   component_validation:
     validate_encoder_compatibility: true
@@ -52,21 +52,25 @@ model:
   latent_dim: 2
   posterior:
     type: riemannian_rhmc
-    rhmc_steps: 10
-    rhmc_step_size: 0.008
-    rhmc_alpha: 3
-    rhmc_eps_reg: 3e-6
+    rhmc_steps: 4
+    rhmc_step_size: 0.12  # Raised above runtime defaults
+    rhmc_alpha: 0.1  # Small alpha to scale down G⁻¹ while preserving anisotropy
+    rhmc_eps_reg: 1.0e-3  # Increased from 3e-6 to stabilize
     soft_position_norm: 5.5
-    kinetic_grad_enabled: true
+    kinetic_grad_enabled: false
     kinetic_grad_weight: 1.0
     projection_step_scale: 0.05
     initial_max_norm: 1.5
     eps_regularization: 1e-6
     max_momentum_norm: 3.0
-    max_velocity_norm: 1.0
-    max_position_step: 0.5
+    max_velocity_norm: 2.5     # Raised above runtime defaults
+    max_position_step: 1.2     # Raised above runtime defaults
     # Disable absolute position clamp to avoid ring artifacts
     max_position_norm: 0.0
+    volume_force_sign: 1.0  # FIXED: +1.0 to move TOWARD high volume regions
+    # FIX: Disable normalizations that were causing negative KL
+    sigma_normalization_mode: 'none'  # Disable geomean normalization
+    initial_target_radius: 0.0        # Disable target radius adjustment
   metric:
     trainable: false
     init_from_fixed: true
@@ -74,10 +78,10 @@ model:
   # Disable mu alignment to prevent normalization issues
   mu_alignment_enabled: false
   posterior_type: riemannian_rhmc
-  rhmc_steps: 10
-  rhmc_step_size: 0.008
-  rhmc_alpha: 3
-  rhmc_eps_reg: 3e-6
+  rhmc_steps: 4
+  rhmc_step_size: 0.12  # Raised above runtime defaults
+  rhmc_alpha: 5.0  # Increased from 3.0
+  rhmc_eps_reg: 1.0e-3  # Increased from 3e-6
   soft_position_norm: 5.5
   kinetic_grad_enabled: true
   kinetic_grad_weight: 1.0
@@ -87,10 +91,11 @@ model:
   kl_metric_norm_mode: none
   use_curvature_correction: true
   kl_metric_eval_point: z
-  mu_l2_weight: 0.5
+  mu_l2_weight: 0.
   kl_prior_mode: uniform
-  volume_bias_weight: 1.6
-  volume_grad_scale: 2.2
+  volume_bias_weight: 1.0
+  volume_grad_scale: 1.0
+  volume_force_sign: 1.0  # FIXED: +1.0 to move TOWARD high volume regions
   sampling:
     method: posterior_hmc
   pretrained:
@@ -102,15 +107,18 @@ training:
     latent_dim: 2
     posterior:
       type: riemannian_rhmc
-      rhmc_steps: 10
-      rhmc_step_size: 0.008
-      rhmc_alpha: 3
-      rhmc_eps_reg: 3e-6
+      rhmc_steps: 4
+      rhmc_step_size: 0.12  # Raised above runtime defaults
+      rhmc_alpha: 0.1  # Small alpha to scale down G⁻¹ while preserving anisotropy
+      rhmc_eps_reg: 1.0e-3  # Increased from 3e-6
+      # FIX: PRESERVE anisotropy - no normalization
+      sigma_normalization_mode: 'none'
+      initial_target_radius: 0.0
     posterior_type: riemannian_rhmc
     kl_metric_eval_point: z
     kl_use_metric_normalization: false
     kl_metric_norm_mode: none
-    mu_l2_weight: 0.5
+    mu_l2_weight: 0.
     kl_prior_mode: uniform
 visualization:
   level: three_stage_optimized

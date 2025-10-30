@@ -301,6 +301,20 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             regularization_mode=metric_cfg.get('regularization_mode', 'precision'),
             use_background_identity=metric_cfg.get('use_background_identity', None),
         )
+        # Optional: tighten spectral bounds/identity mixing from config to control condition number
+        try:
+            if 'eig_floor_abs' in metric_cfg and metric_cfg['eig_floor_abs'] is not None:
+                self.modular_metric.eig_floor_abs = float(metric_cfg['eig_floor_abs'])
+            if 'eig_ceiling' in metric_cfg and metric_cfg['eig_ceiling'] is not None:
+                self.modular_metric.eig_ceiling = float(metric_cfg['eig_ceiling'])
+            if 'bg_strength' in metric_cfg and metric_cfg['bg_strength'] is not None:
+                self.modular_metric.bg_strength = float(metric_cfg['bg_strength'])
+            if 'bg_floor' in metric_cfg and metric_cfg['bg_floor'] is not None:
+                self.modular_metric.bg_floor = float(metric_cfg['bg_floor'])
+            if 'use_background_identity' in metric_cfg and metric_cfg['use_background_identity'] is not None:
+                self.modular_metric.use_background_identity = bool(metric_cfg['use_background_identity'])
+        except Exception:
+            pass
         
         # 🚀 NEW: Initialize modular metric loader
         self.metric_loader = MetricLoader(device=self.device)
@@ -366,6 +380,8 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             riemannian_beta=float(loss_cfg.get('riemannian_beta', self.config_resolved.get('riemannian_beta', self.config_resolved.get('beta', 1.0)))),
             loop_penalty_weight=self.config_resolved.get('loop', {}).get('penalty', 1.0),
             device=self.device,
+            # Prefer working in precision space to avoid unnecessary inversions
+            metric_representation='ginv',
             metric_reg_weight=metric_reg_weight,
             metric_reg_type=metric_reg_type,
             metric_reg_target=metric_reg_target,
@@ -411,6 +427,12 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             output_clip=flow_output_clip,
             logdet_clip=flow_logdet_clip,
         )
+        # Enable a one-time autograd check of logdet direction in 2D to ensure consistency
+        try:
+            if int(self.config.latent_dim) == 2:
+                self.flow_manager.enable_logdet_verify = True
+        except Exception:
+            pass
 
         # 🚀 NEW: Initialize posterior sampler and override base method to use component
         self.posterior_sampler = PosteriorSampler(self)
@@ -825,6 +847,8 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
                     rhmc_config[k] = getattr(self.config, k)
             rhmc_config.setdefault('volume_grad_scale', self._volume_grad_scale_cfg)
             rhmc_config.setdefault('volume_bias_weight', self._volume_bias_weight_cfg)
+            # DEBUG: Show rhmc_eps_reg in config
+            print(f"[RHMC CONFIG DEBUG] rhmc_eps_reg in rhmc_config: {rhmc_config.get('rhmc_eps_reg', 'NOT FOUND')}")
             if 'kl_prior_mode' not in rhmc_config:
                 try:
                     mode = None
@@ -1341,8 +1365,26 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
                 if hasattr(self, 'posterior_sampler_rhmc'):
                     print('✅ USING RIEMANNIAN RHMC POSTERIOR (forward)')
                     # Pull overrides from config when available
+                    # Check both top-level and posterior.* paths
                     alpha_override = getattr(self.config, 'rhmc_alpha', None)
+                    if alpha_override is None and hasattr(self.config, 'posterior'):
+                        posterior_cfg = getattr(self.config, 'posterior', {})
+                        if hasattr(posterior_cfg, 'get'):
+                            alpha_override = posterior_cfg.get('rhmc_alpha', None)
+                        else:
+                            alpha_override = getattr(posterior_cfg, 'rhmc_alpha', None)
+                    
                     eps_override = getattr(self.config, 'rhmc_eps_reg', None)
+                    if eps_override is None and hasattr(self.config, 'posterior'):
+                        posterior_cfg = getattr(self.config, 'posterior', {})
+                        if hasattr(posterior_cfg, 'get'):
+                            eps_override = posterior_cfg.get('rhmc_eps_reg', None)
+                        else:
+                            eps_override = getattr(posterior_cfg, 'rhmc_eps_reg', None)
+                    
+                    # DEBUG: Show what overrides were found
+                    if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                        print(f"[CONFIG OVERRIDE] alpha_override={alpha_override}, eps_override={eps_override}")
                     with torch.enable_grad():
                         rhmc_ret = self.posterior_sampler_rhmc.sample_riemannian_rhmc_posterior(
                             mu,
@@ -1417,6 +1459,27 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             z_seq = [z_0]
             z_seq_tensor = z_0.unsqueeze(1).expand(-1, n_obs, -1).contiguous()
             stage_zF = z_0
+
+        # Sanitize Stage-C latents for non-finite values before loss usage
+        try:
+            if 'mu' in locals():
+                mu_ref = mu
+            else:
+                mu_ref = None
+            for name, tensor in [("stage_z0", stage_z0), ("stage_zS", stage_zS), ("stage_zF", stage_zF)]:
+                if isinstance(tensor, torch.Tensor):
+                    bad = ~torch.isfinite(tensor)
+                    if bad.any():
+                        repl = mu_ref if (mu_ref is not None and mu_ref.shape == tensor.shape) else torch.zeros_like(tensor)
+                        tensor = torch.where(bad, repl, tensor)
+                        if name == "stage_z0":
+                            stage_z0 = tensor
+                        elif name == "stage_zS":
+                            stage_zS = tensor
+                        elif name == "stage_zF":
+                            stage_zF = tensor
+        except Exception:
+            pass
         if self.loop_mode == "closed":
             z_seq_tensor[:, -1] = z_seq_tensor[:, 0]
         z_flat = z_seq_tensor.reshape(-1, self.latent_dim)

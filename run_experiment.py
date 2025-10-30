@@ -3440,21 +3440,43 @@ class ExperimentRunner:
                     except Exception:
                         return fallback_value
 
-                rh_steps = _posterior_get('rhmc_steps', getattr(self.config.model, 'rhmc_steps', 0))
+                rh_steps = _posterior_get('rhmc_steps', getattr(self.config.model, 'rhmc_steps', 4))
                 try:
                     rh_steps = int(rh_steps)
                 except Exception:
                     rh_steps = 0
 
-                rh_eps = _posterior_get('rhmc_step_size', getattr(self.config.model, 'rhmc_step_size', 0.02))
+                rh_eps = _posterior_get('rhmc_step_size', getattr(self.config.model, 'rhmc_step_size', 0.1))
+                import os
+                if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                    print(f"[RUN_EXP DEBUG] rhmc_step_size from config: {rh_eps}")
                 try:
                     rh_eps = float(rh_eps)
-                except Exception:
+                    if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                        print(f"[RUN_EXP DEBUG] rhmc_step_size after float(): {rh_eps}")
+                except Exception as e:
+                    if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                        print(f"[RUN_EXP DEBUG] rhmc_step_size conversion failed: {e}, using fallback 0.02")
                     rh_eps = 0.02
                 rh_alpha = _positive_or(
                     _posterior_get('rhmc_alpha', getattr(self.config.model, 'rhmc_alpha', None)),
-                    getattr(self.config.model, 'posterior_local_alpha', 0.1)
+                    getattr(self.config.model, 'posterior_local_alpha', 0.1) ###where that counts!!!
                 )
+                # Hard override via environment takes precedence for end-to-end consistency
+                try:
+                    env_alpha = os.environ.get('RLVAE_ALPHA', None)
+                    if env_alpha is not None:
+                        rh_alpha = float(env_alpha)
+                        if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                            print(f"[RUN_EXP DEBUG] RLVAE_ALPHA override detected → rh_alpha={rh_alpha}")
+                except Exception:
+                    pass
+                # Persist resolved alpha into config and model defaults to avoid divergence
+                try:
+                    self._set_config_value(self.config, 'model.rhmc_alpha', float(rh_alpha))
+                    self._set_config_value(self.config, 'model.posterior_local_alpha', float(rh_alpha))
+                except Exception:
+                    pass
                 rh_eps_reg = _positive_or(
                     _posterior_get('rhmc_eps_reg', getattr(self.config.model, 'rhmc_eps_reg', None)),
                     1e-4
@@ -3462,9 +3484,9 @@ class ExperimentRunner:
                 safeties = {}
                 for key, default in (
                     ('max_momentum_norm', 3.0),
-                    ('max_velocity_norm', 1.0),
-                    ('max_position_step', 0.5),
-                    ('max_position_norm', 8.0),
+                    ('max_velocity_norm', 2.0),
+                    ('max_position_step', 1.0),
+                    ('max_position_norm', 0.0),
                 ):
                     val = _posterior_get(key, default)
                     try:
@@ -3475,7 +3497,7 @@ class ExperimentRunner:
                 kl_norm = getattr(self.config.model, 'kl_use_metric_normalization', False)
                 kl_norm_mode = getattr(self.config.model, 'kl_metric_norm_mode', 'none')
                 try:
-                    mu_l2_w = float(getattr(self.config.model, 'mu_l2_weight', 2.0))
+                    mu_l2_w = float(getattr(self.config.model, 'mu_l2_weight', 0.0))
                 except Exception:
                     mu_l2_w = 2.0
 

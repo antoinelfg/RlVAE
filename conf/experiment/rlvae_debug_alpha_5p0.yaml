@@ -1,0 +1,31 @@
+# Alpha sweep: α = 5.0 (large)
+name: rlvae_debug_alpha_5p0
+description: "Alpha sweep: α=5.0. Tests if large alpha helps samples reach high-volume regions."
+
+model:
+  latent_dim: 2
+  posterior:
+    type: riemannian_rhmc
+    rhmc_steps: 4
+    rhmc_step_size: 0.12
+    rhmc_alpha: 5.0  # Large alpha - wide covariance
+    rhmc_eps_reg: 1.0e-3
+    sigma_normalization_mode: 'none'
+    initial_target_radius: 0.0
+    # Vanilla: no selection bias
+    volume_force_sign: 1.0  # FIXED: +1.0 to move TOWARD high volume regions
+    initial_n_candidates: 1
+    initial_volume_tolerance: 0.0
+    initial_max_retries: 0
+
+stage_c:
+  epochs: 5
+
+wandb:
+  project: rlvae-alpha-sweep
+  run_name_template: ALPHA_5p0_{data.name}_ld{model.latent_dim}
+  tags:
+  - alpha_sweep
+  - alpha_5p0
+  - spatial_mismatch_test
+

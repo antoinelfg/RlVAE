@@ -35,16 +35,16 @@ model:
   posterior_type: riemannian_rhmc
   posterior:
     type: riemannian_rhmc
-    rhmc_steps: 2
+    rhmc_steps: 4
     rhmc_step_size: 0.01
     rhmc_alpha: 0.1
-    rhmc_eps_reg: 0.0001
+    rhmc_eps_reg: 0.001
   beta: 1.0
-  riemannian_beta: 32.0
+  riemannian_beta: 1.0
   kl_metric_eval_point: mu
   kl_use_metric_normalization: false
   kl_metric_norm_mode: none
-  mu_l2_weight: 0.5
+  mu_l2_weight: 0.0
   rhmc_kl_mode: mc
   rhmc_kl_source: z0
   rhmc_kl_jacobian: false
@@ -60,8 +60,8 @@ model:
     temperature_override: null
     regularization_override: null
   pretrained:
-    encoder_path: outputs/stages/A_VANILLA_MLP_2_SPRITES/encoder_diverse_mlp_ld2_20251016_115412.pt
-    decoder_path: outputs/stages/A_VANILLA_MLP_2_SPRITES/decoder_diverse_mlp_ld2_20251016_115412.pt
+    encoder_path: outputs/stages/A_VANILLA_MLP_2_SPRITES/encoder_diverse_mlp_ld2_20251029_183040.pt
+    decoder_path: outputs/stages/A_VANILLA_MLP_2_SPRITES/decoder_diverse_mlp_ld2_20251029_183040.pt
     metric_path: outputs/stages/B_RHVAE_MLP_2_SPRITES/metric.pt
 training:
   trainer:

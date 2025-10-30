@@ -1,0 +1,33 @@
+# Standalone debug config - No volume acceptance (K=5, volume OFF)
+name: rlvae_debug_novol
+description: "DEBUG No Volume Acceptance: K=5 (multi-try ON), volume acceptance OFF. Tests if volume acceptance causes bias."
+
+# Override posterior sampling parameters
+model:
+  latent_dim: 2
+  posterior:
+    type: riemannian_rhmc
+    rhmc_steps: 4
+    rhmc_step_size: 0.12
+    rhmc_alpha: 0.1
+    rhmc_eps_reg: 1.0e-3
+    sigma_normalization_mode: 'none'
+    initial_target_radius: 0.0
+    # Multi-try ON, but no volume acceptance
+    volume_force_sign: 1.0  # FIXED: +1.0 to move TOWARD high volume regions
+    initial_n_candidates: 5
+    initial_volume_tolerance: 0.0
+    initial_max_retries: 0
+
+stage_c:
+  epochs: 5
+
+wandb:
+  project: rlvae-z0-investigation
+  run_name_template: DEBUG_NOVOL_K5_NOVOL_{data.name}_ld{model.latent_dim}
+  tags:
+  - z0_investigation
+  - no_volume_acc
+  - multi_try_on
+  - volume_acc_off
+

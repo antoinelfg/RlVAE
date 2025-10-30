@@ -76,7 +76,6 @@ class FlowManager(nn.Module):
 
         self._debug_flow_counter = 0
 
-    @torch.no_grad()
     def _verify_logdet_sign(self, flow: nn.Module, z: torch.Tensor) -> Optional[str]:
         """
         Quick sanity check (2D only, tiny batch):
@@ -85,34 +84,38 @@ class FlowManager(nn.Module):
         """
         if z.ndim != 2 or z.shape[1] != 2:
             return None
-        z_small = z[: min(4, z.shape[0])].detach().clone().requires_grad_(True)
-        out_struct = flow(z_small)
-        z_out = out_struct.out  # [B, 2]
+        try:
+            with torch.enable_grad():
+                z_small = z[: min(4, z.shape[0])].detach().clone().requires_grad_(True)
+                out_struct = flow(z_small)
+                z_out = out_struct.out  # [B, 2]
 
-        # Build full Jacobian per sample by reverse-mode
-        J = torch.zeros(z_small.shape[0], 2, 2, device=z_small.device, dtype=z_small.dtype)
-        for k in range(2):
-            grads = torch.autograd.grad(
-                z_out[:, k].sum(),
-                z_small,
-                retain_graph=True,
-                create_graph=False,
-                allow_unused=False,
-            )[0]
-            J[:, k, :] = grads
+                # Build full Jacobian per sample by reverse-mode
+                J = torch.zeros(z_small.shape[0], 2, 2, device=z_small.device, dtype=z_small.dtype)
+                for k in range(2):
+                    grads = torch.autograd.grad(
+                        z_out[:, k].sum(),
+                        z_small,
+                        retain_graph=True,
+                        create_graph=False,
+                        allow_unused=False,
+                    )[0]
+                    J[:, k, :] = grads
 
-        sign, logabsdet_forward = torch.slogdet(J.float())  # [B]
-        reported = out_struct.log_abs_det_jac
-        if not isinstance(reported, torch.Tensor):
+                sign, logabsdet_forward = torch.slogdet(J.float())  # [B]
+                reported = out_struct.log_abs_det_jac
+                if not isinstance(reported, torch.Tensor):
+                    return None
+                if reported.dim() == 0:
+                    # scalar is not usable for per-sample comparison
+                    return None
+                reported = reported[: logabsdet_forward.shape[0]].detach().to(logabsdet_forward.dtype)
+
+                diff_forward = (reported - logabsdet_forward).abs().mean().item()
+                diff_inverse = (reported + logabsdet_forward).abs().mean().item()
+                return "inverse" if diff_inverse < diff_forward else "forward"
+        except Exception:
             return None
-        if reported.dim() == 0:
-            # scalar is not usable for per-sample comparison
-            return None
-        reported = reported[: logabsdet_forward.shape[0]].detach().to(logabsdet_forward.dtype)
-
-        diff_forward = (reported - logabsdet_forward).abs().mean().item()
-        diff_inverse = (reported + logabsdet_forward).abs().mean().item()
-        return "inverse" if diff_inverse < diff_forward else "forward"
 
     def apply_flows(self, z_sequence, n_obs: Optional[int] = None):
         """

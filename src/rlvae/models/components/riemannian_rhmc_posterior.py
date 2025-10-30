@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .metric_utils import half_logdet_volume
 
@@ -20,11 +21,16 @@ def _symmetrize(matrix: torch.Tensor) -> torch.Tensor:
     return 0.5 * (matrix + matrix.transpose(-1, -2))
 
 
-def _safe_cholesky(matrix: torch.Tensor, jitter: float) -> Tuple[torch.Tensor, torch.Tensor]:
+def _safe_cholesky(matrix: torch.Tensor, jitter: float) -> Tuple[torch.Tensor, torch.Tensor, bool]:
     """Compute a stable Cholesky factor with AMP safety (upcast to float32).
 
     Prefer torch.linalg.cholesky_ex when available to detect failures and
     retry with a small diagonal jitter for numerical stability.
+    
+    Returns:
+        chol: Cholesky factor
+        stabilized: Stabilized matrix (original or with jitter added)
+        was_stabilized: True if jitter was added
     """
     def _chol(mat: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         mat32 = mat.float() if mat.dtype in (torch.float16, torch.bfloat16) else mat
@@ -39,13 +45,13 @@ def _safe_cholesky(matrix: torch.Tensor, jitter: float) -> Tuple[torch.Tensor, t
         # If cholesky_ex reports non‑SPD, trigger jitter path
         if isinstance(info, torch.Tensor) and info.numel() > 0 and (info > 0).any():
             raise RuntimeError("cholesky_ex reported non‑SPD")
-        return chol, matrix
+        return chol, matrix, False  # No stabilization needed
     except RuntimeError:
         d = matrix.shape[-1]
         eye = torch.eye(d, device=matrix.device, dtype=matrix.dtype).unsqueeze(0)
         stabilized = matrix + jitter * eye
         chol, _ = _chol(stabilized)
-        return chol, stabilized
+        return chol, stabilized, True  # Stabilization applied
 
 
 def _log_kinetic_density(
@@ -65,13 +71,13 @@ def _log_kinetic_density(
     G = G + jitter * eye
     G_inv = torch.linalg.inv(G.float())
     quad = torch.einsum('bi,bij,bj->b', rho.float(), G_inv, rho.float())
-    half_logdet = half_logdet_volume(G, 'g', jitter=jitter)
+    half_logdet = -half_logdet_volume(G, 'g', jitter=jitter)
     if torch.isnan(half_logdet).any():
         jitter = max(jitter * 10, 1e-5)
         G = G + jitter * eye
         G_inv = torch.linalg.inv(G.float())
         quad = torch.einsum('bi,bij,bj->b', rho.float(), G_inv, rho.float())
-        half_logdet = half_logdet_volume(G, 'g', jitter=jitter)
+        half_logdet = -half_logdet_volume(G, 'g', jitter=jitter)
     const = z.shape[-1] * math.log(2 * math.pi)
     return (-0.5 * quad + half_logdet - 0.5 * const).to(z.dtype)
 
@@ -133,13 +139,115 @@ def log_q_riem(
     mu_flat = mu.reshape(-1, D)
     Sigma_flat = Sigma.reshape(-1, D, D)
     Sigma_flat = _symmetrize(Sigma_flat)
-    chol, stabilized_sigma = _safe_cholesky(Sigma_flat, min_eig)
+    chol, stabilized_sigma, was_stabilized = _safe_cholesky(Sigma_flat, min_eig)
+    
+    # DIAGNOSTIC: Log stabilization details
+    if os.environ.get("RLVAE_DEBUG", "0") == "1":
+        import torch
+        try:
+            eigvals_orig = torch.linalg.eigvalsh(Sigma_flat)
+            eigvals_stab = torch.linalg.eigvalsh(stabilized_sigma)
+            logdet_orig = torch.linalg.slogdet(Sigma_flat)[1]
+            logdet_stab = torch.linalg.slogdet(stabilized_sigma)[1]
+            
+            print(f"\n[LOG_Q_RIEM STABILIZATION]")
+            print(f"  min_eig (jitter):     {min_eig:.6f}")
+            print(f"  was_stabilized:       {was_stabilized}")
+            print(f"  Original Σ:")
+            print(f"    eigenvalues:        min={eigvals_orig.min().item():.6f}, max={eigvals_orig.max().item():.6f}")
+            print(f"    log|Σ|:             {logdet_orig.mean().item():.6f}")
+            if was_stabilized:
+                print(f"  Stabilized Σ:")
+                print(f"    eigenvalues:        min={eigvals_stab.min().item():.6f}, max={eigvals_stab.max().item():.6f}")
+                print(f"    log|Σ|:             {logdet_stab.mean().item():.6f}")
+                print(f"    Δ log|Σ|:           {(logdet_stab - logdet_orig).mean().item():+.6f}")
+        except Exception as e:
+            print(f"[LOG_Q_RIEM STABILIZATION] Diagnostic failed: {e}")
+    
     diff = (z_flat - mu_flat).unsqueeze(-1)
     diff32 = diff.float() if diff.dtype != chol.dtype else diff
     sol32 = torch.cholesky_solve(diff32, chol)
     quad_form = torch.einsum('bij,bij->b', diff32, sol32)
     log_det = 2.0 * torch.log(torch.diagonal(chol, dim1=-2, dim2=-1) + 1e-18).sum(dim=-1)
     const = 0.5 * D * math.log(2 * math.pi)
+    
+    # DIAGNOSTIC: Decompose log_q into its components
+    if os.environ.get("RLVAE_DEBUG", "0") == "1":
+        import numpy as np
+        quad_term = -0.5 * quad_form
+        vol_term = -0.5 * log_det
+        const_term = -const
+        
+        print(f"\n{'='*80}")
+        print(f"[LOG_Q_RIEM FULL DECOMPOSITION]")
+        print(f"{'='*80}")
+        
+        print(f"\n[STANDARD DECOMPOSITION]")
+        print(f"  Quadratic term: mean={quad_term.mean().item():.4f}, min={quad_term.min().item():.4f}, max={quad_term.max().item():.4f}")
+        print(f"  Volume term:    mean={vol_term.mean().item():.4f}")
+        print(f"  Constant term:  {const_term:.4f}")
+        print(f"  Total log_q:    mean={(quad_term + vol_term + const_term).mean().item():.4f}")
+        print(f"  ||z - μ||:      mean={torch.norm(z_flat - mu_flat, dim=-1).mean().item():.4f}")
+        print(f"  Σ eigenvalues:  min={eigvals_stab.min().item():.6f}, max={eigvals_stab.max().item():.6f}")
+        
+        # Eigenbasis decomposition
+        try:
+            # Eigendecomposition of Σ: Σ = V Λ Vᵀ
+            eigvals_sigma, eigvecs_sigma = torch.linalg.eigh(stabilized_sigma)
+            
+            # Transform diff to eigenspace: y = Vᵀ(z-μ)
+            diff_flat = (z_flat - mu_flat).unsqueeze(-1)
+            y = torch.einsum('bij,bj->bi', eigvecs_sigma.transpose(-1, -2), diff_flat.squeeze(-1))
+            
+            # Contribution per eigenvalue: y_i² / λ_i
+            contrib_per_eig = (y ** 2) / eigvals_sigma.clamp(min=1e-12)
+            
+            # Mahalanobis distance²: sum of contributions
+            mahal_sq = contrib_per_eig.sum(dim=-1)
+            euclidean_sq = torch.norm(diff_flat.squeeze(-1), dim=-1) ** 2
+            
+            print(f"\n[MAHALANOBIS EIGENBASIS DECOMPOSITION]")
+            print(f"  Euclidean ||z-μ||²:    mean={euclidean_sq.mean().item():.4f}")
+            print(f"  Mahalanobis (z-μ)ᵀΣ⁻¹(z-μ): mean={mahal_sq.mean().item():.4f}")
+            print(f"  Ratio (Mahal/Euclid):  {(mahal_sq.mean() / euclidean_sq.mean().clamp(min=1e-12)).item():.4f}")
+            print(f"\n  Per-eigenvalue contributions (batch mean, first sample detailed):")
+            
+            D_local = eigvals_sigma.shape[-1]
+            for i in range(D_local):
+                mean_contrib = contrib_per_eig[:, i].mean().item()
+                first_y = y[0, i].item()
+                first_lambda = eigvals_sigma[0, i].item()
+                first_contrib = contrib_per_eig[0, i].item()
+                print(f"    Dim {i}: λ={first_lambda:.4f}, y[0]={first_y:.4f}, y²/λ={first_contrib:.4f} (batch mean: {mean_contrib:.4f})")
+            
+            # Check which dimensions dominate
+            mean_contribs = contrib_per_eig.mean(dim=0)
+            total_contrib = mean_contribs.sum()
+            sorted_indices = torch.argsort(mean_contribs, descending=True)
+            cumulative = 0.0
+            print(f"\n  Dominant dimensions (contribution to Mahalanobis²):")
+            for idx in sorted_indices:
+                contrib_pct = (mean_contribs[idx] / total_contrib * 100).item()
+                cumulative += contrib_pct
+                if cumulative <= 90.0:  # Show top contributors up to 90%
+                    print(f"    Dim {idx.item()}: {contrib_pct:.1f}% (cumulative: {cumulative:.1f}%)")
+            
+            # Compare with expected χ²(D)
+            print(f"\n[CHI-SQUARED FIT]")
+            print(f"  Dimension D:           {D_local}")
+            print(f"  Expected Mahal²:       χ²({D_local}) mean = {D_local:.1f}")
+            print(f"  Observed Mahal²:       {mahal_sq.mean().item():.4f}")
+            print(f"  Deviation:             {(mahal_sq.mean().item() - D_local):.4f} ({100*(mahal_sq.mean().item() - D_local)/D_local:.1f}%)")
+            
+            if abs(mahal_sq.mean().item() - D_local) > 2 * np.sqrt(2 * D_local):
+                print(f"  ⚠️  WARNING: Significant deviation from χ²({D_local}) distribution!")
+                print(f"               Expected 2σ range: [{D_local - 2*np.sqrt(2*D_local):.1f}, {D_local + 2*np.sqrt(2*D_local):.1f}]")
+        
+        except Exception as e:
+            print(f"[LOG_Q_RIEM EIGENBASIS] Decomposition failed: {e}")
+        
+        print(f"\n{'='*80}\n")
+    
     out = -0.5 * quad_form - 0.5 * log_det - const
     out = out.to(mu.dtype)
     return out.reshape(z.shape[:-1])
@@ -194,15 +302,37 @@ class RiemannianRHMCPosterior(nn.Module):
                 return self.config.get(key, default)
             except Exception:
                 return default
-        self.rhmc_steps = int(_cfg_get('rhmc_steps', 1))
-        self.rhmc_step_size = float(_cfg_get('rhmc_step_size', 5e-3))
-        raw_alpha = float(_cfg_get('rhmc_alpha', 1e-2))
+        self.rhmc_steps = int(_cfg_get('rhmc_steps', 4))
+        self.rhmc_step_size = float(_cfg_get('rhmc_step_size', 0.1))
+        # DEBUG: Log what config was passed
+        import os
+        if os.environ.get("RLVAE_DEBUG", "0") == "1":
+            print(f"[RHMC INIT DEBUG] config['rhmc_step_size'] = {self.config.get('rhmc_step_size', 'NOT FOUND')}")
+            print(f"[RHMC INIT DEBUG] self.rhmc_step_size = {self.rhmc_step_size}")
+        # Resolve alpha with hard override support (env or model attribute)
+        env_alpha = os.environ.get("RLVAE_ALPHA", None)
+        if env_alpha is not None:
+            try:
+                raw_alpha = float(env_alpha)
+            except Exception:
+                raw_alpha = float(_cfg_get('rhmc_alpha', 1.))
+        else:
+            raw_alpha = float(_cfg_get('rhmc_alpha', 1.)) ####sfsd
         if not math.isfinite(raw_alpha) or raw_alpha <= 0.0:
-            fallback_alpha = getattr(model, 'posterior_local_alpha', 0.5)
+            fallback_alpha = getattr(model, 'posterior_local_alpha', 1)
             self.rhmc_alpha = float(fallback_alpha)
             print(f"[RHMC INIT] α<=0 detected ({raw_alpha}); using fallback {self.rhmc_alpha}")
         else:
             self.rhmc_alpha = raw_alpha
+        # Propagate resolved alpha back to model for downstream consumers
+        try:
+            setattr(model, 'rhmc_alpha', float(self.rhmc_alpha))
+        except Exception:
+            pass
+        try:
+            setattr(model, 'posterior_local_alpha', float(self.rhmc_alpha))
+        except Exception:
+            pass
         self.eps_reg = float(_cfg_get('rhmc_eps_reg', _cfg_get('eps_regularization', 1e-3)))
 
         # Numerical guards
@@ -210,13 +340,13 @@ class RiemannianRHMCPosterior(nn.Module):
         if self.min_cov_eig < self.eps_reg:
             self.min_cov_eig = self.eps_reg
         self.max_momentum_norm = float(_cfg_get('max_momentum_norm', 3.0))
-        self.max_velocity_norm = float(_cfg_get('max_velocity_norm', 0.5))
-        self.max_position_step = float(_cfg_get('max_position_step', 0.1))
-        self.max_position_norm = float(_cfg_get('max_position_norm', 4.0))
+        self.max_velocity_norm = float(_cfg_get('max_velocity_norm', 2.0))
+        self.max_position_step = float(_cfg_get('max_position_step', 1.0))
+        self.max_position_norm = float(_cfg_get('max_position_norm', 0.0))
         # Keep factorized path disabled by default
         self.use_factorized_G_mu = False
         # Prior mode (affects log p computation under Monte-Carlo KL)
-        prior_mode_cfg = _cfg_get('kl_prior_mode', _cfg_get('riemannian_prior_mode', 'volume_gaussian'))
+        prior_mode_cfg = _cfg_get('kl_prior_mode', _cfg_get('riemannian_prior_mode', 'uniform'))
         try:
             self.kl_prior_mode = str(prior_mode_cfg).lower() if prior_mode_cfg is not None else 'volume_gaussian'
         except Exception:
@@ -236,6 +366,15 @@ class RiemannianRHMCPosterior(nn.Module):
         # Control how the volume force is computed (diagnostics/toggles)
         self.volume_force_representation = str(_cfg_get('volume_force_representation', 'g')).lower()  # 'g' or 'ginv'
         self.volume_force_sign = float(_cfg_get('volume_force_sign', 1.0))  # +1 or -1
+        self._volume_force_logged = False  # For one-time debug logging
+        self._step_scaling_logged = False  # For one-time debug logging
+        
+        # FIX: Covariance normalization and target radius (critical for correct KL)
+        self.sigma_normalization_mode = str(_cfg_get('sigma_normalization_mode', 'geomean')).lower()
+        self.initial_target_radius = float(_cfg_get('initial_target_radius', 1.0))
+        # Volume acceptance defaults: disabled unless explicitly requested
+        self.initial_volume_tolerance = float(_cfg_get('initial_volume_tolerance', 0.0))
+        self.initial_max_retries = int(_cfg_get('initial_max_retries', 0))
 
         # Default return behaviour
         self.default_return_initial = True
@@ -251,8 +390,10 @@ class RiemannianRHMCPosterior(nn.Module):
             f" step={self.max_position_step},"
             f" norm={self.max_position_norm}"
         )
+        print(f"⚙️ [RHMC INIT] Step params: rhmc_steps={self.rhmc_steps}, rhmc_step_size={self.rhmc_step_size}, rhmc_alpha={self.rhmc_alpha}")
         try:
             print(f"[RHMC INIT] Params: rhmc_steps={int(self.rhmc_steps)}, rhmc_step_size={float(self.rhmc_step_size):.6g}, rhmc_alpha={float(self.rhmc_alpha):.6g}, rhmc_eps_reg={float(self.eps_reg):.6g}")
+            print(f"[RHMC INIT] Covariance: sigma_normalization_mode='{self.sigma_normalization_mode}', initial_target_radius={self.initial_target_radius:.6g}")
         except Exception:
             pass
         # TRACE-once guard and flags
@@ -316,7 +457,7 @@ class RiemannianRHMCPosterior(nn.Module):
             self._last_sigma_mu = Sigma_mu.detach().clone()
 
             # Step 2: RHMC exploration (differentiable pushforward)
-            z_final, traj_states = self._rhmc_exploration(z0, record_traj=traj_flag)
+            z_final, traj_states = self._rhmc_exploration(z0, record_traj=traj_flag, mu=mu)
 
             debug_mode = os.environ.get("RLVAE_DEBUG", "0") == "1"
             if debug_mode:
@@ -480,12 +621,12 @@ class RiemannianRHMCPosterior(nn.Module):
                 I = torch.eye(d, device=mu.device, dtype=mu.dtype).unsqueeze(0)
                 G_mu = self._ctx['model'].G(mu)
                 G_mu = _symmetrize(G_mu)
-                C, _ = _safe_cholesky(G_mu + self.eps_reg * I, self.min_cov_eig)
+                C, _, _ = _safe_cholesky(G_mu + self.eps_reg * I, self.min_cov_eig)
                 # 2) Multi-try sampling
                 if C.ndim == 2:
                     C = C.unsqueeze(0)
                 B, D = mu.shape
-                K = int(getattr(self, 'initial_n_candidates', 8))
+                K = int(getattr(self, 'initial_n_candidates', 1))
                 K = max(1, K)
                 xi1 = torch.randn(B, K, D, device=mu.device, dtype=C.dtype)
                 xi2 = torch.randn(B, K, D, device=mu.device, dtype=mu.dtype)
@@ -496,8 +637,18 @@ class RiemannianRHMCPosterior(nn.Module):
                     z_eval = z_cand.reshape(B * K, D)
                     from .metric_utils import half_logdet_volume
                     Gz = self._ctx['model'].G(z_eval)
-                    h = half_logdet_volume(Gz, 'g', jitter=self.eps_reg).reshape(B, K)
+                    h = half_logdet_volume(Gz, 'g', jitter=self.eps_reg).reshape(B, K)  # FIXED: Negate to maximize +½log|G⁻¹|
                 best = torch.argmax(h, dim=1)
+                
+                # DIAGNOSTIC: Analyze candidates before selection
+                # Compute G^{-1}(μ) and Sigma early for diagnostics
+                G_inv_mu_diag = torch.linalg.inv(G_mu.float())
+                Sigma_diag = self._make_covariance(G_inv_mu_diag.to(mu.dtype), alpha)
+                if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                    batch_counter = getattr(self, '_debug_batch_counter', 0)
+                    self._diagnose_candidates(z_cand.to(mu.dtype), mu, Sigma_diag, h, best, batch_counter)
+                    self._debug_batch_counter = batch_counter + 1
+                
                 z0 = z_cand[torch.arange(B, device=mu.device), best].to(mu.dtype)
                 # Optional radial cap on initial displacement
                 try:
@@ -509,21 +660,27 @@ class RiemannianRHMCPosterior(nn.Module):
                     dnorm = torch.norm(delta, dim=-1, keepdim=True)
                     scale = torch.clamp(max_norm / (dnorm + 1e-12), max=1.0)
                     z0 = mu + scale * delta
-                # 5) Prepare Σ for return (for log q computations)
-                # Compute G^{-1}(μ) in float32 for stability
-                G_inv_mu = torch.linalg.inv(G_mu.float())
-                Sigma = self._make_covariance(G_inv_mu.to(mu.dtype), alpha)
+                # 5) Prepare Σ for return (already computed for diagnostics)
+                Sigma = Sigma_diag
+                # Save z_selected (after multi-try, before volume) and z_base for stage tracking
+                z_selected = z0.clone() if os.environ.get("RLVAE_DEBUG", "0") == "1" else None
                 # Optional manifold-aware acceptance: require non-decrease in log|G^{-1}|
-                z0 = self._initial_accept_volume(z0, mu)
+                z0 = self._initial_accept_volume(z0, mu, Sigma)
+                
+                # DIAGNOSTIC: Comprehensive initial sampling analysis with stage comparison
+                if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                    self._diagnose_initial_sample(z_selected, z0, mu, Sigma, alpha)
+                    self._diagnose_metric_at_samples(z0, mu, z_selected)
+                
                 return z0, Sigma
             else:
                 # Standard covariance-based path with multi-try sampling
                 G_inv_mu = self._get_inverse_metric(mu)
                 Sigma = self._make_covariance(G_inv_mu, alpha)
-                chol, Sigma = _safe_cholesky(Sigma, self.min_cov_eig)
+                chol, Sigma, _ = _safe_cholesky(Sigma, self.min_cov_eig)
                 
                 B, D = mu.shape
-                K = int(getattr(self, 'initial_n_candidates', 8))
+                K = int(getattr(self, 'initial_n_candidates', 1))
                 K = max(1, K)
                 
                 # Ensure chol has the correct shape [B, D, D]
@@ -574,8 +731,15 @@ class RiemannianRHMCPosterior(nn.Module):
                     z_eval = z_cand.reshape(B * K, D).detach().requires_grad_(False)
                     Gz = self._ctx['model'].G(z_eval)
                     from .metric_utils import half_logdet_volume
-                    h = half_logdet_volume(Gz, 'g', jitter=self.eps_reg).reshape(B, K)  # 0.5 log|G^{-1}|
+                    h = -half_logdet_volume(Gz, 'g', jitter=self.eps_reg).reshape(B, K)  # FIXED: Negate to maximize +½log|G⁻¹|
                 best_idx = torch.argmax(h, dim=1)
+                
+                # DIAGNOSTIC: Analyze candidates before selection
+                if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                    batch_counter = getattr(self, '_debug_batch_counter', 0)
+                    self._diagnose_candidates(z_cand.to(mu.dtype), mu, Sigma, h, best_idx, batch_counter)
+                    self._debug_batch_counter = batch_counter + 1
+                
                 z0 = z_cand[torch.arange(B, device=mu.device), best_idx]
                 z0 = z0.to(mu.dtype)
                 # Optional radial cap on initial displacement
@@ -588,7 +752,15 @@ class RiemannianRHMCPosterior(nn.Module):
                     dnorm = torch.norm(delta, dim=-1, keepdim=True)
                     scale = torch.clamp(max_norm / (dnorm + 1e-12), max=1.0)
                     z0 = mu + scale * delta
-                z0 = self._initial_accept_volume(z0, mu)
+                # Save z_selected (after multi-try, before volume) for stage tracking
+                z_selected = z0.clone() if os.environ.get("RLVAE_DEBUG", "0") == "1" else None
+                z0 = self._initial_accept_volume(z0, mu, Sigma)
+                
+                # DIAGNOSTIC: Comprehensive initial sampling analysis with stage comparison
+                if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                    self._diagnose_initial_sample(z_selected, z0, mu, Sigma, alpha)
+                    self._diagnose_metric_at_samples(z0, mu, z_selected)
+                
                 return z0, Sigma
         except Exception as exc:
             if getattr(self, '_ctx', None) and getattr(self._ctx.get('model', None), 'riemannian_strict', False) or os.environ.get('RLVAE_STRICT', '0') == '1':
@@ -614,15 +786,40 @@ class RiemannianRHMCPosterior(nn.Module):
         # Clamp spectrum for robustness
         try:
             evals, evecs = torch.linalg.eigh(Ginv.float())
+            evals_orig = evals.clone()  # Save for diagnostics
             evals = torch.clamp(evals, min=self.min_cov_eig)
+            
             # Optional normalization by geometric mean so det(Ginv_norm)=1
             mode = str(getattr(self, 'sigma_normalization_mode', 'geomean')).lower()
+            
+            # DIAGNOSTIC: Show normalization mode and effect
+            if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                print(f"\n[_get_inverse_metric NORMALIZATION]")
+                print(f"  mode:                  {mode}")
+                print(f"  Original G⁻¹ eigenvalues: min={evals_orig.min().item():.6f}, max={evals_orig.max().item():.6f}")
+                print(f"  After clamping:        min={evals.min().item():.6f}, max={evals.max().item():.6f}")
+            
             if mode == 'geomean':
                 gm = torch.exp(torch.log(torch.clamp(evals, min=1e-12)).mean(dim=-1, keepdim=True))
-                evals = evals / gm
+                evals_normalized = evals / gm
+                
+                if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                    print(f"  Geomean:               {gm.mean().item():.6f}")
+                    print(f"  After geomean norm:    min={evals_normalized.min().item():.6f}, max={evals_normalized.max().item():.6f}")
+                    print(f"  log|G⁻¹_norm|:         {torch.log(evals_normalized).sum(dim=-1).mean().item():.6f} (should be ~0)")
+                
+                evals = evals_normalized
             elif mode == 'trace':
                 tr = evals.sum(dim=-1, keepdim=True)
-                evals = d * evals / torch.clamp(tr, min=1e-12)
+                evals_normalized = d * evals / torch.clamp(tr, min=1e-12)
+                
+                if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                    print(f"  Trace:                 {tr.mean().item():.6f}")
+                    print(f"  After trace norm:      min={evals_normalized.min().item():.6f}, max={evals_normalized.max().item():.6f}")
+                    print(f"  trace(G⁻¹_norm):       {evals_normalized.sum(dim=-1).mean().item():.6f} (should be {d})")
+                
+                evals = evals_normalized
+            
             # Recompose normalized precision
             Ginv_norm = (evecs @ torch.diag_embed(evals) @ evecs.transpose(-1, -2)).to(Ginv.dtype)
         except Exception:
@@ -632,6 +829,14 @@ class RiemannianRHMCPosterior(nn.Module):
 
         # Adapt alpha to hit a target Euclidean radius for initial draws
         target_r = float(getattr(self, 'initial_target_radius', 1.0))
+        
+        # DIAGNOSTIC: Show target radius adjustment
+        if os.environ.get("RLVAE_DEBUG", "0") == "1":
+            print(f"\n[_make_covariance TARGET RADIUS]")
+            print(f"  initial_target_radius: {target_r:.6f}")
+            print(f"  input alpha:           {alpha:.6f}")
+            print(f"  eps_reg:               {self.eps_reg:.6e}")
+        
         if target_r > 0:
             try:
                 tr_ginv = torch.einsum('bii->b', Ginv_norm.float()).unsqueeze(-1)
@@ -639,11 +844,35 @@ class RiemannianRHMCPosterior(nn.Module):
                 alpha_eff = ((target_r ** 2) - d * self.eps_reg) / torch.clamp(tr_ginv, min=1e-12)
                 # Keep batch-shapes aligned
                 alpha_eff = alpha_eff.clamp(min=1e-6).to(Ginv_norm.dtype)
+                import numpy as np
                 Sigma = alpha_eff.unsqueeze(-1).unsqueeze(-1) * Ginv_norm + self.eps_reg * eye
+                if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                    print(f"  trace(G⁻¹_norm):       {tr_ginv.mean().item():.6f}")
+                    print(f"  alpha_eff (adjusted):  {alpha_eff.mean().item():.6f}")
+                    eigvals_sigma = torch.linalg.eigvalsh(Sigma)
+                    trace_sigma = torch.diagonal(Sigma, dim1=-2, dim2=-1).sum(dim=-1)
+                    print(f"  Final Σ eigenvalues:   min={eigvals_sigma.min().item():.6f}, max={eigvals_sigma.max().item():.6f}")
+                    print(f"  Final trace(Σ):        {trace_sigma.mean().item():.6f}")
+                    print(f"  → TARGET RADIUS FORCES trace(Σ) ≈ {target_r**2:.2f}")
             except Exception:
                 Sigma = alpha * Ginv_norm + self.eps_reg * eye
+                if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                    print(f"  Target radius adjustment failed, using alpha={alpha}")
         else:
+            import numpy as np
             Sigma = alpha * Ginv_norm + self.eps_reg * eye
+            if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                print(f"  Target radius disabled (target_r=0), using alpha={alpha}")
+                # Consistency check: log|Σ| versus log|G⁻¹| + d·log α (ignoring εI effect)
+                try:
+                    sign_s, logdet_s = torch.slogdet(Sigma)
+                    sign_ginv, logdet_ginv = torch.slogdet(Ginv_norm)
+                    alpha_log = torch.log(torch.as_tensor(alpha, dtype=Ginv_norm.dtype, device=Ginv_norm.device))
+                    expected = logdet_ginv + (d * alpha_log)
+                    diff = (logdet_s - expected).abs().mean()
+                    print(f"  [Σ CONSISTENCY] mean|log|Σ| - (log|G⁻¹|+d·log α)| = {diff.item():.4e}")
+                except Exception:
+                    pass
 
         return self._stabilize_spd(_symmetrize(Sigma), self.min_cov_eig)
 
@@ -718,28 +947,57 @@ class RiemannianRHMCPosterior(nn.Module):
         # Final safety: small positive epsilon
         return 1e-3
 
-    def _initial_accept_volume(self, z0: torch.Tensor, mu: torch.Tensor) -> torch.Tensor:
+    def _initial_accept_volume(
+        self,
+        z0: torch.Tensor,
+        mu: torch.Tensor,
+        Sigma: Optional[torch.Tensor],
+    ) -> torch.Tensor:
         try:
             tol = float(getattr(self, 'initial_volume_tolerance', 0.0))
-            kmax = int(getattr(self, 'initial_max_retries', 3))
-            if tol <= 0 and kmax <= 0:
+            max_refine = int(getattr(self, 'initial_max_retries', 0))
+            if (tol <= 0 and max_refine <= 0) or Sigma is None:
                 return z0
+
             from .metric_utils import half_logdet_volume
-            G_mu = self._ctx['model'].G(mu)
-            h_mu = half_logdet_volume(G_mu, 'g', jitter=self.eps_reg)  # 0.5 log|G^{-1}(mu)|
-            z = z0
-            for _ in range(max(0, kmax)):
-                z_req = z.clone().detach().requires_grad_(True)
-                Gz = self._ctx['model'].G(z_req)
-                hz = half_logdet_volume(Gz, 'g', jitter=self.eps_reg)
-                if (hz >= h_mu - tol).all():
-                    return z_req.detach()
-                grad_h, = torch.autograd.grad(hz.sum(), z_req, retain_graph=False, create_graph=False, allow_unused=True)
-                if grad_h is None:
-                    break
-                step = float(getattr(self, 'projection_step_scale', 0.05))
-                z = (z_req + step * grad_h).detach()
-            return z
+
+            with torch.no_grad():
+                G_mu = self._ctx['model'].G(mu)
+                target = half_logdet_volume(G_mu, 'g', jitter=self.eps_reg) - tol
+                try:
+                    chol, _, _ = _safe_cholesky(Sigma, self.min_cov_eig)
+                except Exception:
+                    chol = None
+
+                z = z0.clone()
+                total_attempts = max(0, max_refine) + 1
+                for attempt in range(total_attempts):
+                    Gz = self._ctx['model'].G(z)
+                    hz = -half_logdet_volume(Gz, 'g', jitter=self.eps_reg)
+                    accept_mask = hz >= target
+                    if accept_mask.all():
+                        return torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
+
+                    if attempt == total_attempts - 1 or chol is None:
+                        # Out of retries or no covariance available; return current samples
+                        return torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
+
+                    deficit = (~accept_mask).nonzero(as_tuple=True)[0]
+                    if deficit.numel() == 0:
+                        return torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
+
+                    eps = torch.randn(
+                        deficit.numel(),
+                        z.shape[-1],
+                        device=z.device,
+                        dtype=z.dtype,
+                    )
+                    chol_subset = chol[deficit]
+                    step = torch.einsum('bij,bj->bi', chol_subset, eps)
+                    z = z.clone()
+                    z[deficit] = mu[deficit] + step
+
+                return torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
         except Exception:
             return z0
 
@@ -790,18 +1048,524 @@ class RiemannianRHMCPosterior(nn.Module):
             eye = torch.eye(d, device=matrix.device, dtype=matrix.dtype).unsqueeze(0)
             return _symmetrize(matrix + min_eig * eye)
 
+    def _diagnose_initial_sample(
+        self, 
+        z_selected: torch.Tensor, 
+        z0: torch.Tensor, 
+        mu: torch.Tensor, 
+        Sigma: torch.Tensor,
+        alpha: float
+    ) -> None:
+        """
+        Comprehensive diagnostics for initial sampling with stage-by-stage comparison.
+        Shows Σ_μ properties, selection effects, volume acceptance, and Mahalanobis decomposition.
+        
+        Args:
+            z_selected: Sample after multi-try selection, before volume acceptance
+            z0: Final sample after volume acceptance (actual RHMC starting point)
+            mu: Encoder mean
+            Sigma: Covariance matrix Σ_μ = α·G⁻¹(μ) + ε·I
+            alpha: Scaling parameter
+        """
+        import numpy as np
+        
+        print(f"\n{'='*80}")
+        print(f"[INITIAL SAMPLING DIAGNOSTICS]")
+        print(f"{'='*80}")
+        
+        # 1. Σ_μ Properties
+        try:
+            eigvals_sigma = torch.linalg.eigvalsh(Sigma)
+            logdet_sigma = torch.linalg.slogdet(Sigma)[1]
+            trace_sigma = torch.diagonal(Sigma, dim1=-2, dim2=-1).sum(dim=-1)
+            cond_sigma = eigvals_sigma.max(dim=-1)[0] / eigvals_sigma.min(dim=-1)[0].clamp(min=1e-12)
+            
+            print(f"\n[Σ_μ PROPERTIES]")
+            print(f"  alpha:                 {alpha:.6f}")
+            print(f"  Σ eigenvalues:         min={eigvals_sigma.min().item():.6e}, max={eigvals_sigma.max().item():.6f}")
+            print(f"  Σ trace:               {trace_sigma.mean().item():.6f}")
+            print(f"  log|Σ|:                {logdet_sigma.mean().item():.6f}")
+            print(f"  Condition number:      {cond_sigma.mean().item():.2f}")
+            print(f"  Anisotropy ratio:      {(eigvals_sigma.max(dim=-1)[0] / eigvals_sigma.min(dim=-1)[0]).mean().item():.2f}")
+        except Exception as e:
+            print(f"  [Error computing Σ properties: {e}]")
+        
+        # 2. Distance Analysis: z_selected → z0 (stage-by-stage)
+        if z_selected is not None:
+            dist_selected_mu = torch.norm(z_selected - mu, dim=-1)
+            dist_z0_mu = torch.norm(z0 - mu, dim=-1)
+            dist_selected_z0 = torch.norm(z_selected - z0, dim=-1)
+            
+            print(f"\n[STAGE-BY-STAGE DISTANCE ANALYSIS]")
+            print(f"  ||z_selected - μ||:    mean={dist_selected_mu.mean().item():.4f}, std={dist_selected_mu.std().item():.4f}")
+            print(f"  ||z0 - μ||:            mean={dist_z0_mu.mean().item():.4f}, std={dist_z0_mu.std().item():.4f}")
+            print(f"  ||z_selected - z0||:   mean={dist_selected_z0.mean().item():.4f}, std={dist_selected_z0.std().item():.4f}")
+            print(f"  Δ||·-μ|| (volume acc): {(dist_z0_mu.mean() - dist_selected_mu.mean()).item():+.4f}")
+            
+            # Mahalanobis distances for both stages
+            try:
+                Sigma_inv = torch.linalg.inv(Sigma.float())
+                diff_selected = z_selected - mu
+                diff_z0 = z0 - mu
+                mahal_sq_selected = torch.einsum('bi,bij,bj->b', diff_selected.float(), Sigma_inv, diff_selected.float())
+                mahal_sq_z0 = torch.einsum('bi,bij,bj->b', diff_z0.float(), Sigma_inv, diff_z0.float())
+                
+                print(f"\n[SELECTION STAGE COMPARISON]")
+                print(f"  z_selected Mahal²:     mean={mahal_sq_selected.mean().item():.4f}")
+                print(f"  z0 Mahal²:             mean={mahal_sq_z0.mean().item():.4f}")
+                print(f"  Δ Mahal² (vol acc):    {(mahal_sq_z0.mean() - mahal_sq_selected.mean()).item():+.4f}")
+                
+                if dist_z0_mu.mean() < dist_selected_mu.mean():
+                    print(f"  → Volume acceptance MOVED CLOSER to μ")
+                elif dist_z0_mu.mean() > dist_selected_mu.mean():
+                    print(f"  → Volume acceptance MOVED AWAY from μ")
+                else:
+                    print(f"  → Volume acceptance had NO EFFECT on distance")
+            except Exception as e:
+                print(f"  [Error computing stage Mahalanobis: {e}]")
+        else:
+            dist_z0_mu = torch.norm(z0 - mu, dim=-1)
+            print(f"\n[DISTANCE ANALYSIS]")
+            print(f"  ||z0 - μ||:            mean={dist_z0_mu.mean().item():.4f}, std={dist_z0_mu.std().item():.4f}")
+        
+        # 3. Expected vs Actual Distance
+        try:
+            # For N(μ, Σ), E[||z-μ||] ≈ √(tr(Σ))
+            expected_dist = torch.sqrt(trace_sigma)
+            print(f"\n[EXPECTED VS ACTUAL]")
+            print(f"  Expected ||z-μ||:      √(tr(Σ)) = {expected_dist.mean().item():.4f}")
+            print(f"  Actual ||z0-μ||:       {dist_z0_mu.mean().item():.4f}")
+            print(f"  Ratio (actual/expected): {(dist_z0_mu.mean() / expected_dist.mean()).item():.4f}")
+            
+            if dist_z0_mu.mean() > 1.5 * expected_dist.mean():
+                print(f"  ⚠️  WARNING: z0 is FAR from μ (>1.5× expected)")
+            elif dist_z0_mu.mean() < 0.5 * expected_dist.mean():
+                print(f"  ⚠️  WARNING: z0 is TOO CLOSE to μ (<0.5× expected)")
+        except Exception as e:
+            print(f"  [Error computing expected distance: {e}]")
+        
+        # 4. Mahalanobis Distance & Decomposition
+        try:
+            diff = z0 - mu
+            Sigma_inv = torch.linalg.inv(Sigma)
+            mahal_sq = torch.einsum('bi,bij,bj->b', diff, Sigma_inv, diff)
+            mahal_dist = torch.sqrt(mahal_sq)
+            
+            # Compare Euclidean vs Mahalanobis
+            euclidean_sq = torch.norm(diff, dim=-1) ** 2
+            
+            print(f"\n[MAHALANOBIS ANALYSIS]")
+            print(f"  Euclidean dist²:       mean={euclidean_sq.mean().item():.4f}")
+            print(f"  Mahalanobis dist²:     mean={mahal_sq.mean().item():.4f}")
+            print(f"  Mahalanobis dist:      mean={mahal_dist.mean().item():.4f}")
+            print(f"  Ratio (Mahal²/Euclid²): {(mahal_sq.mean() / euclidean_sq.mean().clamp(min=1e-12)).item():.4f}")
+            
+            # Decompose in eigenbasis of Σ
+            eigvals, eigvecs = torch.linalg.eigh(Sigma)
+            # Transform diff to eigenspace: y = V^T (z-μ)
+            y = torch.einsum('bij,bj->bi', eigvecs.transpose(-1, -2), diff)
+            # Contribution per eigenvalue: y_i² / λ_i
+            contrib_per_eig = (y ** 2) / eigvals.clamp(min=1e-12)
+            
+            print(f"\n[MAHALANOBIS DECOMPOSITION in Eigenbasis]")
+            D = eigvals.shape[-1]
+            for i in range(D):
+                print(f"  Eigenvalue {i}: λ={eigvals[0, i].item():.4f}, "
+                      f"y²={y[0, i].item()**2:.4f}, "
+                      f"contrib=(y²/λ)={contrib_per_eig[0, i].item():.4f}")
+            
+            # Check if Mahalanobis² ~ χ²(D)
+            D = diff.shape[-1]
+            print(f"\n[CHI-SQUARED TEST]")
+            print(f"  Dimension D:           {D}")
+            print(f"  Expected Mahal²:       χ²({D}) mean = {D:.1f}")
+            print(f"  Actual Mahal²:         {mahal_sq.mean().item():.4f}")
+            print(f"  Deviation:             {(mahal_sq.mean().item() - D):.4f} ({100*(mahal_sq.mean().item() - D)/D:.1f}%)")
+            
+            if abs(mahal_sq.mean().item() - D) > 2 * np.sqrt(2 * D):
+                print(f"  ⚠️  WARNING: Mahalanobis² significantly deviates from χ²({D})")
+                print(f"               This suggests mismatch between sampling and Σ_μ")
+            
+            # Enhanced: Histogram comparison and KS test
+            try:
+                from scipy import stats
+                mahal_sq_np = mahal_sq.cpu().numpy()
+                
+                # KS test against χ²(D) distribution
+                ks_stat, ks_pval = stats.kstest(mahal_sq_np, lambda x: stats.chi2.cdf(x, D))
+                print(f"\n[KOLMOGOROV-SMIRNOV TEST]")
+                print(f"  KS statistic:          {ks_stat:.4f}")
+                print(f"  KS p-value:            {ks_pval:.4e}")
+                if ks_pval < 0.01:
+                    print(f"  ⚠️  REJECT null hypothesis: distribution does NOT match χ²({D})")
+                else:
+                    print(f"  ✓ Cannot reject: distribution consistent with χ²({D})")
+                
+                # Histogram bins: compare empirical density to theoretical
+                if len(mahal_sq_np) >= 10:
+                    hist_bins = np.linspace(0, max(mahal_sq_np.max(), 3*D), 10)
+                    hist_counts, _ = np.histogram(mahal_sq_np, bins=hist_bins, density=True)
+                    hist_centers = (hist_bins[:-1] + hist_bins[1:]) / 2
+                    theoretical_density = stats.chi2.pdf(hist_centers, D)
+                    
+                    print(f"\n[HISTOGRAM COMPARISON] (first 5 bins)")
+                    print(f"  {'Bin Center':>12} {'Empirical':>12} {'Theoretical':>12} {'Ratio':>10}")
+                    for i in range(min(5, len(hist_centers))):
+                        ratio = hist_counts[i] / (theoretical_density[i] + 1e-12)
+                        print(f"  {hist_centers[i]:12.2f} {hist_counts[i]:12.4f} {theoretical_density[i]:12.4f} {ratio:10.2f}")
+            except ImportError:
+                print(f"  [scipy not available for KS test]")
+            except Exception as e:
+                print(f"  [Error in enhanced χ² test: {e}]")
+        except Exception as e:
+            print(f"  [Error computing Mahalanobis: {e}]")
+        
+        # 5. Statistical Validation: Empirical vs Theoretical
+        try:
+            # For a batch, compute empirical covariance of (z-μ)
+            if z0.shape[0] > 1:
+                diff_centered = z0 - mu
+                emp_cov = torch.einsum('bi,bj->ij', diff_centered, diff_centered) / z0.shape[0]
+                
+                # Compare with Σ
+                sigma_mean = Sigma.mean(dim=0)
+                frobenius_diff = torch.norm(emp_cov - sigma_mean, p='fro')
+                frobenius_sigma = torch.norm(sigma_mean, p='fro')
+                
+                print(f"\n[EMPIRICAL VS THEORETICAL COVARIANCE]")
+                print(f"  Batch size:            {z0.shape[0]}")
+                print(f"  ||Empirical - Σ||_F:   {frobenius_diff.item():.4f}")
+                print(f"  ||Σ||_F:               {frobenius_sigma.item():.4f}")
+                print(f"  Relative error:        {(frobenius_diff / frobenius_sigma.clamp(min=1e-12)).item():.4f}")
+                
+                if z0.shape[0] < 10:
+                    print(f"  Note: Batch too small ({z0.shape[0]}) for reliable empirical covariance")
+        except Exception as e:
+            print(f"  [Error computing empirical covariance: {e}]")
+        
+        print(f"\n{'='*80}\n")
+
+    def _diagnose_candidates(
+        self,
+        z_cand: torch.Tensor,  # [B, K, D]
+        mu: torch.Tensor,      # [B, D]
+        Sigma: torch.Tensor,   # [B, D, D] or [1, D, D]
+        h_scores: torch.Tensor,  # [B, K]
+        selected_idx: torch.Tensor,  # [B]
+        batch_counter: int = 0,
+    ) -> None:
+        """
+        Diagnose raw candidates vs selection prior to volume acceptance.
+
+        Logs summary stats across candidates and highlights selection bias by
+        comparing Mahalanobis distances and correlation with h_scores.
+        """
+        import os
+        if os.environ.get("RLVAE_DEBUG", "0") != "1":
+            return
+
+        try:
+            B, K, D = z_cand.shape
+            # Ensure Sigma broadcast to [B, D, D]
+            if Sigma.dim() == 3 and Sigma.shape[0] == 1 and B > 1:
+                Sigma_b = Sigma.expand(B, D, D)
+            else:
+                Sigma_b = Sigma
+
+            diff = z_cand - mu.unsqueeze(1)  # [B, K, D]
+
+            # Euclidean norms
+            euclid = torch.norm(diff, dim=-1)  # [B, K]
+
+            # Mahalanobis using explicit inverse (D is small)
+            Sigma_inv = torch.linalg.inv(Sigma_b.float())  # [B, D, D]
+            mahal_sq = torch.einsum('bkd,bij,bkj->bk', diff.float(), Sigma_inv, diff.float())  # [B, K]
+
+            # Selected candidate stats
+            gather_idx = selected_idx.view(B, 1)
+            sel_euclid = torch.gather(euclid, 1, gather_idx).squeeze(1)
+            sel_mahal_sq = torch.gather(mahal_sq, 1, gather_idx).squeeze(1)
+            sel_h = torch.gather(h_scores, 1, gather_idx).squeeze(1)
+
+            # Correlation h_scores vs mahal_sq across all candidates
+            h_flat = h_scores.reshape(-1).float()
+            m_flat = mahal_sq.reshape(-1).float()
+            h_c = h_flat - h_flat.mean()
+            m_c = m_flat - m_flat.mean()
+            corr = (h_c @ m_c) / (torch.norm(h_c) * torch.norm(m_c) + 1e-12)
+
+            print(f"\n{'='*80}")
+            print(f"[CANDIDATE DIAGNOSTICS] B={B}, K={K}, D={D}")
+            print(f"{'='*80}")
+
+            # Summary over all B×K
+            print(f"\n[SUMMARY OVER ALL CANDIDATES]")
+            print(f"  ||z-μ||:              mean={euclid.mean().item():.4f}, std={euclid.std().item():.4f}, min={euclid.min().item():.4f}, max={euclid.max().item():.4f}")
+            print(f"  Mahal²:               mean={mahal_sq.mean().item():.4f}, std={mahal_sq.std().item():.4f}, min={mahal_sq.min().item():.4f}, max={mahal_sq.max().item():.4f}")
+            print(f"  h=0.5·log|G⁻¹|:      mean={h_scores.mean().item():.4f}, std={h_scores.std().item():.4f}, min={h_scores.min().item():.4f}, max={h_scores.max().item():.4f}")
+            print(f"  Corr(h, Mahal²):      {corr.item():+.4f}")
+
+            # Chi-squared expectation
+            print(f"\n[CHI-SQUARED EXPECTATION]")
+            print(f"  D:                    {D}")
+            print(f"  Expected Mahal² mean: {float(D):.4f}")
+            print(f"  Observed Mahal² mean: {mahal_sq.mean().item():.4f}  (Δ={(mahal_sq.mean()-D).item():+.4f})")
+
+            # Selected vs pool comparison
+            print(f"\n[SELECTION VS POOL]")
+            print(f"  Selected h:           mean={sel_h.mean().item():.4f}")
+            print(f"  Selected ||z-μ||:     mean={sel_euclid.mean().item():.4f}")
+            print(f"  Selected Mahal²:      mean={sel_mahal_sq.mean().item():.4f}")
+            print(f"  Δ Mahal²(sel - pool): {(sel_mahal_sq.mean() - mahal_sq.mean()).item():+.4f}")
+
+            # Detailed dump for first few batches
+            if batch_counter < 3:
+                max_print_b = min(B, 2)
+                for b in range(max_print_b):
+                    print(f"\n  [BATCH {batch_counter} SAMPLE {b}] selected k={int(selected_idx[b].item())}")
+                    for k in range(K):
+                        mark = '*' if k == int(selected_idx[b].item()) else ' '
+                        print(
+                            f"   {mark} k={k:02d}  h={h_scores[b,k].item():+.4f}  ||·||={euclid[b,k].item():.4f}  Mahal²={mahal_sq[b,k].item():.4f}"
+                        )
+
+            print(f"\n{'='*80}\n")
+        except Exception as e:
+            print(f"[CANDIDATE DIAGNOSTICS ERROR] {e}")
+
+    def _diagnose_metric_at_samples(
+        self,
+        z0: torch.Tensor,
+        mu: torch.Tensor,
+        z_base: torch.Tensor = None
+    ) -> None:
+        """
+        Diagnose metric (det G^{-1}) values at sample points.
+        
+        Check if samples are biased toward high or low volume regions,
+        and if distance from μ correlates with metric values.
+        
+        Args:
+            z0: Final samples (after multi-try/volume acceptance)
+            mu: Encoder mean
+            z_base: Initial samples before acceptance (optional)
+        """
+        import os
+        if os.environ.get("RLVAE_DEBUG", "0") != "1":
+            return
+            
+        print(f"\n{'='*80}")
+        print(f"[METRIC AT SAMPLES DIAGNOSTICS]")
+        print(f"{'='*80}")
+        
+        try:
+            # Compute G^{-1} at μ and at z0
+            model = self._ctx['model']
+            if hasattr(model, 'metric_tensor'):
+                G_inv_mu = model.metric_tensor.compute_metric_inv(mu)
+                G_inv_z0 = model.metric_tensor.compute_metric_inv(z0)
+            elif hasattr(model, 'G_inv'):
+                G_inv_mu = model.G_inv(mu)
+                G_inv_z0 = model.G_inv(z0)
+            else:
+                print(f"  [Cannot compute G⁻¹: model has no metric_tensor or G_inv attribute]")
+                return
+            
+            # Compute log determinants
+            _, logdet_mu = torch.linalg.slogdet(G_inv_mu)
+            _, logdet_z0 = torch.linalg.slogdet(G_inv_z0)
+            
+            print(f"\n[LOG DET G⁻¹ DISTRIBUTION]")
+            print(f"  At μ:                  mean={logdet_mu.mean().item():.4f}")
+            print(f"  At z0:                 mean={logdet_z0.mean().item():.4f}, std={logdet_z0.std().item():.4f}")
+            print(f"  min(z0):               {logdet_z0.min().item():.4f}")
+            print(f"  max(z0):               {logdet_z0.max().item():.4f}")
+            print(f"  Δ(z0 - μ):             {(logdet_z0.mean() - logdet_mu.mean()).item():.4f}")
+            
+            if logdet_z0.mean() < logdet_mu.mean():
+                print(f"  ⚠️  WARNING: Samples have LOWER log|G⁻¹| than μ (moving to low-volume regions!)")
+            else:
+                print(f"  ✓ Samples have higher log|G⁻¹| than μ (good for prior)")
+            
+            # Check correlation: ||z-μ|| vs log|G⁻¹(z)|
+            dist_z0_mu = torch.norm(z0 - mu, dim=-1)
+            if z0.shape[0] > 1:
+                # Pearson correlation
+                dist_mean = dist_z0_mu.mean()
+                logdet_mean = logdet_z0.mean()
+                dist_centered = dist_z0_mu - dist_mean
+                logdet_centered = logdet_z0 - logdet_mean
+                corr_num = (dist_centered * logdet_centered).sum()
+                corr_denom = torch.sqrt((dist_centered**2).sum() * (logdet_centered**2).sum())
+                correlation = (corr_num / corr_denom.clamp(min=1e-12)).item()
+                
+                print(f"\n[CORRELATION: ||z-μ|| vs log|G⁻¹(z)|]")
+                print(f"  Pearson r:             {correlation:.4f}")
+                if abs(correlation) > 0.5:
+                    direction = "positive" if correlation > 0 else "negative"
+                    print(f"  Strong {direction} correlation: Farther samples {'have higher' if correlation > 0 else 'have lower'} log|G⁻¹|")
+                
+                # CRITICAL: Check for inversion behavior
+                if correlation < -0.3:
+                    print(f"  ⚠️  INVERSION DETECTED: Strong negative correlation!")
+                    print(f"      This suggests samples move AWAY from high-volume regions as expected.")
+                    print(f"      This contradicts the uniform prior objective p(z) ∝ √det(G⁻¹(z)).")
+                    print(f"      Possible causes:")
+                    print(f"        1. Sign error in RHMC gradient calculation")
+                    print(f"        2. Sign error in KL prior term calculation") 
+                    print(f"        3. Numerical instability with large α")
+                    print(f"        4. Interaction with reconstruction loss")
+            
+            # If z_base is provided, compare before/after acceptance
+            if z_base is not None:
+                if hasattr(model, 'metric_tensor'):
+                    G_inv_base = model.metric_tensor.compute_metric_inv(z_base)
+                elif hasattr(model, 'G_inv'):
+                    G_inv_base = model.G_inv(z_base)
+                else:
+                    G_inv_base = None
+                
+                if G_inv_base is not None:
+                    _, logdet_base = torch.linalg.slogdet(G_inv_base)
+                
+                print(f"\n[VOLUME ACCEPTANCE EFFECT]")
+                print(f"  log|G⁻¹(z_base)|:      mean={logdet_base.mean().item():.4f}")
+                print(f"  log|G⁻¹(z0)|:          mean={logdet_z0.mean().item():.4f}")
+                print(f"  Δ(z0 - z_base):        {(logdet_z0.mean() - logdet_base.mean()).item():.4f}")
+                
+                if logdet_z0.mean() > logdet_base.mean():
+                    print(f"  ✓ Volume acceptance increased log|G⁻¹| (moved to higher-volume regions)")
+                else:
+                    print(f"  Volume acceptance had no effect or decreased log|G⁻¹|")
+                    
+        except Exception as e:
+            print(f"  [Error computing metric diagnostics: {e}]")
+            import traceback
+            traceback.print_exc()
+        
+        print(f"\n{'='*80}\n")
+
+    def _diagnose_posterior_mismatch(
+        self,
+        z: torch.Tensor,
+        mu: torch.Tensor,
+        Sigma: torch.Tensor
+    ) -> dict:
+        """
+        Statistical tests for posterior mismatch.
+        Returns dictionary with test statistics and Q-Q plot data.
+        
+        Args:
+            z: Samples [B, D]
+            mu: Mean [B, D] or [1, D]
+            Sigma: Covariance [B, D, D] or [1, D, D]
+        
+        Returns:
+            dict with keys: 'chi_sq_stat', 'qq_theoretical', 'qq_empirical', 'cov_mismatch'
+        """
+        results = {}
+        
+        try:
+            diff = z - mu
+            Sigma_inv = torch.linalg.inv(Sigma)
+            
+            # Chi-squared test: (z-μ)ᵀ Σ⁻¹ (z-μ) ~ χ²(D)
+            mahal_sq = torch.einsum('bi,bij,bj->b', diff, Sigma_inv, diff)
+            D = z.shape[-1]
+            
+            results['chi_sq_stat'] = {
+                'observed': mahal_sq.mean().item(),
+                'expected': float(D),
+                'deviation_sigmas': abs(mahal_sq.mean().item() - D) / np.sqrt(2 * D)
+            }
+            
+            # Q-Q plot data
+            if z.shape[0] >= 5:
+                sorted_mahal, _ = torch.sort(mahal_sq)
+                n = sorted_mahal.shape[0]
+                # Theoretical quantiles from χ²(D)
+                from scipy import stats
+                theoretical_quantiles = [stats.chi2.ppf((i + 0.5) / n, D) for i in range(n)]
+                
+                results['qq_data'] = {
+                    'theoretical': theoretical_quantiles,
+                    'empirical': sorted_mahal.cpu().numpy().tolist()
+                }
+            
+            # Empirical covariance mismatch
+            if z.shape[0] > 1:
+                emp_cov = torch.cov(diff.T)
+                sigma_mean = Sigma.mean(dim=0) if Sigma.shape[0] > 1 else Sigma[0]
+                frobenius_error = torch.norm(emp_cov - sigma_mean, p='fro') / torch.norm(sigma_mean, p='fro').clamp(min=1e-12)
+                
+                results['cov_mismatch'] = {
+                    'relative_frobenius_error': frobenius_error.item(),
+                    'batch_size': z.shape[0]
+                }
+        
+        except Exception as e:
+            results['error'] = str(e)
+        
+        return results
+
     def _rhmc_exploration(
         self,
         z0: torch.Tensor,
         record_traj: bool = False,
+        mu: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[List[Dict[str, torch.Tensor]]]]:
         """
         Step 2: Simple RHMC exploration without acceptance/rejection.
+        
+        Args:
+            z0: Starting position [B, D]
+            record_traj: Whether to record trajectory
+            mu: Encoder mean for diagnostics [B, D]
         """
         z = z0.clone()
         
         # Sample initial momentum
         rho = self._sample_momentum(z)
+        
+        # DIAGNOSTIC: RHMC Trajectory Analysis
+        import os
+        if os.environ.get("RLVAE_DEBUG", "0") == "1" and mu is not None:
+            print(f"\n{'='*80}")
+            print(f"[RHMC TRAJECTORY DIAGNOSTICS]")
+            print(f"{'='*80}")
+            
+            # Initial state
+            dist_z0_mu = torch.norm(z0 - mu, dim=-1)
+            rho_norm = torch.norm(rho, dim=-1)
+            
+            print(f"\n[INITIAL STATE (k=0)]")
+            print(f"  ||z0 - μ||:            mean={dist_z0_mu.mean().item():.4f}, max={dist_z0_mu.max().item():.4f}")
+            print(f"  ||ρ0||:                mean={rho_norm.mean().item():.4f}, max={rho_norm.max().item():.4f}")
+            
+            # Track trajectory including metric values
+            try:
+                model = self._ctx['model']
+                if hasattr(model, 'metric_tensor'):
+                    G_inv_z0 = model.metric_tensor.compute_metric_inv(z0)
+                elif hasattr(model, 'G_inv'):
+                    G_inv_z0 = model.G_inv(z0)
+                else:
+                    G_inv_z0 = None
+                
+                if G_inv_z0 is not None:
+                    _, logdet_z0 = torch.linalg.slogdet(G_inv_z0)
+                    init_logdet = logdet_z0.mean().item()
+                else:
+                    init_logdet = 0.0
+            except Exception:
+                init_logdet = 0.0
+            
+            trajectory_data = {
+                'distances_from_mu': [dist_z0_mu.mean().item()],
+                'distances_from_z0': [0.0],
+                'momentum_norms': [rho_norm.mean().item()],
+                'logdet_Ginv': [init_logdet],
+            }
         
         # Simple leapfrog integration
         if record_traj:
@@ -809,10 +1573,122 @@ class RiemannianRHMCPosterior(nn.Module):
         else:
             traj = None
 
+        # DEBUG: Log step size right before loop
+        import os
+        if os.environ.get("RLVAE_DEBUG", "0") == "1" and not hasattr(self, '_rhmc_loop_logged'):
+            print(f"\n[RHMC LOOP DEBUG] self.rhmc_step_size = {self.rhmc_step_size}")
+            print(f"[RHMC LOOP DEBUG] About to call _leapfrog_step with step_size={self.rhmc_step_size}")
+            self._rhmc_loop_logged = True
+
         for step in range(self.rhmc_steps):
             z, rho = self._leapfrog_step(z, rho, self.rhmc_step_size)
             if record_traj:
                 traj.append({'step': step + 1, 'z': z.clone(), 'rho': rho.clone()})
+            
+            # DIAGNOSTIC: Track each step
+            if os.environ.get("RLVAE_DEBUG", "0") == "1" and mu is not None:
+                dist_z_mu = torch.norm(z - mu, dim=-1)
+                dist_z_z0 = torch.norm(z - z0, dim=-1)
+                rho_norm = torch.norm(rho, dim=-1)
+                
+                # Compute log|G⁻¹(z)| at current position
+                try:
+                    model = self._ctx['model']
+                    if hasattr(model, 'metric_tensor'):
+                        G_inv_z = model.metric_tensor.compute_metric_inv(z)
+                    elif hasattr(model, 'G_inv'):
+                        G_inv_z = model.G_inv(z)
+                    else:
+                        G_inv_z = None
+                    
+                    if G_inv_z is not None:
+                        _, logdet_z = torch.linalg.slogdet(G_inv_z)
+                        logdet_val = logdet_z.mean().item()
+                    else:
+                        logdet_val = 0.0
+                except Exception:
+                    logdet_val = 0.0
+                
+                trajectory_data['distances_from_mu'].append(dist_z_mu.mean().item())
+                trajectory_data['distances_from_z0'].append(dist_z_z0.mean().item())
+                trajectory_data['momentum_norms'].append(rho_norm.mean().item())
+                trajectory_data['logdet_Ginv'].append(logdet_val)
+                
+                print(f"\n[STEP k={step+1}]")
+                print(f"  ||z{step+1} - μ||:          mean={dist_z_mu.mean().item():.4f}")
+                print(f"  ||z{step+1} - z0||:         mean={dist_z_z0.mean().item():.4f}")
+                print(f"  ||ρ{step+1}||:             mean={rho_norm.mean().item():.4f}")
+                print(f"  log|G⁻¹(z{step+1})|:       {logdet_val:.4f}")
+        
+        # DIAGNOSTIC: Trajectory Summary
+        if os.environ.get("RLVAE_DEBUG", "0") == "1" and mu is not None:
+            dist_zK_mu = torch.norm(z - mu, dim=-1)
+            dist_zK_z0 = torch.norm(z - z0, dim=-1)
+            
+            print(f"\n[TRAJECTORY SUMMARY]")
+            print(f"  Initial ||z0 - μ||:    {trajectory_data['distances_from_mu'][0]:.4f}")
+            print(f"  Final ||zK - μ||:      {dist_zK_mu.mean().item():.4f}")
+            print(f"  Total drift from z0:   {dist_zK_z0.mean().item():.4f}")
+            print(f"  Net change in ||·-μ||: {(dist_zK_mu.mean() - trajectory_data['distances_from_mu'][0]):.4f}")
+            
+            if dist_zK_mu.mean() > trajectory_data['distances_from_mu'][0]:
+                print(f"  → RHMC MOVED AWAY from μ")
+            elif dist_zK_mu.mean() < trajectory_data['distances_from_mu'][0]:
+                print(f"  → RHMC MOVED TOWARD μ")
+            else:
+                print(f"  → RHMC STAYED AT SAME DISTANCE from μ")
+            
+            # Monotonicity check
+            distances = trajectory_data['distances_from_mu']
+            if all(distances[i] <= distances[i+1] for i in range(len(distances)-1)):
+                print(f"  → Trajectory MONOTONICALLY MOVES AWAY from μ")
+            elif all(distances[i] >= distances[i+1] for i in range(len(distances)-1)):
+                print(f"  → Trajectory MONOTONICALLY MOVES TOWARD μ")
+            else:
+                print(f"  → Trajectory is NON-MONOTONIC (oscillating)")
+            
+            # Metric evolution analysis
+            logdets = trajectory_data['logdet_Ginv']
+            if len(logdets) > 1:
+                print(f"\n[METRIC EVOLUTION]")
+                print(f"  Initial log|G⁻¹(z0)|:  {logdets[0]:.4f}")
+                print(f"  Final log|G⁻¹(zK)|:    {logdets[-1]:.4f}")
+                print(f"  Δ log|G⁻¹|:            {(logdets[-1] - logdets[0]):.4f}")
+                
+                if logdets[-1] > logdets[0]:
+                    print(f"  ✓ RHMC MOVED TO HIGHER log|G⁻¹| (toward prior!)")
+                elif logdets[-1] < logdets[0]:
+                    print(f"  ⚠️  RHMC MOVED TO LOWER log|G⁻¹| (away from prior!)")
+                else:
+                    print(f"  → No change in log|G⁻¹|")
+                
+                # Correlation: step number vs log|G⁻¹|
+                import numpy as np
+                steps = np.arange(len(logdets))
+                logdets_arr = np.array(logdets)
+                if len(steps) > 2:
+                    corr = np.corrcoef(steps, logdets_arr)[0, 1]
+                    print(f"  Correlation(step, log|G⁻¹|): {corr:.4f}")
+                    if abs(corr) > 0.7:
+                        direction = "increasing" if corr > 0 else "decreasing"
+                        print(f"    → Strong {direction} trend!")
+                    
+                    # CRITICAL: Check RHMC trajectory inversion
+                    if corr < -0.5:
+                        print(f"  ⚠️  RHMC INVERSION: Trajectory moves AWAY from high-volume regions!")
+                        print(f"      This contradicts RHMC objective to maximize log|G⁻¹|.")
+                        print(f"      Check _compute_potential_gradient sign and volume_force_sign.")
+                    
+                    # Also check correlation between distance from μ and log|G⁻¹|
+                    distances_arr = np.array(trajectory_data['distances_from_mu'])
+                    if len(distances_arr) > 2:
+                        corr_dist_vol = np.corrcoef(distances_arr, logdets_arr)[0, 1]
+                        print(f"  Correlation(||z-μ||, log|G⁻¹|): {corr_dist_vol:.4f}")
+                        if corr_dist_vol < -0.3:
+                            print(f"  ⚠️  DISTANCE-VOLUME INVERSION: Farther from μ → Lower volume!")
+                            print(f"      This suggests RHMC pushes samples to low-volume regions.")
+            
+            print(f"\n{'='*80}\n")
 
         return z, traj
     
@@ -823,7 +1699,7 @@ class RiemannianRHMCPosterior(nn.Module):
         try:
             G = self._ctx['model'].G(z)
             G = _symmetrize(G)
-            L, _ = _safe_cholesky(G + self.eps_reg * torch.eye(z.shape[-1], device=z.device, dtype=G.dtype).unsqueeze(0), self.eps_reg)
+            L, _, _ = _safe_cholesky(G + self.eps_reg * torch.eye(z.shape[-1], device=z.device, dtype=G.dtype).unsqueeze(0), self.eps_reg)
             eps = torch.randn_like(z, dtype=L.dtype)
             rho32 = torch.einsum('bij,bj->bi', L, eps)
             rho = rho32.to(z.dtype)
@@ -884,13 +1760,38 @@ class RiemannianRHMCPosterior(nn.Module):
             v_norm = torch.norm(velocity, dim=-1, keepdim=True)
             velocity = torch.where(v_norm > self.max_velocity_norm, velocity * (self.max_velocity_norm / (v_norm + 1e-12)), velocity)
             # Adaptive effective step to bound position change
-            eff_step = torch.clamp(self.max_position_step / (v_norm + 1e-12), max=1.0) * step_size
-            # Geometry-aware scaling by stiffness: scale by sqrt(min_eig(G^{-1})) = 1/sqrt(lambda_max(G))
+            eff_step = step_size#torch.clamp(self.max_position_step / (v_norm + 1e-12), max=1.0) * step_size
+            
+            # DEBUG: Log step size scaling
+            import os
+            if os.environ.get("RLVAE_DEBUG", "0") == "1" and hasattr(self, '_step_scaling_logged') and not self._step_scaling_logged:
+                print(f"\n[STEP SIZE SCALING DEBUG]")
+                print(f"  base step_size: {step_size:.6f}")
+                print(f"  velocity norm mean: {v_norm.mean().item():.6e}")
+                print(f"  max_position_step: {self.max_position_step}")
+                print(f"  scaling factor (max_pos_step/v_norm): {(self.max_position_step / (v_norm.mean() + 1e-12)).item():.6e}")
+                #print(f"  eff_step before stiff: {eff_step.mean().item():.6e}")
+            
+            # FIX: Geometry-aware scaling was TOO aggressive, crushing steps to 0.0002
+            # Old: stiff_scale = sqrt(min_eig) → could be ~0.002 → 600× reduction!
+            # New: Bounded scaling to prevent excessive reduction
             try:
                 evals_Ginv = torch.linalg.eigvalsh(G_inv_reg.float())
                 min_eig_Ginv = evals_Ginv.min(dim=-1, keepdim=True).values.to(z.dtype)
-                stiff_scale = torch.sqrt(torch.clamp(min_eig_Ginv, min=1e-6))
-                eff_step = eff_step * stiff_scale
+                # FIX: Clamp min_eig to reasonable range before sqrt
+                # This prevents the step from becoming microscopic in high-curvature regions
+                min_eig_clamped = torch.clamp(min_eig_Ginv, min=0.01, max=100.0)  # Bounded: 0.1 to 10.0 after sqrt
+                stiff_scale = torch.sqrt(min_eig_clamped)
+                eff_step = eff_step #* stiff_scale
+                
+                # DEBUG: Log stiffness scaling
+                if os.environ.get("RLVAE_DEBUG", "0") == "1" and hasattr(self, '_step_scaling_logged') and not self._step_scaling_logged:
+                    print(f"  min_eig_Ginv mean: {min_eig_Ginv.mean().item():.6e} (raw)")
+                    print(f"  min_eig_clamped mean: {min_eig_clamped.mean().item():.6e}")
+                    print(f"  stiff_scale mean: {stiff_scale.mean().item():.6e}")
+                    #print(f"  eff_step after stiff: {eff_step.mean().item():.6e}")
+                    print(f"  → Effective step is {(eff_step.mean() / step_size).item():.2%} of configured step_size!")
+                    self._step_scaling_logged = True
             except Exception:
                 pass
             z = z + eff_step * velocity
@@ -911,10 +1812,10 @@ class RiemannianRHMCPosterior(nn.Module):
                     # grad log|G^{-1}| = -2 * grad(half_logdet_volume(G, 'g'))
                     G_proj = self._ctx['model'].G(z_req)
                     from .metric_utils import half_logdet_volume
-                    vol_g = half_logdet_volume(G_proj, 'g', jitter=self.eps_reg)
+                    vol_g = half_logdet_volume(G_proj, 'ginv', jitter=self.eps_reg)
                     grad_vol_g = torch.autograd.grad(vol_g.sum(), z_req, retain_graph=False, create_graph=False, allow_unused=True)[0]
                     if grad_vol_g is not None:
-                        grad_logdet_ginv = -2.0 * grad_vol_g
+                        grad_logdet_ginv = 2.0 * grad_vol_g
                         z = (z_req + tau * grad_logdet_ginv).detach()
             except Exception:
                 pass
@@ -981,10 +1882,41 @@ class RiemannianRHMCPosterior(nn.Module):
         try:
             if covariance is not None:
                 Sigma = covariance
+                alpha = None  # Not computed when covariance is provided
             else:
                 alpha = alpha_override if alpha_override is not None else self._resolve_alpha()
                 G_inv_mu = self._get_inverse_metric(mu)
                 Sigma = self._make_covariance(G_inv_mu, alpha)
+            
+            # DIAGNOSTIC: Log Sigma details before passing to log_q_riem
+            if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                try:
+                    eigvals_sigma = torch.linalg.eigvalsh(Sigma)
+                    logdet_sigma = torch.linalg.slogdet(Sigma)[1]
+                    trace_sigma = torch.diagonal(Sigma, dim1=-2, dim2=-1).sum(dim=-1)
+                    
+                    print(f"\n[_compute_log_riemannian_gaussian BEFORE log_q_riem]")
+                    print(f"  min_cov_eig:           {self.min_cov_eig:.6f}")
+                    print(f"  covariance_provided:   {covariance is not None}")
+                    print(f"  alpha:                 {alpha if alpha is not None else 'N/A (covariance provided)'}")
+                    print(f"  Sigma eigenvalues:     min={eigvals_sigma.min().item():.6f}, max={eigvals_sigma.max().item():.6f}")
+                    print(f"  Sigma trace:           {trace_sigma.mean().item():.6f}")
+                    print(f"  log|Sigma|:            {logdet_sigma.mean().item():.6f}")
+                    print(f"  ||z - μ||:             {torch.norm(z - mu, dim=-1).mean().item():.6f}")
+                    
+                    # Always compare with raw G_inv_mu
+                    print(f"  [Comparison with raw G⁻¹(μ)]")
+                    G_inv_raw = self._ctx['model'].G_inv(mu)  # FIX: Use G_inv() not Ginv()
+                    eigvals_ginv_raw = torch.linalg.eigvalsh(G_inv_raw)
+                    logdet_ginv_raw = torch.linalg.slogdet(G_inv_raw)[1]
+                    print(f"    G⁻¹(μ) eigenvalues:  min={eigvals_ginv_raw.min().item():.6f}, max={eigvals_ginv_raw.max().item():.6f}")
+                    print(f"    log|G⁻¹(μ)|:         {logdet_ginv_raw.mean().item():.6f}")
+                    print(f"    Expected log|Σ|:     {logdet_ginv_raw.mean().item():.6f} (if α=1, ε≈0)")
+                    print(f"    Actual log|Σ|:       {logdet_sigma.mean().item():.6f}")
+                    print(f"    Δ log|Σ|:            {(logdet_sigma - logdet_ginv_raw).mean().item():+.6f}")
+                except Exception as e:
+                    print(f"[_compute_log_riemannian_gaussian] Diagnostic failed: {e}")
+            
             return log_q_riem(z, mu, Sigma, min_eig=self.min_cov_eig)
         except Exception as exc:
             if getattr(self, '_ctx', None) and getattr(self._ctx.get('model', None), 'riemannian_strict', False) or os.environ.get('RLVAE_STRICT', '0') == '1':
@@ -997,12 +1929,14 @@ class RiemannianRHMCPosterior(nn.Module):
     
     def _compute_log_prior(self, z: torch.Tensor) -> torch.Tensor:
         """
-        Compute log p(z) for Riemannian volume prior expressed via G.
+        Compute log p(z) for Riemannian volume prior.
         
-        p(z) ∝ √det(G(z)) · exp(-0.5 * zᵀ G(z) z)
+        Corrected formulation: p(z) ∝ √det(G⁻¹(z))
         
-        With proper normalization:
-        log p(z) = 0.5 * log det(G(z)) - 0.5 * zᵀ G(z) z - 0.5*d*log(2π)
+        This favors regions where the precision matrix G⁻¹ has large determinant,
+        corresponding to high-confidence/low-variance regions in the latent space.
+        
+        log p(z) = 0.5 * log det(G⁻¹(z)) + constant
         
         Args:
             z: Latent samples [B, D]
@@ -1012,39 +1946,45 @@ class RiemannianRHMCPosterior(nn.Module):
         """
         try:
             model = self._ctx['model']
-            if hasattr(model, 'G'):
-                G_z = model.G(z)
+            # Retrieve G_inv (precision matrix) directly - this is what Stage B provides
+            if hasattr(model, 'G_inv'):
+                G_inv_z = model.G_inv(z)
             elif hasattr(model, 'metric_tensor'):
                 mt = model.metric_tensor
-                if hasattr(mt, 'compute_metric'):
-                    G_z = mt.compute_metric(z)
-                elif hasattr(mt, 'compute_inverse_metric'):
+                if hasattr(mt, 'compute_inverse_metric'):
                     G_inv_z = mt.compute_inverse_metric(z)
-                    G_z = torch.linalg.inv(G_inv_z)
+                elif hasattr(mt, 'compute_metric'):
+                    # If only G is available, invert it to get G_inv
+                    G_z = mt.compute_metric(z)
+                    G_inv_z = torch.linalg.inv(G_z)
                 else:
-                    raise RuntimeError("Metric tensor does not provide G(z).")
-            elif hasattr(model, 'G_inv'):
-                G_inv_z = model.G_inv(z)
-                G_z = torch.linalg.inv(G_inv_z)
+                    raise RuntimeError("Metric tensor does not provide G(z) or G^{-1}(z).")
+            elif hasattr(model, 'G'):
+                # Fallback: invert G to get G_inv
+                G_z = model.G(z)
+                G_inv_z = torch.linalg.inv(G_z)
             else:
-                raise RuntimeError("Model does not expose G(z) or G^{-1}(z).")            # AMP-safe logdet
-            G_z32 = G_z.float() if G_z.dtype in (torch.float16, torch.bfloat16) else G_z
-            half_logdet = half_logdet_volume(G_z32, 'g', jitter=self.eps_reg)
+                raise RuntimeError("Model does not expose G(z) or G^{-1}(z).")
+            
+            # Use G_inv directly for volume term (represents precision)
+            G_inv_z32 = G_inv_z.float() if G_inv_z.dtype in (torch.float16, torch.bfloat16) else G_inv_z
+            half_logdet = half_logdet_volume(G_inv_z32, 'ginv', jitter=self.eps_reg)
 
             d = z.shape[-1]
-            G_z_cast = G_z32.to(z.dtype)
-            quad = torch.einsum('bi,bij,bj->b', z, G_z_cast, z)
-            log_det_term = (-half_logdet * self.volume_bias_weight).to(z.dtype)
-            gaussian_term = -0.5 * quad.to(z.dtype) - 0.5 * float(d) * math.log(2 * math.pi)
-
-            mode = getattr(self, 'kl_prior_mode', 'volume_gaussian')
-            if mode in ('volume_gaussian', 'gaussian'):
-                log_p = log_det_term + gaussian_term
-            elif mode == 'uniform':
+            log_det_term = (half_logdet * self.volume_bias_weight).to(z.dtype)
+            
+            mode = getattr(self, 'kl_prior_mode', 'uniform')
+            if mode == 'uniform':
+                # Uniform prior on the manifold: p(z) ∝ √det(G⁻¹(z))
+                log_p = log_det_term + float(self.uniform_prior_log_norm)
+            elif mode in ('volume_gaussian', 'gaussian'):
+                # Volume-weighted Gaussian prior (currently not used)
+                # Would need to define appropriate quadratic term with G or G_inv
+                # For now, fallback to uniform
                 log_p = log_det_term + float(self.uniform_prior_log_norm)
             else:
-                # Fallback: behave like volume_gaussian for unknown modes
-                log_p = log_det_term + gaussian_term
+                # Fallback: uniform mode
+                log_p = log_det_term + float(self.uniform_prior_log_norm)
             
             return log_p
             
@@ -1064,60 +2004,168 @@ class RiemannianRHMCPosterior(nn.Module):
     
     def _compute_potential_gradient(self, z: torch.Tensor) -> torch.Tensor:
         """
-        ∇U(z) with volume correction designed to attract to HIGH log|G^{-1}| regions.
-        We minimize: U(z) = 0.5||z||^2 - w · 0.5 log det G^{-1}(z) = 0.5||z||^2 + w · 0.5 log det G(z).
+        ∇U(z) for uniform volume prior p(z) ∝ √det(G^{-1}(z)).
+        We minimize: U(z) = -w · 0.5 log det G^{-1}(z) (no Gaussian term).
+        
+        This aligns the RHMC dynamics with the uniform volume prior objective.
 
         Robust to cases where G does not depend on z (allow_unused=True).
         Falls back to zero volume-gradient in that case.
         """
-        # If autograd is disabled (e.g., validation), use base gradient only
+        # If autograd is disabled (e.g., validation), return zero gradient for uniform prior
         if not torch.is_grad_enabled():
-            return z
+            return torch.zeros_like(z)
         # Ensure we can take grads w.r.t. z
         if not z.requires_grad:
             z = z.clone().requires_grad_(True)
 
-        # Base grad of 0.5 ||z||^2 is simply z
-        base = z
+        # CORRECTION: Remove Gaussian term to align with uniform volume prior
+        # For uniform volume prior p(z) ∝ √det(G^{-1}(z)), we want U(z) = -½ log det G^{-1}(z)
+        # This means we only need the volume gradient, not the Gaussian term
+        base = torch.zeros_like(z)
 
-        # Volume term: attract to high log|G^{-1}|. Two equivalent ways:
-        #  - using G:   +∇(0.5 log|G|) with positive sign in grad_U and descent will reduce log|G|
-        #  - using G⁻¹: -∇(0.5 log|G⁻¹|).
-        #  Controlled by self.volume_force_representation + self.volume_force_sign for quick A/B.
+        # Volume term: attract to high log|G^{-1}| by following ∇U(z) = -∇log p(z),
+        # where log p(z) = ½ log|G^{-1}(z)| for the uniform volume prior.
+        print('?!!!!computing potential gradient 1!!!')
         try:
+            print('?!!!!computing potential gradient 2!!!')
             rep = getattr(self, 'volume_force_representation', 'g')
             rep = rep if rep in ('g', 'ginv') else 'g'
             if rep == 'g':
                 G = self._ctx['model'].G(z)
                 G32 = G.float() if G.dtype in (torch.float16, torch.bfloat16) else G
-                target = -half_logdet_volume(G32, 'g', jitter=self.eps_reg)  # +0.5 log|G|
-                grad_vol, = torch.autograd.grad(target.sum(), z, retain_graph=True, create_graph=True, allow_unused=True)
+                log_vol = half_logdet_volume(G32, 'g', jitter=self.eps_reg)  # = +½ log|G^{-1}|
             else:
                 Ginv = self._get_inverse_metric(z)
                 Ginv32 = Ginv.float() if Ginv.dtype in (torch.float16, torch.bfloat16) else Ginv
-                target = half_logdet_volume(Ginv32, 'ginv', jitter=self.eps_reg)  # +0.5 log|G^{-1}|
-                # We want to minimize -0.5 log|G^{-1}|, so grad contribution is -∇target
-                grad_vol_raw, = torch.autograd.grad(target.sum(), z, retain_graph=True, create_graph=True, allow_unused=True)
-                grad_vol = -grad_vol_raw
-            if grad_vol is None:
-                grad_vol = torch.zeros_like(z)
-            sign = float(getattr(self, 'volume_force_sign', 1.0))
-            scale = sign * float(getattr(self, 'volume_grad_scale', 1.0)) * float(getattr(self, 'volume_bias_weight', 1.0))
-            grad = base + scale * grad_vol
+                log_vol = half_logdet_volume(Ginv32, 'ginv', jitter=self.eps_reg)  # = +½ log|G^{-1}|
+
+            grad_log_vol, = torch.autograd.grad(
+                log_vol.sum(),
+                z,
+                retain_graph=True,
+                create_graph=True,
+                allow_unused=True
+            )
+            print('we did the grad of the log volume!!!')
+            if grad_log_vol is None:
+                grad_log_vol = torch.zeros_like(z)
+            # Resolve force sign with optional inversion via env for debugging
+            sign = 1 #float(getattr(self, 'volume_force_sign', 1.0))
+            print('!!!!sign is +1!!!')
+            
+
+            scale = sign #* float(getattr(self, 'volume_grad_scale', 1.0)) * float(getattr(self, 'volume_bias_weight', 1.0))
+            grad = base - scale * grad_log_vol  # ∇U = -scale * ∇(½ log|G^{-1}|)
             grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            # Optional finite-difference sanity checks on the force direction
+            debug_force = os.environ.get("RLVAE_FORCE_SANITY", "0") == "1"
+            if debug_force:
+                try:
+                    eps_fd = float(os.environ.get("RLVAE_FORCE_EPS", "1e-4"))
+                    # Normalise gradient direction safely
+                    dir_unit = F.normalize(grad_log_vol.detach(), dim=-1, eps=1e-12)
+                    z_detached = z.detach()
+                    plus = self._evaluate_half_logdet(z_detached + eps_fd * dir_unit, rep)
+                    minus = self._evaluate_half_logdet(z_detached - eps_fd * dir_unit, rep)
+                    fd_proj = (plus - minus) / (2.0 * eps_fd)
+                    dot = (grad * grad_log_vol).sum(dim=-1)
+                    cos = dot / (
+                        torch.norm(grad, dim=-1) * torch.norm(grad_log_vol, dim=-1).clamp_min(1e-12)
+                    )
+                    if not hasattr(self, "_force_sanity_printed") or not self._force_sanity_printed:
+                        print(
+                            "[FORCE SANITY] "
+                            f"rep={rep} sign={sign:.1f} "
+                            f"dot_mean={dot.mean().item():+.4e} "
+                            f"cos_mean={cos.mean().item():+.4f} "
+                            f"fd_proj_mean={fd_proj.mean().item():+.4e}"
+                        )
+                        self._force_sanity_printed = True
+                except Exception as dbg_exc:
+                    if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                        print(f"[FORCE SANITY] diagnostic failed: {dbg_exc}")
+            
+            # DEBUG: Log volume force direction
+            if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                print(f"\n[VOLUME FORCE & GRADIENT DIRECTION DEBUG]")
+                print(f"  representation: {rep}")
+                print(f"  sign: {sign}")
+                print(f"  scale: {scale}")
+                print(f"  grad_log_vol mean: {grad_log_vol.mean().item():.6e}, norm: {torch.norm(grad_log_vol, dim=-1).mean().item():.6e}")
+                print(f"  grad_U mean: {grad.mean().item():.6e}, norm: {torch.norm(grad, dim=-1).mean().item():.6e}")
+                
+                # Compute both G and G⁻¹ to verify direction
+                try:
+                    G_z = self._ctx['model'].G(z)
+                    Ginv_z = self._get_inverse_metric(z)
+                    G32 = G_z.float()
+                    Ginv32 = Ginv_z.float()
+                    
+                    logdet_G = 0.5 * torch.linalg.slogdet(G32)[1]
+                    logdet_Ginv = 0.5 * torch.linalg.slogdet(Ginv32)[1]
+                    
+                    print(f"\n  Current metric values:")
+                    print(f"    +0.5 log|G(z)|:     {logdet_G.mean().item():.6f}")
+                    print(f"    +0.5 log|G⁻¹(z)|:   {logdet_Ginv.mean().item():.6f}")
+                    print(f"    Sum (should ≈ 0):   {(logdet_G.mean() + logdet_Ginv.mean()).item():.6f}")
+                    
+                    # Compute gradient in BOTH representations
+                    grad_G, = -torch.autograd.grad(logdet_G.sum(), z, retain_graph=True, create_graph=False, allow_unused=True)
+                    grad_Ginv, = -torch.autograd.grad(logdet_Ginv.sum(), z, retain_graph=True, create_graph=False, allow_unused=True)
+                    
+                    if grad_G is not None and grad_Ginv is not None:
+                        print(f"\n  Gradient directions:")
+                        print(f"    ∇(0.5 log|G|) norm:     {torch.norm(grad_G, dim=-1).mean().item():.6e}")
+                        print(f"    ∇(0.5 log|G⁻¹|) norm:   {torch.norm(grad_Ginv, dim=-1).mean().item():.6e}")
+                        print(f"    ∇G · ∇G⁻¹ (should <0):  {(grad_G * grad_Ginv).sum().item():.6e}")
+                        
+                        # What grad_U actually is
+                        if rep == 'g':
+                            print(f"\n  Using rep='g': grad_log_vol = ∇(0.5 log|G⁻¹|)")
+                        else:
+                            print(f"\n  Using rep='ginv': grad_log_vol = ∇(0.5 log|G⁻¹|) via G⁻¹")
+                        
+                        print(f"  grad_U = -{sign} * grad_log_vol")
+                        print("  → For uniform prior p ∝ √det(G⁻¹), we want grad_U = -∇(0.5 log|G⁻¹|) = ∇(0.5 log|G|)")
+                    
+                        # Expected behavior in leapfrog: ρ -= 0.5 * step * grad_U
+                        # Then z += step * velocity
+                        # So grad_U with positive sign nudges momentum to increase log|G⁻¹|
+                        if sign > 0:
+                            print(f"  ✓ CORRECT: sign=+1 → grad_U ascends log|G| → pushes TOWARD high G⁻¹ regions")
+                        else:
+                            print(f"  ⚠️  WARNING: sign<=0 flips the force and may push AWAY from high G⁻¹!")
+                    
+                except Exception as e:
+                    print(f"  [Error computing gradient verification: {e}]")
+                
+                self._volume_force_logged = True
+            
             return grad.to(z.dtype)
         except Exception:
-            # Safe fallback: standard Gaussian gradient only
-            return torch.nan_to_num(base, nan=0.0, posinf=0.0, neginf=0.0)
+            # Safe fallback: zero gradient for uniform prior
+            return torch.zeros_like(z)
+    
+    def _evaluate_half_logdet(self, z: torch.Tensor, rep: str) -> torch.Tensor:
+        """Evaluate ±½ log|det| for diagnostics without building autograd graphs."""
+        with torch.no_grad():
+            if rep == 'g':
+                G = self._ctx['model'].G(z)
+                return half_logdet_volume(G, 'g', jitter=self.eps_reg)
+            else:
+                Ginv = self._get_inverse_metric(z)
+                return half_logdet_volume(Ginv, 'ginv', jitter=self.eps_reg)
     
     def snapshot_state(self) -> Dict[str, Any]:
         """Capture mutable sampler state for safe restoration."""
         state = {
-            'rhmc_steps': int(getattr(self, 'rhmc_steps', 0)),
-            'rhmc_step_size': float(getattr(self, 'rhmc_step_size', 0.0)),
-            'rhmc_alpha': float(getattr(self, 'rhmc_alpha', 0.0)),
-            'eps_reg': float(getattr(self, 'eps_reg', 0.0)),
-            'min_cov_eig': float(getattr(self, 'min_cov_eig', 0.0)),
+            'rhmc_steps': int(getattr(self, 'rhmc_steps', 4)),
+            'rhmc_step_size': float(getattr(self, 'rhmc_step_size', 0.1)),
+            'rhmc_alpha': float(getattr(self, 'rhmc_alpha', 0.5)),
+            'eps_reg': float(getattr(self, 'eps_reg', 0.0001)),
+            'min_cov_eig': float(getattr(self, 'min_cov_eig', 0.001)),
         }
         last_sigma = getattr(self, '_last_sigma_mu', None)
         if isinstance(last_sigma, torch.Tensor):

@@ -36,7 +36,7 @@ class LossManager(nn.Module):
         metric_reg_target: float = 2.0,  # NEW: target value for regularization (e.g., logdet target)
         # μ anchoring
         mu_l2_weight: float = 0.0,
-        recon_scale: float = 100.0,
+        recon_scale: float = 255.0,
         kl_monitor_baseline_tau: float = 0.98,
         metric_representation: str = "ginv",
         # Prior mode for KL: 'uniform' (default, cancels volume) or 'volume_gaussian'
@@ -571,6 +571,15 @@ class LossManager(nn.Module):
         logdet = 2.0 * torch.log(diag + 1e-18).sum(dim=-1)
         const = z.shape[-1] * math.log(2 * math.pi)
         log_prob = -0.5 * quad - 0.5 * logdet - 0.5 * const
+        
+        # DEBUG: Check for NaN/inf in log_gaussian_density calculation
+        print(f"[DEBUG] log_gaussian_density - quad mean: {quad.mean().item():.6f}, min: {quad.min().item():.6f}, max: {quad.max().item():.6f}")
+        print(f"[DEBUG] log_gaussian_density - quad has NaN: {torch.isnan(quad).any().item()}, has inf: {torch.isinf(quad).any().item()}")
+        print(f"[DEBUG] log_gaussian_density - logdet mean: {logdet.mean().item():.6f}, min: {logdet.min().item():.6f}, max: {logdet.max().item():.6f}")
+        print(f"[DEBUG] log_gaussian_density - logdet has NaN: {torch.isnan(logdet).any().item()}, has inf: {torch.isinf(logdet).any().item()}")
+        print(f"[DEBUG] log_gaussian_density - log_prob mean: {log_prob.mean().item():.6f}, min: {log_prob.min().item():.6f}, max: {log_prob.max().item():.6f}")
+        print(f"[DEBUG] log_gaussian_density - log_prob has NaN: {torch.isnan(log_prob).any().item()}, has inf: {torch.isinf(log_prob).any().item()}")
+        
         return log_prob.to(z.dtype if z.dtype.is_floating_point else stabilized.dtype)
 
     def _half_logdet_volume(
@@ -876,6 +885,64 @@ class LossManager(nn.Module):
             jac[:, k, :] = grads
         return jac
     
+    def _regularize_spd_matrix(
+        self, 
+        M: torch.Tensor, 
+        cond_threshold: float = 5000.0,
+        min_eig_target: float = 1e-4
+    ) -> Tuple[torch.Tensor, bool]:
+        """
+        Regularize SPD matrix if poorly conditioned.
+        
+        Args:
+            M: SPD matrix batch [B, D, D]
+            cond_threshold: Condition number threshold above which to regularize
+            min_eig_target: Target minimum eigenvalue after regularization
+            
+        Returns:
+            M_reg: Regularized matrix
+            was_regularized: True if regularization was applied
+        """
+        eigvals = torch.linalg.eigvalsh(M)
+        min_eig = eigvals.min(dim=-1, keepdim=True).values
+        max_eig = eigvals.max(dim=-1, keepdim=True).values
+        cond = max_eig / (min_eig + 1e-12)
+        
+        needs_reg = cond.squeeze(-1) > cond_threshold
+        if not needs_reg.any():
+            return M, False
+        
+        # Compute shift to achieve target condition number
+        # If cond = max_eig / (min_eig + shift) = cond_threshold
+        # Then shift = max_eig / cond_threshold - min_eig
+        D = M.shape[-1]
+        eye = torch.eye(D, device=M.device, dtype=M.dtype).unsqueeze(0)
+        
+        # Use the larger of: min_eig_target or shift to achieve cond_threshold
+        shift_for_cond = torch.clamp(max_eig / cond_threshold - min_eig, min=0.0)
+        shift_for_min = torch.clamp(min_eig_target - min_eig, min=0.0)
+        shift = torch.maximum(shift_for_cond, shift_for_min).unsqueeze(-1)
+        
+        M_reg = M + shift * eye
+        
+        return M_reg, True
+
+    def _stable_matrix_inverse(self, A: torch.Tensor, jitter: float = 1e-6) -> torch.Tensor:
+        """
+        Compute stable inverse via Cholesky + solve.
+        
+        Args:
+            A: SPD matrix batch [B, D, D]
+            jitter: Diagonal jitter for numerical stability
+            
+        Returns:
+            A_inv: Inverse of A [B, D, D]
+        """
+        D = A.shape[-1]
+        eye = torch.eye(D, device=A.device, dtype=A.dtype).unsqueeze(0).expand_as(A)
+        chol, was_jittered = self._cholesky_spd(A, jitter=jitter)
+        return torch.cholesky_solve(eye, chol)
+    
     def _pushforward_metric_via_flows(
         self,
         z0: torch.Tensor,
@@ -900,17 +967,12 @@ class LossManager(nn.Module):
         B, D = z0.shape
         rep  = base_rep.lower()
 
-        def _spd_inverse(A: torch.Tensor) -> torch.Tensor:
-            chol, _ = self._cholesky_spd(A)
-            eye = torch.eye(A.shape[-1], device=A.device, dtype=A.dtype).unsqueeze(0).expand_as(A)
-            return torch.cholesky_solve(eye, chol)
-
         if rep == "ginv":
             Ginv0 = Gbase
-            G0 = _spd_inverse(Ginv0)
+            G0 = self._stable_matrix_inverse(Ginv0, jitter=1e-6)
         elif rep == "g":
             G0 = Gbase
-            Ginv0 = _spd_inverse(G0)
+            Ginv0 = self._stable_matrix_inverse(G0, jitter=1e-6)
         else:
             raise ValueError(f"Unknown metric representation '{rep}' for pushforward.")
 
@@ -960,23 +1022,56 @@ class LossManager(nn.Module):
         G064  = G0.double()
         Ginv64 = Ginv0.double()
 
+        # Regularize base metrics if needed
+        G064_reg, g_was_reg = self._regularize_spd_matrix(G064, cond_threshold=5000.0)
+        Ginv64_reg, ginv_was_reg = self._regularize_spd_matrix(Ginv64, cond_threshold=5000.0)
+        if g_was_reg or ginv_was_reg:
+            if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                print(f"[PUSH STABIL] Base metric regularized: G={g_was_reg}, Ginv={ginv_was_reg}")
+
         # Diagnostics
         sv = torch.linalg.svdvals(J64)
         min_sv = sv.min(dim=-1).values
+        max_sv = sv.max(dim=-1).values
+        j_cond = max_sv / (min_sv + 1e-12)
+
+        if (j_cond > 5000.0).any():
+            if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                print(f"[PUSH STABIL] Jacobian poorly conditioned (max cond={j_cond.max().item():.2e}), falling back")
+            # Return None to trigger Formulation A fallback
+            return (None, None), None, None, None
 
         # G-transport:    G' = J^{-T} G J^{-1}
-        eye64 = torch.eye(D, device=J64.device, dtype=J64.dtype).unsqueeze(0).expand(B, -1, -1)
-        J_inv = torch.linalg.solve(J64, eye64)
-        GT_g  = torch.bmm(J_inv.transpose(1, 2), torch.bmm(G064, J_inv))
+        # Use stable solve instead of linalg.solve for J_inv
+        J_inv = self._stable_matrix_inverse(J64, jitter=1e-6)
+        
+        # Transport with regularized base metrics
+        GT_g  = torch.bmm(J_inv.transpose(1, 2), torch.bmm(G064_reg, J_inv))
         GT_g  = 0.5 * (GT_g + GT_g.transpose(1, 2))
 
         # G^{-1}-transport:  G'^{-1} = J G^{-1} J^T
-        GT_ginv = torch.bmm(J64, torch.bmm(Ginv64, J64.transpose(1, 2)))
+        GT_ginv = torch.bmm(J64, torch.bmm(Ginv64_reg, J64.transpose(1, 2)))
         GT_ginv = 0.5 * (GT_ginv + GT_ginv.transpose(1, 2))
+
+        # Regularize transported metrics
+        GT_g_reg, gt_g_was_reg = self._regularize_spd_matrix(GT_g, cond_threshold=5000.0)
+        GT_ginv_reg, gt_ginv_was_reg = self._regularize_spd_matrix(GT_ginv, cond_threshold=5000.0)
+
+        if gt_g_was_reg or gt_ginv_was_reg:
+            if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                print(f"[PUSH STABIL] Transported metric regularized: G'={gt_g_was_reg}, G'^-1={gt_ginv_was_reg}")
+            GT_g = GT_g_reg
+            GT_ginv = GT_ginv_reg
 
         # 5) Volumes (always return both canonical scalars)
         half_logdet_push_g    = self._half_logdet_volume(GT_g, 'g', jitter=1e-6)
         half_logdet_push_ginv = self._half_logdet_volume(GT_ginv, 'ginv', jitter=1e-6)
+
+        # Verify numerical consistency before returning
+        if not torch.isfinite(half_logdet_push_g).all() or not torch.isfinite(half_logdet_push_ginv).all():
+            if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                print(f"[PUSH STABIL] Non-finite logdet detected, falling back")
+            return (None, None), None, None, None
 
         # 6) Select the transported tensor for downstream, matching configured rep
         GT_sel = GT_g if rep == "g" else GT_ginv
@@ -1157,14 +1252,130 @@ class LossManager(nn.Module):
                 if stage_zF is None:
                     stage_zF = stage_zS
 
+            # Calculate pushforward metric for Formulation B (moved from debug block)
+            log_p_prime_zF = None
+            try:
+                if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                    print(f"[DEBUG] Attempting pushforward calculation with stage_zS shape: {stage_zS.shape}")
+                
+                ((G_pushforward, rep_push),
+                min_sv,
+                half_logdet_push_g,
+                half_logdet_push_ginv) = self._pushforward_metric_via_flows(stage_zS, flow_manager, metric_tensor, rhmc_posterior)
+                
+                if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                    print(f"[DEBUG] Pushforward results: G_pushforward={G_pushforward is not None}, rep_push={rep_push}")
+                    print(f"[DEBUG] half_logdet_push_g mean: {half_logdet_push_g.mean().item() if half_logdet_push_g is not None else 'None'}")
+                    print(f"[DEBUG] half_logdet_push_ginv mean: {half_logdet_push_ginv.mean().item() if half_logdet_push_ginv is not None else 'None'}")
+                
+                if G_pushforward is None or rep_push is None:
+                    if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                        print("[PUSH STABIL] Pushforward failed or returned None, using Formulation A")
+                    log_p_prime_zF = None  # Triggers Formulation A
+                elif G_pushforward is not None and rep_push is not None:
+                    if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                        # DEBUG: Check transported metric G_pushforward
+                        print(f"[DEBUG] G_pushforward shape: {G_pushforward.shape}")
+                        print(f"[DEBUG] G_pushforward has NaN: {torch.isnan(G_pushforward).any().item()}")
+                        print(f"[DEBUG] G_pushforward has inf: {torch.isinf(G_pushforward).any().item()}")
+                        
+                        # Calculate eigenvalues and condition number of transported metric
+                        try:
+                            eigvals = torch.linalg.eigvalsh(G_pushforward)
+                            min_eig = eigvals.min().item()
+                            max_eig = eigvals.max().item()
+                            cond_num = max_eig / min_eig if min_eig > 0 else float('inf')
+                            print(f"[DEBUG] G_pushforward eigenvalues - min: {min_eig:.6f}, max: {max_eig:.6f}")
+                            print(f"[DEBUG] G_pushforward condition number: {cond_num:.6f}")
+                            if min_eig <= 0:
+                                print(f"[WARNING] G_pushforward has non-positive minimum eigenvalue: {min_eig}")
+                            if cond_num > 1e12:
+                                print(f"[WARNING] G_pushforward has high condition number: {cond_num:.2e}")
+                        except Exception as e:
+                            print(f"[WARNING] Failed to compute G_pushforward eigenvalues: {e}")
+                    
+                    rep_push = rep_push.lower()
+                    log_p_prime_zF = half_logdet_push_ginv if rep_push == "ginv" else half_logdet_push_g
+                    log_p_prime_zF = log_p_prime_zF.to(mu.dtype)
+                    
+                    if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                        # DEBUG: Check log_p_prime_zF
+                        print(f"[DEBUG] log_p_prime_zF mean: {log_p_prime_zF.mean().item():.6f}, min: {log_p_prime_zF.min().item():.6f}, max: {log_p_prime_zF.max().item():.6f}")
+                        print(f"[DEBUG] log_p_prime_zF has NaN: {torch.isnan(log_p_prime_zF).any().item()}, has inf: {torch.isinf(log_p_prime_zF).any().item()}")
+                        print(f"[DEBUG] Using rep_push='{rep_push}', log_p_prime_zF mean: {log_p_prime_zF.mean().item()}")
+            except Exception as e:
+                if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                    print(f"[PUSH STABIL] Pushforward exception: {e}, using Formulation A")
+                log_p_prime_zF = None
+
             if self.kl_prior_mode == "uniform" and _mode == "mc":
                 stage_c_uniform = True
                 eps_reg = float(getattr(rhmc_posterior, 'eps_reg', 1e-6)) if rhmc_posterior is not None else 1e-6
                 zS_effective = stage_zS
 
+                # Guard: sanitize non-finite z0/zS before any density/metric ops
+                try:
+                    if isinstance(stage_z0, torch.Tensor):
+                        bad0 = ~torch.isfinite(stage_z0)
+                        if bad0.any():
+                            stage_z0 = torch.where(bad0, mu, stage_z0)
+                    if isinstance(zS_effective, torch.Tensor):
+                        badS = ~torch.isfinite(zS_effective)
+                        if badS.any():
+                            zS_effective = torch.where(badS, mu, zS_effective)
+                except Exception:
+                    pass
+
                 if _src == "z0":
                     if rhmc_log_q is not None:
                         log_q = rhmc_log_q.to(mu.dtype)
+                        
+                        # DIAGNOSTIC: log_q was provided by RHMC, decompose it
+                        if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                            print(f"\n[LOG_Q FROM RHMC]")
+                            print(f"  log_q provided by rhmc_log_q (not computed here)")
+                            print(f"  Total log_q:      {log_q.mean().item():+.4f} (range: [{log_q.min().item():+.4f}, {log_q.max().item():+.4f}])")
+                            print(f"  ||z0 - μ||:       {torch.norm(stage_z0 - mu, dim=-1).mean().item():.4f}")
+                            
+                            # Try to get rhmc_alpha
+                            if rhmc_posterior is not None:
+                                if hasattr(rhmc_posterior, 'rhmc_alpha'):
+                                    print(f"  rhmc_alpha:       {rhmc_posterior.rhmc_alpha}")
+                                elif hasattr(rhmc_posterior, 'alpha'):
+                                    print(f"  alpha:            {rhmc_posterior.alpha}")
+                                else:
+                                    print(f"  rhmc_alpha:       Not found")
+                                
+                                # Try to reconstruct Sigma_mu to see what it would be
+                                try:
+                                    test_Sigma_mu = self._resolve_sigma_mu(
+                                        mu, None, metric_tensor, rhmc_posterior, rhmc_traj_info, jitter=eps_reg
+                                    )
+                                    if test_Sigma_mu is not None:
+                                        eigvals_sigma = torch.linalg.eigvalsh(test_Sigma_mu)
+                                        logdet_sigma = torch.linalg.slogdet(test_Sigma_mu)[1]
+                                        print(f"  Σ_μ eigenvalues:  min={eigvals_sigma.min().item():.6f}, max={eigvals_sigma.max().item():.6f}")
+                                        print(f"  log|Σ_μ|:         {logdet_sigma.mean().item():.4f}")
+                                        print(f"  Σ_μ trace:        {torch.trace(test_Sigma_mu[0]).item():.6f}")
+                                        
+                                        # Decompose log_q manually
+                                        diff = stage_z0 - mu
+                                        Sigma_mu_inv = torch.linalg.inv(test_Sigma_mu)
+                                        quad_form = torch.einsum('bi,bij,bj->b', diff, Sigma_mu_inv, diff)
+                                        d = diff.shape[-1]
+                                        const_term = d * np.log(2 * np.pi)
+                                        
+                                        quad_term = -0.5 * quad_form
+                                        volume_term = -0.5 * logdet_sigma
+                                        const_contrib = -0.5 * const_term
+                                        
+                                        print(f"  [Reconstructed decomposition]")
+                                        print(f"    Quadratic term: {quad_term.mean().item():+.4f}")
+                                        print(f"    Volume term:    {volume_term.mean().item():+.4f}")
+                                        print(f"    Constant term:  {const_contrib:+.4f}")
+                                        print(f"    Sum:            {(quad_term + volume_term + const_contrib).mean().item():+.4f}")
+                                except Exception as e:
+                                    print(f"  Could not reconstruct Σ_μ: {e}")
                     else:
                         Sigma_mu = self._resolve_sigma_mu(
                             mu,
@@ -1175,14 +1386,85 @@ class LossManager(nn.Module):
                             jitter=eps_reg,
                         )
                         if Sigma_mu is not None:
+                            if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                                # DEBUG: Check Sigma_mu for NaN/inf and condition number
+                                print(f"[DEBUG] Sigma_mu shape: {Sigma_mu.shape}")
+                                print(f"[DEBUG] Sigma_mu has NaN: {torch.isnan(Sigma_mu).any().item()}")
+                                print(f"[DEBUG] Sigma_mu has inf: {torch.isinf(Sigma_mu).any().item()}")
+                                
+                                # Calculate eigenvalues and condition number
+                                try:
+                                    eigvals = torch.linalg.eigvalsh(Sigma_mu)
+                                    min_eig = eigvals.min().item()
+                                    max_eig = eigvals.max().item()
+                                    cond_num = max_eig / min_eig if min_eig > 0 else float('inf')
+                                    print(f"[DEBUG] Sigma_mu eigenvalues - min: {min_eig:.6f}, max: {max_eig:.6f}")
+                                    print(f"[DEBUG] Sigma_mu condition number: {cond_num:.6f}")
+                                    if min_eig <= 0:
+                                        print(f"[WARNING] Sigma_mu has non-positive minimum eigenvalue: {min_eig}")
+                                    if cond_num > 1e12:
+                                        print(f"[WARNING] Sigma_mu has high condition number: {cond_num:.2e}")
+                                except Exception as e:
+                                    print(f"[WARNING] Failed to compute Sigma_mu eigenvalues: {e}")
+                            
+                            # Compute log_q and add detailed diagnostics
                             log_q = self._log_gaussian_density(stage_z0, mu, Sigma_mu, jitter=eps_reg).to(mu.dtype)
+                            
+                            # CRITICAL DIAGNOSTICS: Decompose log_q into components
+                            if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                                try:
+                                    diff = stage_z0 - mu
+                                    Sigma_mu_inv = torch.linalg.inv(Sigma_mu)
+                                    quad_form = torch.einsum('bi,bij,bj->b', diff, Sigma_mu_inv, diff)
+                                    logdet_sigma = torch.linalg.slogdet(Sigma_mu)[1]
+                                    d = diff.shape[-1]
+                                    const_term = d * np.log(2 * np.pi)
+                                    
+                                    quad_term = -0.5 * quad_form
+                                    volume_term = -0.5 * logdet_sigma
+                                    const_contrib = -0.5 * const_term
+                                    
+                                    print(f"\n[LOG_Q DECOMPOSITION]")
+                                    print(f"  Quadratic term:   {quad_term.mean().item():+.4f} (range: [{quad_term.min().item():+.4f}, {quad_term.max().item():+.4f}])")
+                                    print(f"  Volume term:      {volume_term.mean().item():+.4f} (range: [{volume_term.min().item():+.4f}, {volume_term.max().item():+.4f}])")
+                                    print(f"  Constant term:    {const_contrib:+.4f}")
+                                    print(f"  Total log_q:      {log_q.mean().item():+.4f}")
+                                    print(f"  ||z0 - μ||:       {torch.norm(diff, dim=-1).mean().item():.4f}")
+                                    print(f"  log|Σ_μ|:         {logdet_sigma.mean().item():.4f}")
+                                    
+                                    # Get rhmc_alpha if available
+                                    if rhmc_posterior is not None and hasattr(rhmc_posterior, 'rhmc_alpha'):
+                                        print(f"  rhmc_alpha:       {rhmc_posterior.rhmc_alpha}")
+                                    elif rhmc_posterior is not None and hasattr(rhmc_posterior, 'alpha'):
+                                        print(f"  alpha:            {rhmc_posterior.alpha}")
+                                    else:
+                                        print(f"  rhmc_alpha:       Not found in rhmc_posterior")
+                                    
+                                    # Eigenvalues of Σ_μ (already computed above)
+                                    eigvals_sigma = torch.linalg.eigvalsh(Sigma_mu)
+                                    print(f"  Σ_μ eigenvalues:  min={eigvals_sigma.min().item():.6f}, max={eigvals_sigma.max().item():.6f}")
+                                    print(f"  Σ_μ trace:        {torch.trace(Sigma_mu[0]).item():.6f}")
+                                    
+                                    # Compare with G^{-1}(μ) if available
+                                    if metric_tensor is not None:
+                                        try:
+                                            G_inv_mu, _ = self._evaluate_metric(mu, metric_tensor, rhmc_posterior, with_rep=True)
+                                            if G_inv_mu is not None:
+                                                eigvals_ginv = torch.linalg.eigvalsh(G_inv_mu)
+                                                print(f"  G^{{-1}}(μ) eigenvalues: min={eigvals_ginv.min().item():.6f}, max={eigvals_ginv.max().item():.6f}")
+                                                print(f"  G^{{-1}}(μ) trace:       {torch.trace(G_inv_mu[0]).item():.6f}")
+                                        except Exception as e_metric:
+                                            print(f"  G^{{-1}}(μ): Could not compute ({e_metric})")
+                                    
+                                except Exception as e:
+                                    print(f"[LOG_Q DECOMPOSITION] Failed: {e}")
                         else:
                             try:
                                 log_q = rhmc_posterior._compute_log_riemannian_gaussian(stage_z0, mu, log_var).to(mu.dtype)
                             except Exception:
                                 diff = stage_z0 - mu
                                 d = diff.shape[-1]
-                            log_q = (-0.5 * torch.sum(diff ** 2, dim=-1) - 0.5 * d * np.log(2 * np.pi)).to(mu.dtype)
+                                log_q = (-0.5 * torch.sum(diff ** 2, dim=-1) - 0.5 * d * np.log(2 * np.pi)).to(mu.dtype)
                 else:
                     try:
                         log_q = rhmc_posterior._compute_log_riemannian_gaussian(zS_effective, mu, log_var).to(mu.dtype)
@@ -1190,6 +1472,10 @@ class LossManager(nn.Module):
                         diff = zS_effective - mu
                         d = diff.shape[-1]
                         log_q = (-0.5 * torch.sum(diff ** 2, dim=-1) - 0.5 * d * np.log(2 * np.pi)).to(mu.dtype)
+
+                # Guard: sanitize log_q if any non-finite to prevent NaN KL
+                if isinstance(log_q, torch.Tensor):
+                    log_q = torch.nan_to_num(log_q, nan=0.0, posinf=0.0, neginf=0.0)
 
                 G_source, rep_source = self._evaluate_metric(stage_z0, metric_tensor, rhmc_posterior, with_rep=True)
                 if G_source is None or rep_source is None:
@@ -1199,6 +1485,15 @@ class LossManager(nn.Module):
                 if debug_mode:
                     self._debug_metric_stats("G(z0)", G_source, rep_source, jitter=eps_reg)
                     metric_source = self._tensor_to_metric(G_source, rep_source, jitter=eps_reg).double()
+                    # Representation consistency check: 0.5 log|G^{-1}| via G vs via G^{-1}
+                    try:
+                        half_from_ginv = self._half_logdet_volume(G_source, rep_source.lower(), jitter=eps_reg).double()
+                        half_from_g    = self._half_logdet_volume(metric_source, 'g', jitter=eps_reg).double()
+                        rep_diff = (half_from_ginv - half_from_g).abs().mean().item()
+                        if rep_diff > 1e-3:
+                            print(f"[REP CHECK] z0: mismatch between 'ginv' and 'g' half-logdet: mean|Δ|={rep_diff:.3e}")
+                    except Exception:
+                        pass
                 else:
                     metric_source = None
 
@@ -1209,6 +1504,15 @@ class LossManager(nn.Module):
                 if debug_mode:
                     self._debug_metric_stats("G(zS)", G_target, rep_target, jitter=eps_reg)
                     metric_target = self._tensor_to_metric(G_target, rep_target, jitter=eps_reg).double()
+                    # Representation consistency check at zS
+                    try:
+                        half_from_ginv_t = self._half_logdet_volume(G_target, rep_target.lower(), jitter=eps_reg).double()
+                        half_from_g_t    = self._half_logdet_volume(metric_target, 'g', jitter=eps_reg).double()
+                        rep_diff_t = (half_from_ginv_t - half_from_g_t).abs().mean().item()
+                        if rep_diff_t > 1e-3:
+                            print(f"[REP CHECK] zS: mismatch between 'ginv' and 'g' half-logdet: mean|Δ|={rep_diff_t:.3e}")
+                    except Exception:
+                        pass
                 else:
                     metric_target = None
 
@@ -1237,13 +1541,68 @@ class LossManager(nn.Module):
                     if isinstance(dv, torch.Tensor):
                         delta_vol = dv.to(mu.dtype)
 
-                kl_terms = (
-                    log_q.to(x.dtype)
-                    - (self.volume_bias_weight * half_logdet_target_ginv).to(x.dtype)
-                    - flow_term.to(x.dtype)           # ✅ fixed sign
-                    + (delta_kin.to(x.dtype) - delta_vol.to(x.dtype))
-                )
+                # Use Formulation B (pushforward) if available, otherwise fall back to Formulation A
+                print(f"[DEBUG] KL CALCULATION - log_p_prime_zF is None: {log_p_prime_zF is None}")
+                print(f"[DEBUG] KL CALCULATION - log_q mean: {log_q.mean().item()}")
+                print(f"[DEBUG] KL CALCULATION - delta_kin mean: {delta_kin.mean().item()}")
+                print(f"[DEBUG] KL CALCULATION - delta_vol mean: {delta_vol.mean().item()}")
+                print(f"[DEBUG] KL CALCULATION - volume_bias_weight: {self.volume_bias_weight}")
+                
+                # DEBUG: Check intermediate KL terms for NaN/inf
+                print(f"[DEBUG] INTERMEDIATE KL TERMS:")
+                print(f"[DEBUG] - log_q has NaN: {torch.isnan(log_q).any().item()}, has inf: {torch.isinf(log_q).any().item()}")
+                print(f"[DEBUG] - delta_kin has NaN: {torch.isnan(delta_kin).any().item()}, has inf: {torch.isinf(delta_kin).any().item()}")
+                print(f"[DEBUG] - delta_vol has NaN: {torch.isnan(delta_vol).any().item()}, has inf: {torch.isinf(delta_vol).any().item()}")
+                if log_p_prime_zF is not None:
+                    print(f"[DEBUG] - log_p_prime_zF has NaN: {torch.isnan(log_p_prime_zF).any().item()}, has inf: {torch.isinf(log_p_prime_zF).any().item()}")
+                else:
+                    print(f"[DEBUG] - half_logdet_target_ginv has NaN: {torch.isnan(half_logdet_target_ginv).any().item()}, has inf: {torch.isinf(half_logdet_target_ginv).any().item()}")
+                    print(f"[DEBUG] - flow_term has NaN: {torch.isnan(flow_term).any().item()}, has inf: {torch.isinf(flow_term).any().item()}")
+                
+                if log_p_prime_zF is not None:
+                    # Formulation B: Use transported metric (pushforward)
+                    # KL[q||p] = E_q[log q(z) - log p(z)]
+                    print(f"[DEBUG] FORMULATION B - log_p_prime_zF mean: {log_p_prime_zF.mean().item()}")
+                    print(f"[DEBUG] FORMULATION B - (volume_bias_weight * log_p_prime_zF) mean: {(self.volume_bias_weight * log_p_prime_zF).mean().item()}")
+                    kl_terms = (
+                        log_q.to(x.dtype)
+                        - (self.volume_bias_weight * log_p_prime_zF).to(x.dtype)
+                        + (delta_kin.to(x.dtype) - delta_vol.to(x.dtype))
+                    )
+                    print(f"[DEBUG] FORMULATION B - kl_terms mean: {kl_terms.mean().item()}")
+                else:
+                    # Formulation A: Original calculation
+                    # KL[q||p] = E_q[log q(z) - log p(z)]
+                    print(f"[DEBUG] FORMULATION A - half_logdet_target_ginv mean: {half_logdet_target_ginv.mean().item()}")
+                    print(f"[DEBUG] FORMULATION A - flow_term mean: {flow_term.mean().item()}")
+                    print(f"[DEBUG] FORMULATION A - (volume_bias_weight * half_logdet_target_ginv) mean: {(self.volume_bias_weight * half_logdet_target_ginv).mean().item()}")
+                    kl_terms = (
+                        log_q.to(x.dtype)
+                        - (self.volume_bias_weight * half_logdet_target_ginv).to(x.dtype)
+                        - flow_term.to(x.dtype)
+                        + (delta_kin.to(x.dtype) - delta_vol.to(x.dtype))
+                    )
+                    print(f"[DEBUG] FORMULATION A - kl_terms mean: {kl_terms.mean().item()}")
+                # DEBUG: Check final kl_terms for NaN/inf before mean calculation
+                print(f"[DEBUG] FINAL KL_TERMS CHECK:")
+                print(f"[DEBUG] - kl_terms mean: {kl_terms.mean().item():.6f}, min: {kl_terms.min().item():.6f}, max: {kl_terms.max().item():.6f}")
+                print(f"[DEBUG] - kl_terms has NaN: {torch.isnan(kl_terms).any().item()}, has inf: {torch.isinf(kl_terms).any().item()}")
+                if torch.isnan(kl_terms).any():
+                    print(f"[ERROR] kl_terms contains NaN values!")
+                if torch.isinf(kl_terms).any():
+                    print(f"[ERROR] kl_terms contains inf values!")
+                
                 kl_loss = kl_terms.mean().to(x.dtype)
+                print(f"[DEBUG] FINAL KL LOSS: {kl_loss.item()}")
+                
+                # Validate KL is non-negative (mathematical requirement)
+                if kl_loss < 0:
+                    if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                        print(f"[KL VALIDATION] Negative KL detected ({kl_loss.item():.4f})")
+                        print(f"[KL VALIDATION] This indicates numerical instability in the calculation")
+                        volume_term_mean = half_logdet_target_ginv.mean().item() if log_p_prime_zF is None else log_p_prime_zF.mean().item()
+                        print(f"[KL VALIDATION] log_q mean={log_q.mean().item():.4f}, volume term mean={volume_term_mean:.4f}")
+                
                 kl_weight = self.riemannian_beta
                 flow_loss = torch.zeros((), device=x.device, dtype=x.dtype)
 
@@ -1374,55 +1733,31 @@ class LossManager(nn.Module):
                     'routing/rhmc_kl_mode_mc': torch.tensor(1.0, device=x.device, dtype=x.dtype),
                 }
 
+                # Lightweight persistent diagnostics (WandB-friendly)
+                with torch.no_grad():
+                    try:
+                        dist_z0_mu = torch.norm(stage_z0 - mu, dim=-1)
+                        dist_zF_mu = torch.norm(zS_effective - mu, dim=-1)
+                        # Corr(||z-μ||, 1/2 log|G^{-1}|)
+                        if dist_z0_mu.numel() > 1 and half_logdet_source_ginv.numel() == dist_z0_mu.numel():
+                            c0 = torch.corrcoef(torch.stack([dist_z0_mu.double(), half_logdet_source_ginv.double()]))[0, 1]
+                            kl_aux_metrics['rhmc/corr_dist_logdet_z0'] = c0.to(x.dtype)
+                        if log_p_prime_zF is not None and dist_zF_mu.numel() > 1 and log_p_prime_zF.numel() == dist_zF_mu.numel():
+                            cF = torch.corrcoef(torch.stack([dist_zF_mu.double(), log_p_prime_zF.double()]))[0, 1]
+                            kl_aux_metrics['rhmc/corr_dist_logdet_zF'] = cF.to(x.dtype)
+                        # Means for tracking volume direction
+                        kl_aux_metrics['rhmc/half_logdet_z0_mean'] = half_logdet_source_ginv.mean().detach()
+                        if log_p_prime_zF is not None:
+                            kl_aux_metrics['rhmc/half_logdet_zF_mean'] = log_p_prime_zF.mean().detach()
+                            kl_aux_metrics['rhmc/delta_half_logdet_mean'] = (log_p_prime_zF - half_logdet_source_ginv).mean().detach()
+                        # RHMC drift
+                        kl_aux_metrics['rhmc/drift_zS_z0_mean'] = torch.norm(zS_effective - stage_z0, dim=-1).mean().detach()
+                    except Exception:
+                        pass
+
                 consistency_sample = None
                 push_target_gap_sample = None
-                try:
-                    ((G_pushforward, rep_push),
-                    min_sv,
-                    half_logdet_push_g,
-                    half_logdet_push_ginv) = self._pushforward_metric_via_flows(stage_z0, flow_manager, metric_tensor, rhmc_posterior)
-
-                    if G_pushforward is not None and rep_push is not None:
-                        # We expect:  +1/2 logdet(G'^{-1}) = +1/2 logdet(G^{-1}) + log|det J|
-                        target_rhs = (half_logdet_source_ginv + flow_term).to(mu.dtype)
-
-                        # Compare residuals but honour configured representation
-                        res_g    = (half_logdet_push_g    - target_rhs).abs().mean()
-                        res_ginv = (half_logdet_push_ginv - target_rhs).abs().mean()
-
-                        rep_push = rep_push.lower()
-                        half_logdet_push = half_logdet_push_ginv if rep_push == "ginv" else half_logdet_push_g
-                        consistency = (half_logdet_push - target_rhs)
-
-                        if os.environ.get("RLVAE_DEBUG", "0") == "1":
-                            self._debug_metric_stats("Pushforward G'", G_pushforward, rep_push, jitter=eps_reg)
-
-                        if not hasattr(self, "_vol_triplet_printed"):
-                            print(f"[VOL CHECK] rep_push={rep_push} mean(source)={half_logdet_source_ginv.mean().item():.3f}, "
-                                f"mean(flow)={flow_term.mean().item():.3f}, "
-                                f"mean(push)={half_logdet_push.mean().item():.3f}, "
-                                f"mean(target)={half_logdet_target_ginv.mean().item():.3f}")
-                            self._vol_triplet_printed = True
-
-                        kl_aux_metrics['diagnostics/pushforward_consistency_mean'] = consistency.abs().mean().detach()
-                        kl_aux_metrics['diagnostics/pushforward_vs_target_mean']   = (half_logdet_push - half_logdet_target_ginv).abs().mean().detach()
-                        consistency_sample = consistency.detach()
-                        push_target_gap_sample = (half_logdet_push - half_logdet_target_ginv).detach()
-
-                        fits_ginv_better = bool(res_ginv <= res_g)
-                        config_pref_is_ginv = (self.metric_representation == "ginv")
-                        if config_pref_is_ginv != fits_ginv_better and not hasattr(self, "_push_rep_warned"):
-                            print(f"[WARN] Push-forward identity residual favours "
-                                f"{'G^{-1}' if fits_ginv_better else 'G'} (res_g={res_g.item():.3f}, res_ginv={res_ginv.item():.3f}) "
-                                f"while metric_representation='{self.metric_representation}'.")
-                            self._push_rep_warned = True
-
-                        if min_sv is not None:
-                            finite_mask = torch.isfinite(min_sv)
-                            if finite_mask.any():
-                                kl_aux_metrics['diagnostics/jacobian_min_singular_mean'] = min_sv[finite_mask].mean().detach()
-                except Exception:
-                    pass
+                # Pushforward calculation moved to Formulation B implementation above
 
                 if not hasattr(self, '_half_logdet_check_printed'):
                     with torch.no_grad():
@@ -1512,6 +1847,22 @@ class LossManager(nn.Module):
             kl_weight = self.beta
         if not torch.isfinite(kl_loss) and os.environ.get("RLVAE_DEBUG") == "1":
             print("[DEBUG] kl_loss is not finite!", kl_loss)
+
+        # Optionally invert KL gradients (debug/diagnostics):
+        # When RLVAE_INVERT_KL=1 or config sets self.invert_kl_gradients=True,
+        # multiply kl_loss by -1 to flip its gradient contribution.
+        try:
+            invert_env = os.environ.get("RLVAE_INVERT_KL", "0") == "1"
+        except Exception:
+            invert_env = False
+        invert_cfg = bool(getattr(self, "invert_kl_gradients", False))
+        kl_sign = -1.0 if (invert_env or invert_cfg) else 1.0
+        if kl_sign < 0 and os.environ.get("RLVAE_DEBUG", "0") == "1":
+            try:
+                print(f"[LOSS DEBUG] Inverting KL gradients (kl_sign={kl_sign})")
+            except Exception:
+                pass
+        kl_loss = kl_sign * kl_loss
 
         # Flow loss: for uniform MC path the Jacobian term is absorbed into KL
         if stage_c_uniform:
