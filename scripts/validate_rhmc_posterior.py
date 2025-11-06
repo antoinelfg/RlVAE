@@ -229,7 +229,7 @@ class RealDataRHMCValidator:
                     z_before = z.clone()
                     
                     # Leapfrog step
-                    z, rho = self.rhmc_posterior._leapfrog_step(z, rho, self.rhmc_posterior.rhmc_step_size)
+                    z, rho, _ = self.rhmc_posterior._leapfrog_step(z, rho, self.rhmc_posterior.rhmc_step_size)
                     
                     # Apply constraints and track metrics
                     if self.rhmc_posterior.use_manifold_constraints:
@@ -688,5 +688,4 @@ def main():
 
 if __name__ == "__main__":
     exit(main())
-
 

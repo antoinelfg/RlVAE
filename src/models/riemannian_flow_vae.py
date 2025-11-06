@@ -1401,7 +1401,7 @@ class RiemannianFlowVAE(nn.Module):
 
             # 1a. Trace term: tr(G(z) * diag(exp(log_var)))
             Sigma_post = torch.diag_embed(torch.exp(log_var))
-            trace_term = torch.einsum('bij,bij->b', G_z, Sigma_post)  # [batch_size]
+            trace_term = torch.einsum('...ij,...ij->...', G_z, Sigma_post)  # [batch_size or leading shape]
             
             # 1b. Quadratic term: μ^T G(z) μ (since μ_prior = 0)
             mu_quad = torch.einsum('bi,bij,bj->b', mu, G_z, mu)

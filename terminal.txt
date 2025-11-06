@@ -1,0 +1,1655 @@
+
+================================================================================
+
+[RHMC DEBUG] G(z0): eig_min=5.284e-02, eig_max=9.920e+01, cond=1.878e+03, log|G|=-1.778e-01
+[RHMC DEBUG] G(zK): eig_min=4.723e-02, eig_max=9.918e+01, cond=2.100e+03, log|G|=-2.047e-01
+[RHMC DEBUG] latent drift: ||mu|| mean=2.087e+00, ||zK-mu|| mean=5.827e-01 (max=2.130e+00), ||zK-z0|| mean=6.872e-02 (max=1.199e-01)
+[RHMC DEBUG] momentum norms: initial mean=1.403e+00, final mean=1.302e+00
+
+[_compute_log_riemannian_gaussian BEFORE log_q_riem]
+  min_cov_eig:           0.001000
+  covariance_provided:   True
+  alpha:                 N/A (covariance provided)
+  Sigma eigenvalues:     min=0.003107, max=5.743713
+  Sigma trace:           1.150315
+  log|Sigma|:            -3.927089
+  ||z - μ||:             0.577893
+  [Comparison with raw G⁻¹(μ)]
+    G⁻¹(μ) eigenvalues:  min=0.010022, max=19.145363
+    log|G⁻¹(μ)|:         -1.524336
+    Expected log|Σ|:     -1.524336 (if α=1, ε≈0)
+    Actual log|Σ|:       -3.927089
+    Δ log|Σ|:            -2.402753
+
+[LOG_Q_RIEM STABILIZATION]
+  min_eig (jitter):     0.001000
+  was_stabilized:       False
+  Original Σ:
+    eigenvalues:        min=0.003107, max=5.743713
+    log|Σ|:             -3.927089
+
+================================================================================
+[LOG_Q_RIEM FULL DECOMPOSITION]
+================================================================================
+
+[STANDARD DECOMPOSITION]
+  Quadratic term: mean=-1.1202, min=-3.5422, max=-0.0191
+  Volume term:    mean=1.9635
+  Constant term:  -1.8379
+  Total log_q:    mean=-0.9945
+  ||z - μ||:      mean=0.5779
+  Σ eigenvalues:  min=0.003107, max=5.743713
+
+[MAHALANOBIS EIGENBASIS DECOMPOSITION]
+  Euclidean ||z-μ||²:    mean=0.5661
+  Mahalanobis (z-μ)ᵀΣ⁻¹(z-μ): mean=2.2404
+  Ratio (Mahal/Euclid):  3.9575
+
+  Per-eigenvalue contributions (batch mean, first sample detailed):
+    Dim 0: λ=0.2405, y[0]=0.2171, y²/λ=0.1960 (batch mean: 0.8825)
+    Dim 1: λ=0.2527, y[0]=-0.3351, y²/λ=0.4444 (batch mean: 1.3579)
+
+  Dominant dimensions (contribution to Mahalanobis²):
+    Dim 1: 60.6% (cumulative: 60.6%)
+
+[CHI-SQUARED FIT]
+  Dimension D:           2
+  Expected Mahal²:       χ²(2) mean = 2.0
+  Observed Mahal²:       2.2404
+  Deviation:             0.2404 (12.0%)
+
+================================================================================
+
+[RHMC DEBUG] zK shape: torch.Size([32, 2]), mean: -0.1044, std: 1.4352
+
+[DEBUG] --- FLOW JACOBIAN SUMMARY ---
+[DEBUG FLOW 0] shape=(32,), min=-0.1223, max=-0.0194, mean=-0.0868, std=0.0277
+[DEBUG FLOW 1] shape=(32,), min=-0.1019, max=0.0744, mean=0.0096, std=0.0579
+[DEBUG FLOW 2] shape=(32,), min=-0.0542, max=0.1367, mean=0.0077, std=0.0439
+[DEBUG FLOW 3] shape=(32,), min=0.0120, max=0.1234, mean=0.0506, std=0.0227
+[DEBUG FLOW 4] shape=(32,), min=-0.1309, max=-0.0499, mean=-0.0792, std=0.0194
+[DEBUG FLOW 5] shape=(32,), min=-0.1341, max=-0.0013, mean=-0.0861, std=0.0323
+[DEBUG FLOW 6] shape=(32,), min=0.0409, max=0.1028, mean=0.0658, std=0.0192
+[KL ROUTE] RHMC Monte-Carlo branch (prior_mode=uniform)
+preferred?!?!: g
+[CONSISTENCY] mean||G⁻¹_lm - G⁻¹_rhmc||_F=6.016e-05, mean(|½log|G⁻¹|+½(−log|G|)|)=2.553e+00
+[DEBUG] Attempting pushforward calculation with stage_zS shape: torch.Size([32, 2])
+preferred?!?!: g
+[PUSH DEBUG] transported metric stats: eig_min=5.455e-02, eig_max=1.480e+02, cond(G')=2.713e+03, cond(G'^-1)=2.610e+03, min_sv(J)=7.300e-01, ||G'·G'^-1-I||_F=9.875e-02
+[DEBUG] Pushforward results: G_pushforward=True, rep_push=g
+[DEBUG] half_logdet_push_g mean: -0.044325634837150574
+[DEBUG] half_logdet_push_ginv mean: -0.016049496829509735
+[DEBUG] G_pushforward shape: torch.Size([32, 2, 2])
+[DEBUG] G_pushforward has NaN: False
+[DEBUG] G_pushforward has inf: False
+[DEBUG] G_pushforward eigenvalues - min: 0.054547, max: 147.973663
+[DEBUG] G_pushforward condition number: 2712.786197
+[DEBUG] log_p_prime_zF mean: -0.016049, min: -4.331430, max: 2.875287
+[DEBUG] log_p_prime_zF has NaN: False, has inf: False
+[DEBUG] Using rep_push='g', log_p_prime_zF mean: -0.016049496829509735
+
+[LOG_Q FROM RHMC]
+  log_q provided by rhmc_log_q (not computed here)
+  Total log_q:      -0.9945 (range: [-3.9780, +2.7393])
+  ||z0 - μ||:       0.5779
+  rhmc_alpha:       0.3
+
+[_get_inverse_metric NORMALIZATION]
+  mode:                  none
+  Original G⁻¹ eigenvalues: min=0.010022, max=19.145369
+  After clamping:        min=0.010022, max=19.145369
+
+[_make_covariance TARGET RADIUS]
+  initial_target_radius: 0.000000
+  override_target_radius: 0.000000
+  input alpha:           0.300000
+  eps_reg:               1.000000e-04
+  Target radius disabled (target_r=0), using alpha=0.3
+  [Σ CONSISTENCY] mean|log|Σ| - (log|G⁻¹|+d·log α)| = 5.1921e-03
+[Σ SOURCE] builder (explicit) log|Σ|=-3.9271
+  [Σ BUILDER CHECK] pre-extract log|Σ|=-3.9271
+  [SIGMA RECON SHAPES] stage_z0: (32, 2) mu: (32, 2) Sigma_mu: (32, 2, 2)
+  Σ_μ eigenvalues:  min=0.003107, max=5.743713
+  log|Σ_μ|:         -3.9271
+  Σ_μ trace:        0.493154
+  [SIGMA RECON SHAPES] diff: (32, 2) Sigma_mu_inv: (32, 2, 2)
+  [Reconstructed decomposition]
+    Quadratic term: -1.1202
+    Volume term:    +1.9635
+    Constant term:  -1.8379
+    Sum:            -0.9945
+  [SIGMA CONSISTENCY] mean||Σ_loss - Σ_rhmc||_F=0.000e+00, mean||Σ_loss - Σ_cache||_F=0.000e+00, mean||Σ_loss - Σ_rebuild||_F=0.000e+00
+  [SIGMA CONSISTENCY] log|Σ|: loss=-3.9271, rhmc=-3.9271, cache=-3.9271, rebuild=-3.9271
+  [Σ SOURCE] loss=builder (explicit), rhmc=traj, cache=posterior._last_sigma_mu, rebuild=loss(copy)
+preferred?!?!: g
+[METRIC DEBUG] G(z0): rep=g | eig_min=5.284e-02, eig_max=9.920e+01, cond(G)=1.878e+03 | eig_min_inv=1.008e-02, eig_max_inv=1.893e+01, cond(G⁻¹)=1.878e+03 | log|G|=-1.778e-01, log|G⁻¹|=1.778e-01 | ||G·G⁻¹-I||_F=6.106e-17
+preferred?!?!: g
+[METRIC DEBUG] G(zS): rep=g | eig_min=4.723e-02, eig_max=9.918e+01, cond(G)=2.100e+03 | eig_min_inv=1.008e-02, eig_max_inv=2.117e+01, cond(G⁻¹)=2.100e+03 | log|G|=-2.047e-01, log|G⁻¹|=2.047e-01 | ||G·G⁻¹-I||_F=7.335e-17
+[DEBUG] KL CALCULATION - log_p_prime_zF is None: False
+[DEBUG] KL CALCULATION - log_q mean: -0.8761321306228638
+[DEBUG] KL CALCULATION - delta_kin mean: -0.32014840841293335
+[DEBUG] KL CALCULATION - delta_vol mean: 0.0
+[DEBUG] KL CALCULATION - volume_bias_weight: 1.0
+[DEBUG] INTERMEDIATE KL TERMS:
+[DEBUG] - log_q has NaN: False, has inf: False
+[DEBUG] - delta_kin has NaN: False, has inf: False
+[DEBUG] - delta_vol has NaN: False, has inf: False
+[DEBUG] - log_p_prime_zF has NaN: False, has inf: False
+[DEBUG] FORMULATION B - log_p_prime_zF mean: -0.016049496829509735
+[DEBUG] FORMULATION B - (volume_bias_weight * log_p_prime_zF) mean: -0.016049496829509735
+[DEBUG] FORMULATION B - kl_terms mean: -1.1802310943603516
+[DEBUG] FINAL KL_TERMS CHECK:
+[DEBUG] - kl_terms mean: -1.180231, min: -8.014434, max: 6.805647
+[DEBUG] - kl_terms has NaN: False, has inf: False
+[DEBUG] FINAL KL LOSS: -1.1802310943603516
+[KL VALIDATION] Negative KL detected (-1.1802)
+[KL VALIDATION] This indicates numerical instability in the calculation
+[KL VALIDATION] log_q mean=-0.9945, volume term mean=-0.0160
+[KL TRUE EST] logZ_est=+3.758288, kl_loss=+2.578057, kl_true_est=+2.578057, included_in_loss=True
+[KL DEBUG] corr(||zS-mu||, max_eig(G(zS)))=-2.300e-01, max_eig_mean=4.952e+00
+[LATENT DEBUG] StageC (zS - mu): pc1_ratio=0.714, pc2_ratio=0.286, eig_min=1.514e-01, eig_max=3.784e-01, trace=5.298e-01
+[LATENT DEBUG] StageC mu: pc1_ratio=0.613, pc2_ratio=0.387, eig_min=1.867e+00, eig_max=2.961e+00, trace=4.828e+00
+[KL DEBUG] corr(||zS-mu||, max_eig(G(zS)))=-2.300e-01, max_eig_mean=4.952e+00
+[LATENT DEBUG] StageC (zS - mu): pc1_ratio=0.714, pc2_ratio=0.286, eig_min=1.514e-01, eig_max=3.784e-01, trace=5.298e-01
+[LATENT DEBUG] StageC mu: pc1_ratio=0.613, pc2_ratio=0.387, eig_min=1.867e+00, eig_max=2.961e+00, trace=4.828e+00
+[KL DEBUG] latent norms: ||mu|| mean=2.087e+00, ||z0-mu|| mean=5.779e-01, ||zS-mu|| mean=5.827e-01, ||zS-z0|| mean=6.872e-02
+[KL DEBUG] flow stats: log_q mean=-9.945e-01, sum_logdet_flow mean=-1.184e-01, delta_kin mean=-3.201e-01, delta_vol mean=0.000e+00
+[KL DEBUG] volume identity residual: mean=2.275e-01, max=6.120e-01
+preferred?!?!: g
+preferred?!?!: g
+[KL DEBUG] kinetic density: start_mean=-2.660e+00, end_mean=-2.339e+00, diff_mean=-3.204e-01, delta_kin_residual=2.573e-04
+[GRAD TRACE] kl_grad_sanity failed: element 0 of tensors does not require grad and does not have a grad_fn
+[LOSS TRACE] failed: element 0 of tensors does not require grad and does not have a grad_fn
+preferred?!?!: g
+[DEBUG] Metric eigvals: min 0.047234367579221725 max 99.18360900878906 mean 4.924571990966797
+[DEBUG] Latent z stats: min -2.872028112411499 max 2.735912322998047 mean -0.10444559901952744 std 1.435221791267395
+💾 Saved matplotlib figure: wandb/plots/sequence_trajectories_epoch_0.png
+🧠 Creating Enhanced KL Visualization (Epoch 0)
+[ENCODER DEBUG] log_var: min=-5.8286, max=-2.4400, mean=-4.1872, std=0.9300 (Δmean=+0.0000e+00, Δvar_mean=+0.0000e+00)
+[ENCODER DEBUG] variance: min=2.9421e-03, max=8.7159e-02, mean=2.3315e-02
+✅ USING RIEMANNIAN RHMC POSTERIOR (forward)
+[CONFIG OVERRIDE] alpha_override=0.3, eps_override=0.0001
+
+[_get_inverse_metric NORMALIZATION]
+  mode:                  none
+  Original G⁻¹ eigenvalues: min=0.010022, max=19.145369
+  After clamping:        min=0.010022, max=19.145369
+
+[_make_covariance TARGET RADIUS]
+  initial_target_radius: 0.000000
+  override_target_radius: 0.000000
+  input alpha:           0.300000
+  eps_reg:               1.000000e-04
+  Target radius disabled (target_r=0), using alpha=0.3
+  [Σ CONSISTENCY] mean|log|Σ| - (log|G⁻¹|+d·log α)| = 5.1921e-03
+checkkkkkk1
+
+[MU GRADIENT DEBUG]
+  log|G(μ)| mean=+0.7622
+  ||∇ log|G(μ)|| mean=3.6563, max=5.8253
+  Nearest-centroid dist mean=0.4651, grad alignment mean=-0.5640
+
+================================================================================
+[CANDIDATE DIAGNOSTICS] B=32, K=10, D=2
+================================================================================
+
+[SUMMARY OVER ALL CANDIDATES]
+  ||z-μ||:              mean=0.6809, std=0.8763, min=0.0027, max=6.2550
+  Mahal²:               mean=2.0763, std=2.8542, min=0.0000, max=18.4163
+  h=0.5·log|G⁻¹|:      mean=-1.6853, std=1.7510, min=-4.6052, max=2.8897
+  Corr(h, Mahal²):      -0.1509
+
+[CHI-SQUARED EXPECTATION]
+  D:                    2
+  Expected Mahal² mean: 2.0000
+  Observed Mahal² mean: 2.0763  (Δ=+0.0763)
+
+[SELECTION VS POOL]
+  Selected h:           mean=0.3072
+  Selected ||z-μ||:     mean=0.4964
+  Selected Mahal²:      mean=2.9633
+  Δ Mahal²(sel - pool): +0.8870
+
+================================================================================
+
+
+================================================================================
+[INITIAL SAMPLING DIAGNOSTICS]
+================================================================================
+
+[Σ_μ PROPERTIES]
+  alpha:                 0.300000
+  Σ eigenvalues:         min=3.106627e-03, max=5.743713
+  Σ trace:               1.150315
+  log|Σ|:                -3.927089
+  Condition number:      1.03
+  Anisotropy ratio:      1.03
+
+[STAGE-BY-STAGE DISTANCE ANALYSIS]
+  ||z_selected - μ||:    mean=0.4964, std=0.4340
+  ||z0 - μ||:            mean=0.4964, std=0.4340
+  ||z_selected - z0||:   mean=0.0000, std=0.0000
+  Δ||·-μ|| (volume acc): +0.0000
+
+[SELECTION STAGE COMPARISON]
+  z_selected Mahal²:     mean=2.2985
+  z0 Mahal²:             mean=2.2985
+  Δ Mahal² (vol acc):    +0.0000
+  → Volume acceptance had NO EFFECT on distance
+
+[EXPECTED VS ACTUAL]
+  Expected ||z-μ||:      √(tr(Σ)) = 0.7714
+  Actual ||z0-μ||:       0.4964
+  Ratio (actual/expected): 0.6436
+
+[MAHALANOBIS ANALYSIS]
+  Euclidean dist²:       mean=0.4290
+  Mahalanobis dist²:     mean=2.2985
+  Mahalanobis dist:      mean=1.3094
+  Ratio (Mahal²/Euclid²): 5.3585
+
+[MAHALANOBIS DECOMPOSITION in Eigenbasis]
+  Eigenvalue 0: λ=0.2405, y²=0.0032, contrib=(y²/λ)=0.0134
+  Eigenvalue 1: λ=0.2527, y²=0.0129, contrib=(y²/λ)=0.0509
+
+[CHI-SQUARED TEST]
+  Dimension D:           2
+  Expected Mahal²:       χ²(2) mean = 2.0
+  Actual Mahal²:         2.2985
+  Deviation:             0.2985 (14.9%)
+
+[KOLMOGOROV-SMIRNOV TEST]
+  KS statistic:          0.1617
+  KS p-value:            3.3594e-01
+  ✓ Cannot reject: distribution consistent with χ²(2)
+
+[HISTOGRAM COMPARISON] (first 5 bins)
+    Bin Center    Empirical  Theoretical      Ratio
+          0.40       0.3923       0.4097       0.96
+          1.19       0.1569       0.2751       0.57
+          1.99       0.1569       0.1847       0.85
+          2.79       0.1961       0.1240       1.58
+          3.58       0.0000       0.0833       0.00
+
+[EMPIRICAL VS THEORETICAL COVARIANCE]
+  Batch size:            32
+  ||Empirical - Σ||_F:   0.5139
+  ||Σ||_F:               0.8135
+  Relative error:        0.6317
+
+================================================================================
+
+
+================================================================================
+[METRIC AT SAMPLES DIAGNOSTICS]
+================================================================================
+
+[LOG DET G⁻¹ DISTRIBUTION]
+  At μ:                  mean=-1.5243
+  At z0:                 mean=0.6144, std=3.7120
+  min(z0):               -9.1878
+  max(z0):               5.7793
+  Δ(z0 - μ):             2.1388
+  ✓ Samples have higher log|G⁻¹| than μ (good for prior)
+
+[CORRELATION: ||z-μ|| vs log|G⁻¹(z)|]
+  Pearson r:             0.6452
+  Strong positive correlation: Farther samples have higher log|G⁻¹|
+
+[VOLUME ACCEPTANCE EFFECT]
+  log|G⁻¹(z_base)|:      mean=0.6144
+  log|G⁻¹(z0)|:          mean=0.6144
+  Δ(z0 - z_base):        0.0000
+  Volume acceptance had no effect or decreased log|G⁻¹|
+
+================================================================================
+
+[INITIAL SHRINK] attempt=0 alpha=0.3 radius=0 logdet(z0)=+0.6144 Δ=+2.1388
+
+================================================================================
+[RHMC TRAJECTORY DIAGNOSTICS]
+================================================================================
+
+[INITIAL STATE (k=0)]
+  ||z0 - μ||:            mean=0.4964, max=2.2532
+  ||ρ0||:                mean=1.2791, max=3.0000
+?!!!!computing potential gradient 1!!!
+?!!!!computing potential gradient 2!!!
+using g??????
+we did the grad of the log volume!!!
+!!!!sign is +1!!!
+
+[VOLUME FORCE & GRADIENT DIRECTION DEBUG]
+  representation: g
+  sign: 1
+  scale: 1
+  grad_log_vol mean: 6.592138e-01, norm: 2.899757e+00
+  grad_U mean: -6.592138e-01, norm: 2.899757e+00
+
+  Current metric values:
+    +0.5 log|G(z)|:     -0.307214
+    +0.5 log|G⁻¹(z)|:   0.307214
+    Sum (should ≈ 0):   0.000000
+
+  Gradient directions:
+    ∇(0.5 log|G|) norm:     2.900860e+00
+    ∇(0.5 log|G⁻¹|) norm:   2.900860e+00
+    ∇G · ∇G⁻¹ (should <0):  -1.090532e+01
+
+  Using rep='g': grad_log_vol = ∇(0.5 log|G⁻¹|)
+  grad_U = -1 * grad_log_vol
+  → For uniform prior p ∝ √det(G⁻¹), we want grad_U = -∇(0.5 log|G⁻¹|) = ∇(0.5 log|G|)
+  ✓ CORRECT: sign=+1 → grad_U ascends log|G| → pushes TOWARD high G⁻¹ regions
+
+[STEP SIZE SCALING DEBUG]
+  base step_size: 0.020000
+  velocity norm mean: 2.140633e+00
+  max_position_step: 1.0
+  scaling factor (max_pos_step/v_norm): 4.671515e-01
+  min_eig_Ginv mean: 4.553205e+00 (raw)
+  min_eig_clamped mean: 4.553205e+00
+  stiff_scale mean: 1.669520e+00
+?!!!!computing potential gradient 1!!!
+?!!!!computing potential gradient 2!!!
+using g??????
+we did the grad of the log volume!!!
+!!!!sign is +1!!!
+
+[VOLUME FORCE & GRADIENT DIRECTION DEBUG]
+  representation: g
+  sign: 1
+  scale: 1
+  grad_log_vol mean: 6.744789e-01, norm: 2.901702e+00
+  grad_U mean: -6.744789e-01, norm: 2.901702e+00
+
+  Current metric values:
+    +0.5 log|G(z)|:     -0.312423
+    +0.5 log|G⁻¹(z)|:   0.312423
+    Sum (should ≈ 0):   -0.000000
+
+  Gradient directions:
+    ∇(0.5 log|G|) norm:     2.902812e+00
+    ∇(0.5 log|G⁻¹|) norm:   2.902812e+00
+    ∇G · ∇G⁻¹ (should <0):  -1.095122e+01
+
+  Using rep='g': grad_log_vol = ∇(0.5 log|G⁻¹|)
+  grad_U = -1 * grad_log_vol
+  → For uniform prior p ∝ √det(G⁻¹), we want grad_U = -∇(0.5 log|G⁻¹|) = ∇(0.5 log|G|)
+  ✓ CORRECT: sign=+1 → grad_U ascends log|G| → pushes TOWARD high G⁻¹ regions
+[RHMC QUADRATIC ENERGY] step=1 start mean=1.7693 current mean=1.0562 Δ initial mean=-0.7131 Δ active mean=-0.7131
+
+[STEP k=1]
+  ||z1 - μ||:          mean=0.4980
+  ||z1 - z0||:         mean=0.0246
+  ||ρ1||:             mean=1.1907
+  log|G⁻¹(z1)|:       0.6248
+  Δ log|G⁻¹| (step):        +0.0104
+?!!!!computing potential gradient 1!!!
+?!!!!computing potential gradient 2!!!
+using g??????
+we did the grad of the log volume!!!
+!!!!sign is +1!!!
+
+[VOLUME FORCE & GRADIENT DIRECTION DEBUG]
+  representation: g
+  sign: 1
+  scale: 1
+  grad_log_vol mean: 6.744789e-01, norm: 2.901702e+00
+  grad_U mean: -6.744789e-01, norm: 2.901702e+00
+
+  Current metric values:
+    +0.5 log|G(z)|:     -0.312423
+    +0.5 log|G⁻¹(z)|:   0.312423
+    Sum (should ≈ 0):   -0.000000
+
+  Gradient directions:
+    ∇(0.5 log|G|) norm:     2.902812e+00
+    ∇(0.5 log|G⁻¹|) norm:   2.902812e+00
+    ∇G · ∇G⁻¹ (should <0):  -1.095122e+01
+
+  Using rep='g': grad_log_vol = ∇(0.5 log|G⁻¹|)
+  grad_U = -1 * grad_log_vol
+  → For uniform prior p ∝ √det(G⁻¹), we want grad_U = -∇(0.5 log|G⁻¹|) = ∇(0.5 log|G|)
+  ✓ CORRECT: sign=+1 → grad_U ascends log|G| → pushes TOWARD high G⁻¹ regions
+
+[STEP SIZE SCALING DEBUG]
+  base step_size: 0.020000
+  velocity norm mean: 1.251983e+00
+  max_position_step: 1.0
+  scaling factor (max_pos_step/v_norm): 7.987331e-01
+  min_eig_Ginv mean: 4.550462e+00 (raw)
+  min_eig_clamped mean: 4.550462e+00
+  stiff_scale mean: 1.673622e+00
+?!!!!computing potential gradient 1!!!
+?!!!!computing potential gradient 2!!!
+using g??????
+we did the grad of the log volume!!!
+!!!!sign is +1!!!
+
+[VOLUME FORCE & GRADIENT DIRECTION DEBUG]
+  representation: g
+  sign: 1
+  scale: 1
+  grad_log_vol mean: 6.810388e-01, norm: 2.886441e+00
+  grad_U mean: -6.810388e-01, norm: 2.886441e+00
+
+  Current metric values:
+    +0.5 log|G(z)|:     -0.323680
+    +0.5 log|G⁻¹(z)|:   0.323680
+    Sum (should ≈ 0):   -0.000000
+
+  Gradient directions:
+    ∇(0.5 log|G|) norm:     2.887555e+00
+    ∇(0.5 log|G⁻¹|) norm:   2.887555e+00
+    ∇G · ∇G⁻¹ (should <0):  -1.087856e+01
+
+  Using rep='g': grad_log_vol = ∇(0.5 log|G⁻¹|)
+  grad_U = -1 * grad_log_vol
+  → For uniform prior p ∝ √det(G⁻¹), we want grad_U = -∇(0.5 log|G⁻¹|) = ∇(0.5 log|G|)
+  ✓ CORRECT: sign=+1 → grad_U ascends log|G| → pushes TOWARD high G⁻¹ regions
+[RHMC QUADRATIC ENERGY] step=2 start mean=1.7693 current mean=1.0202 Δ initial mean=-0.7491 Δ active mean=-0.0361
+
+[STEP k=2]
+  ||z2 - μ||:          mean=0.5010
+  ||z2 - z0||:         mean=0.0471
+  ||ρ2||:             mean=1.1737
+  log|G⁻¹(z2)|:       0.6474
+  Δ log|G⁻¹| (step):        +0.0225
+  corr(step, log|G⁻¹|):    +0.9782 (running)
+?!!!!computing potential gradient 1!!!
+?!!!!computing potential gradient 2!!!
+using g??????
+we did the grad of the log volume!!!
+!!!!sign is +1!!!
+
+[VOLUME FORCE & GRADIENT DIRECTION DEBUG]
+  representation: g
+  sign: 1
+  scale: 1
+  grad_log_vol mean: 6.810388e-01, norm: 2.886441e+00
+  grad_U mean: -6.810388e-01, norm: 2.886441e+00
+
+  Current metric values:
+    +0.5 log|G(z)|:     -0.323680
+    +0.5 log|G⁻¹(z)|:   0.323680
+    Sum (should ≈ 0):   -0.000000
+
+  Gradient directions:
+    ∇(0.5 log|G|) norm:     2.887555e+00
+    ∇(0.5 log|G⁻¹|) norm:   2.887555e+00
+    ∇G · ∇G⁻¹ (should <0):  -1.087856e+01
+
+  Using rep='g': grad_log_vol = ∇(0.5 log|G⁻¹|)
+  grad_U = -1 * grad_log_vol
+  → For uniform prior p ∝ √det(G⁻¹), we want grad_U = -∇(0.5 log|G⁻¹|) = ∇(0.5 log|G|)
+  ✓ CORRECT: sign=+1 → grad_U ascends log|G| → pushes TOWARD high G⁻¹ regions
+
+[STEP SIZE SCALING DEBUG]
+  base step_size: 0.020000
+  velocity norm mean: 1.204264e+00
+  max_position_step: 1.0
+  scaling factor (max_pos_step/v_norm): 8.303824e-01
+  min_eig_Ginv mean: 4.635754e+00 (raw)
+  min_eig_clamped mean: 4.635754e+00
+  stiff_scale mean: 1.689510e+00
+?!!!!computing potential gradient 1!!!
+?!!!!computing potential gradient 2!!!
+using g??????
+we did the grad of the log volume!!!
+!!!!sign is +1!!!
+
+[VOLUME FORCE & GRADIENT DIRECTION DEBUG]
+  representation: g
+  sign: 1
+  scale: 1
+  grad_log_vol mean: 6.810646e-01, norm: 2.860173e+00
+  grad_U mean: -6.810646e-01, norm: 2.860173e+00
+
+  Current metric values:
+    +0.5 log|G(z)|:     -0.340325
+    +0.5 log|G⁻¹(z)|:   0.340325
+    Sum (should ≈ 0):   0.000000
+
+  Gradient directions:
+    ∇(0.5 log|G|) norm:     2.861291e+00
+    ∇(0.5 log|G⁻¹|) norm:   2.861291e+00
+    ∇G · ∇G⁻¹ (should <0):  -1.070899e+01
+
+  Using rep='g': grad_log_vol = ∇(0.5 log|G⁻¹|)
+  grad_U = -1 * grad_log_vol
+  → For uniform prior p ∝ √det(G⁻¹), we want grad_U = -∇(0.5 log|G⁻¹|) = ∇(0.5 log|G|)
+  ✓ CORRECT: sign=+1 → grad_U ascends log|G| → pushes TOWARD high G⁻¹ regions
+[RHMC QUADRATIC ENERGY] step=3 start mean=1.7693 current mean=1.0011 Δ initial mean=-0.7682 Δ active mean=-0.0191
+
+[STEP k=3]
+  ||z3 - μ||:          mean=0.5049
+  ||z3 - z0||:         mean=0.0681
+  ||ρ3||:             mean=1.1607
+  log|G⁻¹(z3)|:       0.6807
+  Δ log|G⁻¹| (step):        +0.0333
+  corr(step, log|G⁻¹|):    +0.9743 (running)
+
+[TRAJECTORY SUMMARY]
+  Initial ||z0 - μ||:    0.4964
+  Final ||zK - μ||:      0.5049
+  Total drift from z0:   0.0681
+  Net change in ||·-μ||: 0.0085
+  → RHMC MOVED AWAY from μ
+  → Trajectory MONOTONICALLY MOVES AWAY from μ
+
+[METRIC EVOLUTION]
+  Initial log|G⁻¹(z0)|:  0.6144
+  Final log|G⁻¹(zK)|:    0.6807
+  Δ log|G⁻¹|:            0.0662
+  ✓ RHMC MOVED TO HIGHER log|G⁻¹| (toward prior!)
+  Correlation(step, log|G⁻¹|): 0.9743
+    → Strong increasing trend!
+  Correlation(||z-μ||, log|G⁻¹|): 0.9992
+
+================================================================================
+
+[RHMC DEBUG] G(z0): eig_min=5.511e-02, eig_max=9.893e+01, cond=1.795e+03, log|G|=-6.144e-01
+[RHMC DEBUG] G(zK): eig_min=5.301e-02, eig_max=9.896e+01, cond=1.867e+03, log|G|=-6.807e-01
+[RHMC DEBUG] latent drift: ||mu|| mean=2.087e+00, ||zK-mu|| mean=5.049e-01 (max=2.330e+00), ||zK-z0|| mean=6.808e-02 (max=1.200e-01)
+[RHMC DEBUG] momentum norms: initial mean=1.279e+00, final mean=1.161e+00
+
+[_compute_log_riemannian_gaussian BEFORE log_q_riem]
+  min_cov_eig:           0.001000
+  covariance_provided:   True
+  alpha:                 N/A (covariance provided)
+  Sigma eigenvalues:     min=0.003107, max=5.743713
+  Sigma trace:           1.150315
+  log|Sigma|:            -3.927089
+  ||z - μ||:             0.496439
+  [Comparison with raw G⁻¹(μ)]
+    G⁻¹(μ) eigenvalues:  min=0.010022, max=19.145363
+    log|G⁻¹(μ)|:         -1.524336
+    Expected log|Σ|:     -1.524336 (if α=1, ε≈0)
+    Actual log|Σ|:       -3.927089
+    Δ log|Σ|:            -2.402753
+
+[LOG_Q_RIEM STABILIZATION]
+  min_eig (jitter):     0.001000
+  was_stabilized:       False
+  Original Σ:
+    eigenvalues:        min=0.003107, max=5.743713
+    log|Σ|:             -3.927089
+
+================================================================================
+[LOG_Q_RIEM FULL DECOMPOSITION]
+================================================================================
+
+[STANDARD DECOMPOSITION]
+  Quadratic term: mean=-1.1493, min=-3.5848, max=-0.0031
+  Volume term:    mean=1.9635
+  Constant term:  -1.8379
+  Total log_q:    mean=-1.0236
+  ||z - μ||:      mean=0.4964
+  Σ eigenvalues:  min=0.003107, max=5.743713
+
+[MAHALANOBIS EIGENBASIS DECOMPOSITION]
+  Euclidean ||z-μ||²:    mean=0.4290
+  Mahalanobis (z-μ)ᵀΣ⁻¹(z-μ): mean=2.2985
+  Ratio (Mahal/Euclid):  5.3585
+
+  Per-eigenvalue contributions (batch mean, first sample detailed):
+    Dim 0: λ=0.2405, y[0]=0.0568, y²/λ=0.0134 (batch mean: 1.2893)
+    Dim 1: λ=0.2527, y[0]=-0.1134, y²/λ=0.0509 (batch mean: 1.0093)
+
+  Dominant dimensions (contribution to Mahalanobis²):
+    Dim 0: 56.1% (cumulative: 56.1%)
+
+[CHI-SQUARED FIT]
+  Dimension D:           2
+  Expected Mahal²:       χ²(2) mean = 2.0
+  Observed Mahal²:       2.2985
+  Deviation:             0.2985 (14.9%)
+
+================================================================================
+
+[RHMC DEBUG] zK shape: torch.Size([32, 2]), mean: -0.1110, std: 1.4061
+
+[DEBUG] --- FLOW JACOBIAN SUMMARY ---
+[DEBUG FLOW 0] shape=(32,), min=-0.1208, max=-0.0175, mean=-0.0868, std=0.0284
+[DEBUG FLOW 1] shape=(32,), min=-0.0918, max=0.0747, mean=0.0138, std=0.0585
+[DEBUG FLOW 2] shape=(32,), min=-0.0374, max=0.1400, mean=0.0079, std=0.0453
+[DEBUG FLOW 3] shape=(32,), min=0.0138, max=0.1228, mean=0.0513, std=0.0213
+[DEBUG FLOW 4] shape=(32,), min=-0.1161, max=-0.0512, mean=-0.0769, std=0.0150
+[DEBUG FLOW 5] shape=(32,), min=-0.1255, max=-0.0040, mean=-0.0858, std=0.0318
+[DEBUG FLOW 6] shape=(32,), min=0.0414, max=0.1014, mean=0.0661, std=0.0173
+[KL ROUTE] RHMC Monte-Carlo branch (prior_mode=uniform)
+preferred?!?!: g
+[CONSISTENCY] mean||G⁻¹_lm - G⁻¹_rhmc||_F=6.952e-05, mean(|½log|G⁻¹|+½(−log|G|)|)=3.219e+00
+[DEBUG] Attempting pushforward calculation with stage_zS shape: torch.Size([32, 2])
+preferred?!?!: g
+[PUSH DEBUG] transported metric stats: eig_min=6.123e-02, eig_max=1.523e+02, cond(G')=2.488e+03, cond(G'^-1)=2.372e+03, min_sv(J)=7.207e-01, ||G'·G'^-1-I||_F=8.818e-02
+[DEBUG] Pushforward results: G_pushforward=True, rep_push=g
+[DEBUG] half_logdet_push_g mean: 0.20283235609531403
+[DEBUG] half_logdet_push_ginv mean: 0.22987383604049683
+[DEBUG] G_pushforward shape: torch.Size([32, 2, 2])
+[DEBUG] G_pushforward has NaN: False
+[DEBUG] G_pushforward has inf: False
+[DEBUG] G_pushforward eigenvalues - min: 0.061231, max: 152.321152
+[DEBUG] G_pushforward condition number: 2487.659189
+[DEBUG] log_p_prime_zF mean: 0.229874, min: -4.331612, max: 2.760810
+[DEBUG] log_p_prime_zF has NaN: False, has inf: False
+[DEBUG] Using rep_push='g', log_p_prime_zF mean: 0.22987383604049683
+
+[LOG_Q FROM RHMC]
+  log_q provided by rhmc_log_q (not computed here)
+  Total log_q:      -1.0236 (range: [-4.5270, +1.7057])
+  ||z0 - μ||:       0.4964
+  rhmc_alpha:       0.3
+
+[_get_inverse_metric NORMALIZATION]
+  mode:                  none
+  Original G⁻¹ eigenvalues: min=0.010022, max=19.145369
+  After clamping:        min=0.010022, max=19.145369
+
+[_make_covariance TARGET RADIUS]
+  initial_target_radius: 0.000000
+  override_target_radius: 0.000000
+  input alpha:           0.300000
+  eps_reg:               1.000000e-04
+  Target radius disabled (target_r=0), using alpha=0.3
+  [Σ CONSISTENCY] mean|log|Σ| - (log|G⁻¹|+d·log α)| = 5.1921e-03
+[Σ SOURCE] builder (explicit) log|Σ|=-3.9271
+  [Σ BUILDER CHECK] pre-extract log|Σ|=-3.9271
+  [SIGMA RECON SHAPES] stage_z0: (32, 2) mu: (32, 2) Sigma_mu: (32, 2, 2)
+  Σ_μ eigenvalues:  min=0.003107, max=5.743713
+  log|Σ_μ|:         -3.9271
+  Σ_μ trace:        0.493154
+  [SIGMA RECON SHAPES] diff: (32, 2) Sigma_mu_inv: (32, 2, 2)
+  [Reconstructed decomposition]
+    Quadratic term: -1.1493
+    Volume term:    +1.9635
+    Constant term:  -1.8379
+    Sum:            -1.0236
+  [SIGMA CONSISTENCY] mean||Σ_loss - Σ_rhmc||_F=0.000e+00, mean||Σ_loss - Σ_cache||_F=0.000e+00, mean||Σ_loss - Σ_rebuild||_F=0.000e+00
+  [SIGMA CONSISTENCY] log|Σ|: loss=-3.9271, rhmc=-3.9271, cache=-3.9271, rebuild=-3.9271
+  [Σ SOURCE] loss=builder (explicit), rhmc=traj, cache=posterior._last_sigma_mu, rebuild=loss(copy)
+preferred?!?!: g
+[METRIC DEBUG] G(z0): rep=g | eig_min=5.511e-02, eig_max=9.893e+01, cond(G)=1.795e+03 | eig_min_inv=1.011e-02, eig_max_inv=1.814e+01, cond(G⁻¹)=1.795e+03 | log|G|=-6.144e-01, log|G⁻¹|=6.144e-01 | ||G·G⁻¹-I||_F=6.014e-17
+preferred?!?!: g
+[METRIC DEBUG] G(zS): rep=g | eig_min=5.301e-02, eig_max=9.896e+01, cond(G)=1.867e+03 | eig_min_inv=1.011e-02, eig_max_inv=1.886e+01, cond(G⁻¹)=1.867e+03 | log|G|=-6.807e-01, log|G⁻¹|=6.807e-01 | ||G·G⁻¹-I||_F=7.256e-17
+[DEBUG] KL CALCULATION - log_p_prime_zF is None: False
+[DEBUG] KL CALCULATION - log_q mean: -0.9131560921669006
+[DEBUG] KL CALCULATION - delta_kin mean: -0.4167674481868744
+[DEBUG] KL CALCULATION - delta_vol mean: 0.0
+[DEBUG] KL CALCULATION - volume_bias_weight: 1.0
+[DEBUG] INTERMEDIATE KL TERMS:
+[DEBUG] - log_q has NaN: False, has inf: False
+[DEBUG] - delta_kin has NaN: False, has inf: False
+[DEBUG] - delta_vol has NaN: False, has inf: False
+[DEBUG] - log_p_prime_zF has NaN: False, has inf: False
+[DEBUG] FORMULATION B - log_p_prime_zF mean: 0.22987383604049683
+[DEBUG] FORMULATION B - (volume_bias_weight * log_p_prime_zF) mean: 0.22987383604049683
+[DEBUG] FORMULATION B - kl_terms mean: -1.5597974061965942
+[DEBUG] FINAL KL_TERMS CHECK:
+[DEBUG] - kl_terms mean: -1.559797, min: -8.419083, max: 5.774765
+[DEBUG] - kl_terms has NaN: False, has inf: False
+[DEBUG] FINAL KL LOSS: -1.5597974061965942
+[KL VALIDATION] Negative KL detected (-1.5598)
+[KL VALIDATION] This indicates numerical instability in the calculation
+[KL VALIDATION] log_q mean=-1.0236, volume term mean=0.2299
+[KL TRUE EST] logZ_est=+3.758288, kl_loss=+2.198491, kl_true_est=+2.198491, included_in_loss=True
+[KL DEBUG] corr(||zS-mu||, max_eig(G(zS)))=-2.129e-01, max_eig_mean=4.834e+00
+[LATENT DEBUG] StageC (zS - mu): pc1_ratio=0.637, pc2_ratio=0.363, eig_min=1.465e-01, eig_max=2.569e-01, trace=4.034e-01
+[LATENT DEBUG] StageC mu: pc1_ratio=0.613, pc2_ratio=0.387, eig_min=1.867e+00, eig_max=2.961e+00, trace=4.828e+00
+[KL DEBUG] corr(||zS-mu||, max_eig(G(zS)))=-2.129e-01, max_eig_mean=4.834e+00
+[LATENT DEBUG] StageC (zS - mu): pc1_ratio=0.637, pc2_ratio=0.363, eig_min=1.465e-01, eig_max=2.569e-01, trace=4.034e-01
+[LATENT DEBUG] StageC mu: pc1_ratio=0.613, pc2_ratio=0.387, eig_min=1.867e+00, eig_max=2.961e+00, trace=4.828e+00
+[KL DEBUG] latent norms: ||mu|| mean=2.087e+00, ||z0-mu|| mean=4.964e-01, ||zS-mu|| mean=5.049e-01, ||zS-z0|| mean=6.808e-02
+[KL DEBUG] flow stats: log_q mean=-1.024e+00, sum_logdet_flow mean=-1.104e-01, delta_kin mean=-4.168e-01, delta_vol mean=0.000e+00
+[KL DEBUG] volume identity residual: mean=2.119e-01, max=6.476e-01
+preferred?!?!: g
+preferred?!?!: g
+[KL DEBUG] kinetic density: start_mean=-2.415e+00, end_mean=-1.998e+00, diff_mean=-4.172e-01, delta_kin_residual=4.479e-04
+[GRAD TRACE] kl_grad_sanity failed: element 0 of tensors does not require grad and does not have a grad_fn
+[LOSS TRACE] failed: element 0 of tensors does not require grad and does not have a grad_fn
+preferred?!?!: g
+[DEBUG] Metric eigvals: min 0.05301114171743393 max 98.95735931396484 mean 4.807221412658691
+[DEBUG] Latent z stats: min -2.5856966972351074 max 2.747199058532715 mean -0.11096090823411942 std 1.4060628414154053
+⚠️ Using forward latent_samples as μ for visualization (mu_aligned missing)
+✅ Using RHMC posterior sampling for visualization
+
+[_get_inverse_metric NORMALIZATION]
+  mode:                  none
+  Original G⁻¹ eigenvalues: min=0.010105, max=21.602436
+  After clamping:        min=0.010105, max=21.602436
+
+[_make_covariance TARGET RADIUS]
+  initial_target_radius: 0.000000
+  override_target_radius: 0.000000
+  input alpha:           0.300000
+  eps_reg:               1.000000e-04
+  Target radius disabled (target_r=0), using alpha=0.3
+  [Σ CONSISTENCY] mean|log|Σ| - (log|G⁻¹|+d·log α)| = 3.0246e-03
+checkkkkkk1
+
+[MU GRADIENT DEBUG]
+  log|G(μ)| mean=-0.3282
+  ||∇ log|G(μ)|| mean=2.8222, max=6.3617
+  Nearest-centroid dist mean=0.3044, grad alignment mean=-0.7542
+
+================================================================================
+[CANDIDATE DIAGNOSTICS] B=256, K=10, D=2
+================================================================================
+
+[SUMMARY OVER ALL CANDIDATES]
+  ||z-μ||:              mean=1.2836, std=1.3823, min=0.0006, max=8.4512
+  Mahal²:               mean=2.0944, std=2.9398, min=-0.0006, max=28.6697
+  h=0.5·log|G⁻¹|:      mean=-2.0244, std=1.8790, min=-4.6052, max=3.0275
+  Corr(h, Mahal²):      -0.3180
+
+[CHI-SQUARED EXPECTATION]
+  D:                    2
+  Expected Mahal² mean: 2.0000
+  Observed Mahal² mean: 2.0944  (Δ=+0.0944)
+
+[SELECTION VS POOL]
+  Selected h:           mean=0.3516
+  Selected ||z-μ||:     mean=0.6498
+  Selected Mahal²:      mean=1.2675
+  Δ Mahal²(sel - pool): -0.8269
+
+================================================================================
+
+
+================================================================================
+[INITIAL SAMPLING DIAGNOSTICS]
+================================================================================
+
+[Σ_μ PROPERTIES]
+  alpha:                 0.300000
+  Σ eigenvalues:         min=3.131611e-03, max=6.480833
+  Σ trace:               3.443021
+  log|Σ|:                -1.748491
+  Condition number:      1.04
+  Anisotropy ratio:      1.04
+
+[STAGE-BY-STAGE DISTANCE ANALYSIS]
+  ||z_selected - μ||:    mean=0.6498, std=0.6114
+  ||z0 - μ||:            mean=0.6498, std=0.6114
+  ||z_selected - z0||:   mean=0.0000, std=0.0000
+  Δ||·-μ|| (volume acc): +0.0000
+
+[SELECTION STAGE COMPARISON]
+  z_selected Mahal²:     mean=1.2528
+  z0 Mahal²:             mean=1.2528
+  Δ Mahal² (vol acc):    +0.0000
+  → Volume acceptance had NO EFFECT on distance
+
+[EXPECTED VS ACTUAL]
+  Expected ||z-μ||:      √(tr(Σ)) = 1.4222
+  Actual ||z0-μ||:       0.6498
+  Ratio (actual/expected): 0.4569
+  ⚠️  WARNING: z0 is TOO CLOSE to μ (<0.5× expected)
+
+[MAHALANOBIS ANALYSIS]
+  Euclidean dist²:       mean=0.7946
+  Mahalanobis dist²:     mean=1.2528
+  Mahalanobis dist:      mean=0.9315
+  Ratio (Mahal²/Euclid²): 1.5766
+
+[MAHALANOBIS DECOMPOSITION in Eigenbasis]
+  Eigenvalue 0: λ=0.2449, y²=0.4569, contrib=(y²/λ)=1.8656
+  Eigenvalue 1: λ=0.2566, y²=0.0339, contrib=(y²/λ)=0.1323
+
+[CHI-SQUARED TEST]
+  Dimension D:           2
+  Expected Mahal²:       χ²(2) mean = 2.0
+  Actual Mahal²:         1.2528
+  Deviation:             -0.7472 (-37.4%)
+
+[KOLMOGOROV-SMIRNOV TEST]
+  KS statistic:          0.2472
+  KS p-value:            2.8827e-14
+  ⚠️  REJECT null hypothesis: distribution does NOT match χ²(2)
+
+[HISTOGRAM COMPARISON] (first 5 bins)
+    Bin Center    Empirical  Theoretical      Ratio
+          0.41       0.6927       0.4076       1.70
+          1.23       0.2054       0.2708       0.76
+          2.04       0.1242       0.1799       0.69
+          2.86       0.0573       0.1195       0.48
+          3.68       0.0573       0.0794       0.72
+
+[EMPIRICAL VS THEORETICAL COVARIANCE]
+  Batch size:            256
+  ||Empirical - Σ||_F:   1.8775
+  ||Σ||_F:               2.4347
+  Relative error:        0.7711
+
+================================================================================
+
+
+================================================================================
+[METRIC AT SAMPLES DIAGNOSTICS]
+================================================================================
+
+[LOG DET G⁻¹ DISTRIBUTION]
+  At μ:                  mean=0.6564
+  At z0:                 mean=0.7032, std=3.1608
+  min(z0):               -9.1062
+  max(z0):               6.0550
+  Δ(z0 - μ):             0.0468
+  ✓ Samples have higher log|G⁻¹| than μ (good for prior)
+
+[CORRELATION: ||z-μ|| vs log|G⁻¹(z)|]
+  Pearson r:             0.2668
+
+[VOLUME ACCEPTANCE EFFECT]
+  log|G⁻¹(z_base)|:      mean=0.7032
+  log|G⁻¹(z0)|:          mean=0.7032
+  Δ(z0 - z_base):        0.0000
+  Volume acceptance had no effect or decreased log|G⁻¹|
+
+================================================================================
+
+[INITIAL SHRINK] attempt=0 alpha=0.3 radius=0 logdet(z0)=+0.7032 Δ=+0.0468
+
+================================================================================
+[RHMC TRAJECTORY DIAGNOSTICS]
+================================================================================
+
+[INITIAL STATE (k=0)]
+  ||z0 - μ||:            mean=0.6498, max=4.0944
+  ||ρ0||:                mean=1.2018, max=3.0000
+?!!!!computing potential gradient 1!!!
+?!!!!computing potential gradient 2!!!
+using g??????
+we did the grad of the log volume!!!
+!!!!sign is +1!!!
+
+[VOLUME FORCE & GRADIENT DIRECTION DEBUG]
+  representation: g
+  sign: 1
+  scale: 1
+  grad_log_vol mean: -1.114825e-01, norm: 2.475769e+00
+  grad_U mean: 1.114825e-01, norm: 2.475769e+00
+
+  Current metric values:
+    +0.5 log|G(z)|:     -0.351616
+    +0.5 log|G⁻¹(z)|:   0.351616
+    Sum (should ≈ 0):   0.000000
+
+  Gradient directions:
+    ∇(0.5 log|G|) norm:     2.476675e+00
+    ∇(0.5 log|G⁻¹|) norm:   2.476675e+00
+    ∇G · ∇G⁻¹ (should <0):  -8.217163e+00
+
+  Using rep='g': grad_log_vol = ∇(0.5 log|G⁻¹|)
+  grad_U = -1 * grad_log_vol
+  → For uniform prior p ∝ √det(G⁻¹), we want grad_U = -∇(0.5 log|G⁻¹|) = ∇(0.5 log|G|)
+  ✓ CORRECT: sign=+1 → grad_U ascends log|G| → pushes TOWARD high G⁻¹ regions
+
+[STEP SIZE SCALING DEBUG]
+  base step_size: 0.020000
+  velocity norm mean: 2.039791e+00
+  max_position_step: 1.0
+  scaling factor (max_pos_step/v_norm): 4.902463e-01
+  min_eig_Ginv mean: 4.013258e+00 (raw)
+  min_eig_clamped mean: 4.013258e+00
+  stiff_scale mean: 1.585327e+00
+?!!!!computing potential gradient 1!!!
+?!!!!computing potential gradient 2!!!
+using g??????
+we did the grad of the log volume!!!
+!!!!sign is +1!!!
+
+[VOLUME FORCE & GRADIENT DIRECTION DEBUG]
+  representation: g
+  sign: 1
+  scale: 1
+  grad_log_vol mean: -1.006624e-01, norm: 2.458076e+00
+  grad_U mean: 1.006624e-01, norm: 2.458076e+00
+
+  Current metric values:
+    +0.5 log|G(z)|:     -0.355215
+    +0.5 log|G⁻¹(z)|:   0.355215
+    Sum (should ≈ 0):   0.000000
+
+  Gradient directions:
+    ∇(0.5 log|G|) norm:     2.458976e+00
+    ∇(0.5 log|G⁻¹|) norm:   2.458976e+00
+    ∇G · ∇G⁻¹ (should <0):  -8.157303e+00
+
+  Using rep='g': grad_log_vol = ∇(0.5 log|G⁻¹|)
+  grad_U = -1 * grad_log_vol
+  → For uniform prior p ∝ √det(G⁻¹), we want grad_U = -∇(0.5 log|G⁻¹|) = ∇(0.5 log|G|)
+  ✓ CORRECT: sign=+1 → grad_U ascends log|G| → pushes TOWARD high G⁻¹ regions
+[RHMC QUADRATIC ENERGY] step=1 start mean=1.8496 current mean=1.2013 Δ initial mean=-0.6484 Δ active mean=-0.6484
+
+[STEP k=1]
+  ||z1 - μ||:          mean=0.6472
+  ||z1 - z0||:         mean=0.0250
+  ||ρ1||:             mean=1.1166
+  log|G⁻¹(z1)|:       0.7104
+  Δ log|G⁻¹| (step):        +0.0072
+?!!!!computing potential gradient 1!!!
+?!!!!computing potential gradient 2!!!
+using g??????
+we did the grad of the log volume!!!
+!!!!sign is +1!!!
+
+[VOLUME FORCE & GRADIENT DIRECTION DEBUG]
+  representation: g
+  sign: 1
+  scale: 1
+  grad_log_vol mean: -1.006624e-01, norm: 2.458076e+00
+  grad_U mean: 1.006624e-01, norm: 2.458076e+00
+
+  Current metric values:
+    +0.5 log|G(z)|:     -0.355215
+    +0.5 log|G⁻¹(z)|:   0.355215
+    Sum (should ≈ 0):   0.000000
+
+  Gradient directions:
+    ∇(0.5 log|G|) norm:     2.458976e+00
+    ∇(0.5 log|G⁻¹|) norm:   2.458976e+00
+    ∇G · ∇G⁻¹ (should <0):  -8.157303e+00
+
+  Using rep='g': grad_log_vol = ∇(0.5 log|G⁻¹|)
+  grad_U = -1 * grad_log_vol
+  → For uniform prior p ∝ √det(G⁻¹), we want grad_U = -∇(0.5 log|G⁻¹|) = ∇(0.5 log|G|)
+  ✓ CORRECT: sign=+1 → grad_U ascends log|G| → pushes TOWARD high G⁻¹ regions
+
+[STEP SIZE SCALING DEBUG]
+  base step_size: 0.020000
+  velocity norm mean: 1.278366e+00
+  max_position_step: 1.0
+  scaling factor (max_pos_step/v_norm): 7.822484e-01
+  min_eig_Ginv mean: 4.035862e+00 (raw)
+  min_eig_clamped mean: 4.035862e+00
+  stiff_scale mean: 1.589212e+00
+?!!!!computing potential gradient 1!!!
+?!!!!computing potential gradient 2!!!
+using g??????
+we did the grad of the log volume!!!
+!!!!sign is +1!!!
+
+[VOLUME FORCE & GRADIENT DIRECTION DEBUG]
+  representation: g
+  sign: 1
+  scale: 1
+  grad_log_vol mean: -8.741190e-02, norm: 2.427672e+00
+  grad_U mean: 8.741190e-02, norm: 2.427672e+00
+
+  Current metric values:
+    +0.5 log|G(z)|:     -0.363359
+    +0.5 log|G⁻¹(z)|:   0.363359
+    Sum (should ≈ 0):   -0.000000
+
+  Gradient directions:
+    ∇(0.5 log|G|) norm:     2.428564e+00
+    ∇(0.5 log|G⁻¹|) norm:   2.428564e+00
+    ∇G · ∇G⁻¹ (should <0):  -8.035673e+00
+
+  Using rep='g': grad_log_vol = ∇(0.5 log|G⁻¹|)
+  grad_U = -1 * grad_log_vol
+  → For uniform prior p ∝ √det(G⁻¹), we want grad_U = -∇(0.5 log|G⁻¹|) = ∇(0.5 log|G|)
+  ✓ CORRECT: sign=+1 → grad_U ascends log|G| → pushes TOWARD high G⁻¹ regions
+[RHMC QUADRATIC ENERGY] step=2 start mean=1.8496 current mean=1.1860 Δ initial mean=-0.6636 Δ active mean=-0.0152
+
+[STEP k=2]
+  ||z2 - μ||:          mean=0.6447
+  ||z2 - z0||:         mean=0.0487
+  ||ρ2||:             mean=1.1066
+  log|G⁻¹(z2)|:       0.7267
+  Δ log|G⁻¹| (step):        +0.0163
+  corr(step, log|G⁻¹|):    +0.9759 (running)
+?!!!!computing potential gradient 1!!!
+?!!!!computing potential gradient 2!!!
+using g??????
+we did the grad of the log volume!!!
+!!!!sign is +1!!!
+
+[VOLUME FORCE & GRADIENT DIRECTION DEBUG]
+  representation: g
+  sign: 1
+  scale: 1
+  grad_log_vol mean: -8.741190e-02, norm: 2.427672e+00
+  grad_U mean: 8.741190e-02, norm: 2.427672e+00
+
+  Current metric values:
+    +0.5 log|G(z)|:     -0.363359
+    +0.5 log|G⁻¹(z)|:   0.363359
+    Sum (should ≈ 0):   -0.000000
+
+  Gradient directions:
+    ∇(0.5 log|G|) norm:     2.428564e+00
+    ∇(0.5 log|G⁻¹|) norm:   2.428564e+00
+    ∇G · ∇G⁻¹ (should <0):  -8.035673e+00
+
+  Using rep='g': grad_log_vol = ∇(0.5 log|G⁻¹|)
+  grad_U = -1 * grad_log_vol
+  → For uniform prior p ∝ √det(G⁻¹), we want grad_U = -∇(0.5 log|G⁻¹|) = ∇(0.5 log|G|)
+  ✓ CORRECT: sign=+1 → grad_U ascends log|G| → pushes TOWARD high G⁻¹ regions
+
+[STEP SIZE SCALING DEBUG]
+  base step_size: 0.020000
+  velocity norm mean: 1.252367e+00
+  max_position_step: 1.0
+  scaling factor (max_pos_step/v_norm): 7.984883e-01
+  min_eig_Ginv mean: 4.110874e+00 (raw)
+  min_eig_clamped mean: 4.110874e+00
+  stiff_scale mean: 1.600905e+00
+?!!!!computing potential gradient 1!!!
+?!!!!computing potential gradient 2!!!
+using g??????
+we did the grad of the log volume!!!
+!!!!sign is +1!!!
+
+[VOLUME FORCE & GRADIENT DIRECTION DEBUG]
+  representation: g
+  sign: 1
+  scale: 1
+  grad_log_vol mean: -7.248889e-02, norm: 2.389935e+00
+  grad_U mean: 7.248889e-02, norm: 2.389935e+00
+
+  Current metric values:
+    +0.5 log|G(z)|:     -0.374885
+    +0.5 log|G⁻¹(z)|:   0.374885
+    Sum (should ≈ 0):   0.000000
+
+  Gradient directions:
+    ∇(0.5 log|G|) norm:     2.390817e+00
+    ∇(0.5 log|G⁻¹|) norm:   2.390817e+00
+    ∇G · ∇G⁻¹ (should <0):  -7.872471e+00
+
+  Using rep='g': grad_log_vol = ∇(0.5 log|G⁻¹|)
+  grad_U = -1 * grad_log_vol
+  → For uniform prior p ∝ √det(G⁻¹), we want grad_U = -∇(0.5 log|G⁻¹|) = ∇(0.5 log|G|)
+  ✓ CORRECT: sign=+1 → grad_U ascends log|G| → pushes TOWARD high G⁻¹ regions
+[RHMC QUADRATIC ENERGY] step=3 start mean=1.8496 current mean=1.1666 Δ initial mean=-0.6831 Δ active mean=-0.0195
+
+[STEP k=3]
+  ||z3 - μ||:          mean=0.6423
+  ||z3 - z0||:         mean=0.0715
+  ||ρ3||:             mean=1.0953
+  log|G⁻¹(z3)|:       0.7498
+  Δ log|G⁻¹| (step):        +0.0231
+  corr(step, log|G⁻¹|):    +0.9750 (running)
+
+[TRAJECTORY SUMMARY]
+  Initial ||z0 - μ||:    0.6498
+  Final ||zK - μ||:      0.6423
+  Total drift from z0:   0.0715
+  Net change in ||·-μ||: -0.0075
+  → RHMC MOVED TOWARD μ
+  → Trajectory MONOTONICALLY MOVES TOWARD μ
+
+[METRIC EVOLUTION]
+  Initial log|G⁻¹(z0)|:  0.7032
+  Final log|G⁻¹(zK)|:    0.7498
+  Δ log|G⁻¹|:            0.0465
+  ✓ RHMC MOVED TO HIGHER log|G⁻¹| (toward prior!)
+  Correlation(step, log|G⁻¹|): 0.9750
+    → Strong increasing trend!
+  Correlation(||z-μ||, log|G⁻¹|): -0.9707
+  ⚠️  DISTANCE-VOLUME INVERSION: Farther from μ → Lower volume!
+      This suggests RHMC pushes samples to low-volume regions.
+
+================================================================================
+
+[RHMC DEBUG] G(z0): eig_min=4.791e-02, eig_max=9.515e+01, cond=1.986e+03, log|G|=-7.032e-01
+[RHMC DEBUG] G(zK): eig_min=4.649e-02, eig_max=9.504e+01, cond=2.044e+03, log|G|=-7.498e-01
+[RHMC DEBUG] latent drift: ||mu|| mean=1.837e+00, ||zK-mu|| mean=6.423e-01 (max=4.093e+00), ||zK-z0|| mean=7.150e-02 (max=1.200e-01)
+✅ RHMC posterior samples shape: torch.Size([256, 2])
+📊 Adding more encoder means for better coverage...
+[ENCODER DEBUG] log_var: min=-5.8286, max=-2.4400, mean=-4.1872, std=0.9300 (Δmean=+0.0000e+00, Δvar_mean=+0.0000e+00)
+[ENCODER DEBUG] variance: min=2.9421e-03, max=8.7159e-02, mean=2.3315e-02
+✅ USING RIEMANNIAN RHMC POSTERIOR (forward)
+[CONFIG OVERRIDE] alpha_override=0.3, eps_override=0.0001
+
+[_get_inverse_metric NORMALIZATION]
+  mode:                  none
+  Original G⁻¹ eigenvalues: min=0.010022, max=19.145369
+  After clamping:        min=0.010022, max=19.145369
+
+[_make_covariance TARGET RADIUS]
+  initial_target_radius: 0.000000
+  override_target_radius: 0.000000
+  input alpha:           0.300000
+  eps_reg:               1.000000e-04
+  Target radius disabled (target_r=0), using alpha=0.3
+  [Σ CONSISTENCY] mean|log|Σ| - (log|G⁻¹|+d·log α)| = 5.1921e-03
+checkkkkkk1
+
+[MU GRADIENT DEBUG]
+  log|G(μ)| mean=+0.7622
+  ||∇ log|G(μ)|| mean=3.6563, max=5.8253
+  Nearest-centroid dist mean=0.4651, grad alignment mean=-0.5640
+
+================================================================================
+[CANDIDATE DIAGNOSTICS] B=32, K=10, D=2
+================================================================================
+
+[SUMMARY OVER ALL CANDIDATES]
+  ||z-μ||:              mean=0.6912, std=0.8682, min=0.0056, max=5.2898
+  Mahal²:               mean=1.8875, std=2.6426, min=-0.0001, max=20.0022
+  h=0.5·log|G⁻¹|:      mean=-1.6508, std=1.7648, min=-4.6052, max=2.9962
+  Corr(h, Mahal²):      -0.1637
+
+[CHI-SQUARED EXPECTATION]
+  D:                    2
+  Expected Mahal² mean: 2.0000
+  Observed Mahal² mean: 1.8875  (Δ=-0.1125)
+
+[SELECTION VS POOL]
+  Selected h:           mean=0.2085
+  Selected ||z-μ||:     mean=0.6855
+  Selected Mahal²:      mean=2.5848
+  Δ Mahal²(sel - pool): +0.6973
+
+================================================================================
+
+
+================================================================================
+[INITIAL SAMPLING DIAGNOSTICS]
+================================================================================
+
+[Σ_μ PROPERTIES]
+  alpha:                 0.300000
+  Σ eigenvalues:         min=3.106627e-03, max=5.743713
+  Σ trace:               1.150315
+  log|Σ|:                -3.927089
+  Condition number:      1.03
+  Anisotropy ratio:      1.03
+
+[STAGE-BY-STAGE DISTANCE ANALYSIS]
+  ||z_selected - μ||:    mean=0.6855, std=0.5946
+  ||z0 - μ||:            mean=0.6855, std=0.5946
+  ||z_selected - z0||:   mean=0.0000, std=0.0000
+  Δ||·-μ|| (volume acc): +0.0000
+
+[SELECTION STAGE COMPARISON]
+  z_selected Mahal²:     mean=3.0688
+  z0 Mahal²:             mean=3.0688
+  Δ Mahal² (vol acc):    +0.0000
+  → Volume acceptance had NO EFFECT on distance
+
+[EXPECTED VS ACTUAL]
+  Expected ||z-μ||:      √(tr(Σ)) = 0.7714
+  Actual ||z0-μ||:       0.6855
+  Ratio (actual/expected): 0.8887
+
+[MAHALANOBIS ANALYSIS]
+  Euclidean dist²:       mean=0.8124
+  Mahalanobis dist²:     mean=3.0688
+  Mahalanobis dist:      mean=1.5708
+  Ratio (Mahal²/Euclid²): 3.7773
+
+[MAHALANOBIS DECOMPOSITION in Eigenbasis]
+  Eigenvalue 0: λ=0.2405, y²=0.0033, contrib=(y²/λ)=0.0139
+  Eigenvalue 1: λ=0.2527, y²=0.0032, contrib=(y²/λ)=0.0125
+
+[CHI-SQUARED TEST]
+  Dimension D:           2
+  Expected Mahal²:       χ²(2) mean = 2.0
+  Actual Mahal²:         3.0688
+  Deviation:             1.0688 (53.4%)
+
+[KOLMOGOROV-SMIRNOV TEST]
+  KS statistic:          0.2279
+  KS p-value:            6.0738e-02
+  ✓ Cannot reject: distribution consistent with χ²(2)
+
+[HISTOGRAM COMPARISON] (first 5 bins)
+    Bin Center    Empirical  Theoretical      Ratio
+          0.65       0.2414       0.3617       0.67
+          1.94       0.1448       0.1893       0.76
+          3.24       0.1690       0.0991       1.70
+          4.53       0.0965       0.0519       1.86
+          5.83       0.0241       0.0272       0.89
+
+[EMPIRICAL VS THEORETICAL COVARIANCE]
+  Batch size:            32
+  ||Empirical - Σ||_F:   0.3208
+  ||Σ||_F:               0.8135
+  Relative error:        0.3943
+
+================================================================================
+
+
+================================================================================
+[METRIC AT SAMPLES DIAGNOSTICS]
+================================================================================
+
+[LOG DET G⁻¹ DISTRIBUTION]
+  At μ:                  mean=-1.5243
+  At z0:                 mean=0.4169, std=3.8100
+  min(z0):               -9.2000
+  max(z0):               5.9923
+  Δ(z0 - μ):             1.9412
+  ✓ Samples have higher log|G⁻¹| than μ (good for prior)
+
+[CORRELATION: ||z-μ|| vs log|G⁻¹(z)|]
+  Pearson r:             0.4118
+
+[VOLUME ACCEPTANCE EFFECT]
+  log|G⁻¹(z_base)|:      mean=0.4169
+  log|G⁻¹(z0)|:          mean=0.4169
+  Δ(z0 - z_base):        0.0000
+  Volume acceptance had no effect or decreased log|G⁻¹|
+
+================================================================================
+
+[INITIAL SHRINK] attempt=0 alpha=0.3 radius=0 logdet(z0)=+0.4169 Δ=+1.9412
+
+================================================================================
+[RHMC TRAJECTORY DIAGNOSTICS]
+================================================================================
+
+[INITIAL STATE (k=0)]
+  ||z0 - μ||:            mean=0.6855, max=2.9239
+  ||ρ0||:                mean=1.3636, max=3.0000
+?!!!!computing potential gradient 1!!!
+?!!!!computing potential gradient 2!!!
+using g??????
+we did the grad of the log volume!!!
+!!!!sign is +1!!!
+
+[VOLUME FORCE & GRADIENT DIRECTION DEBUG]
+  representation: g
+  sign: 1
+  scale: 1
+  grad_log_vol mean: 1.650326e-01, norm: 2.995802e+00
+  grad_U mean: -1.650326e-01, norm: 2.995802e+00
+
+  Current metric values:
+    +0.5 log|G(z)|:     -0.208452
+    +0.5 log|G⁻¹(z)|:   0.208452
+    Sum (should ≈ 0):   0.000000
+
+  Gradient directions:
+    ∇(0.5 log|G|) norm:     2.996860e+00
+    ∇(0.5 log|G⁻¹|) norm:   2.996860e+00
+    ∇G · ∇G⁻¹ (should <0):  -1.156854e+01
+
+  Using rep='g': grad_log_vol = ∇(0.5 log|G⁻¹|)
+  grad_U = -1 * grad_log_vol
+  → For uniform prior p ∝ √det(G⁻¹), we want grad_U = -∇(0.5 log|G⁻¹|) = ∇(0.5 log|G|)
+  ✓ CORRECT: sign=+1 → grad_U ascends log|G| → pushes TOWARD high G⁻¹ regions
+
+[STEP SIZE SCALING DEBUG]
+  base step_size: 0.020000
+  velocity norm mean: 2.175413e+00
+  max_position_step: 1.0
+  scaling factor (max_pos_step/v_norm): 4.596828e-01
+  min_eig_Ginv mean: 4.740273e+00 (raw)
+  min_eig_clamped mean: 4.740273e+00
+  stiff_scale mean: 1.646058e+00
+?!!!!computing potential gradient 1!!!
+?!!!!computing potential gradient 2!!!
+using g??????
+we did the grad of the log volume!!!
+!!!!sign is +1!!!
+
+[VOLUME FORCE & GRADIENT DIRECTION DEBUG]
+  representation: g
+  sign: 1
+  scale: 1
+  grad_log_vol mean: 1.551999e-01, norm: 2.989557e+00
+  grad_U mean: -1.551999e-01, norm: 2.989557e+00
+
+  Current metric values:
+    +0.5 log|G(z)|:     -0.206973
+    +0.5 log|G⁻¹(z)|:   0.206973
+    Sum (should ≈ 0):   -0.000000
+
+  Gradient directions:
+    ∇(0.5 log|G|) norm:     2.990605e+00
+    ∇(0.5 log|G⁻¹|) norm:   2.990605e+00
+    ∇G · ∇G⁻¹ (should <0):  -1.153099e+01
+
+  Using rep='g': grad_log_vol = ∇(0.5 log|G⁻¹|)
+  grad_U = -1 * grad_log_vol
+  → For uniform prior p ∝ √det(G⁻¹), we want grad_U = -∇(0.5 log|G⁻¹|) = ∇(0.5 log|G|)
+  ✓ CORRECT: sign=+1 → grad_U ascends log|G| → pushes TOWARD high G⁻¹ regions
+[RHMC QUADRATIC ENERGY] step=1 start mean=1.8004 current mean=1.1957 Δ initial mean=-0.6046 Δ active mean=-0.6046
+
+[STEP k=1]
+  ||z1 - μ||:          mean=0.6840
+  ||z1 - z0||:         mean=0.0245
+  ||ρ1||:             mean=1.2807
+  log|G⁻¹(z1)|:       0.4139
+  Δ log|G⁻¹| (step):        -0.0030
+  ⚠️  Volume drop detected this step (log|G⁻¹| decreased).
+?!!!!computing potential gradient 1!!!
+?!!!!computing potential gradient 2!!!
+using g??????
+we did the grad of the log volume!!!
+!!!!sign is +1!!!
+
+[VOLUME FORCE & GRADIENT DIRECTION DEBUG]
+  representation: g
+  sign: 1
+  scale: 1
+  grad_log_vol mean: 1.551999e-01, norm: 2.989557e+00
+  grad_U mean: -1.551999e-01, norm: 2.989557e+00
+
+  Current metric values:
+    +0.5 log|G(z)|:     -0.206973
+    +0.5 log|G⁻¹(z)|:   0.206973
+    Sum (should ≈ 0):   -0.000000
+
+  Gradient directions:
+    ∇(0.5 log|G|) norm:     2.990605e+00
+    ∇(0.5 log|G⁻¹|) norm:   2.990605e+00
+    ∇G · ∇G⁻¹ (should <0):  -1.153099e+01
+
+  Using rep='g': grad_log_vol = ∇(0.5 log|G⁻¹|)
+  grad_U = -1 * grad_log_vol
+  → For uniform prior p ∝ √det(G⁻¹), we want grad_U = -∇(0.5 log|G⁻¹|) = ∇(0.5 log|G|)
+  ✓ CORRECT: sign=+1 → grad_U ascends log|G| → pushes TOWARD high G⁻¹ regions
+
+[STEP SIZE SCALING DEBUG]
+  base step_size: 0.020000
+  velocity norm mean: 1.263515e+00
+  max_position_step: 1.0
+  scaling factor (max_pos_step/v_norm): 7.914426e-01
+  min_eig_Ginv mean: 4.793457e+00 (raw)
+  min_eig_clamped mean: 4.793457e+00
+  stiff_scale mean: 1.651848e+00
+?!!!!computing potential gradient 1!!!
+?!!!!computing potential gradient 2!!!
+using g??????
+we did the grad of the log volume!!!
+!!!!sign is +1!!!
+
+[VOLUME FORCE & GRADIENT DIRECTION DEBUG]
+  representation: g
+  sign: 1
+  scale: 1
+  grad_log_vol mean: 1.415857e-01, norm: 2.963565e+00
+  grad_U mean: -1.415857e-01, norm: 2.963565e+00
+
+  Current metric values:
+    +0.5 log|G(z)|:     -0.210371
+    +0.5 log|G⁻¹(z)|:   0.210371
+    Sum (should ≈ 0):   0.000000
+
+  Gradient directions:
+    ∇(0.5 log|G|) norm:     2.964584e+00
+    ∇(0.5 log|G⁻¹|) norm:   2.964584e+00
+    ∇G · ∇G⁻¹ (should <0):  -1.141451e+01
+
+  Using rep='g': grad_log_vol = ∇(0.5 log|G⁻¹|)
+  grad_U = -1 * grad_log_vol
+  → For uniform prior p ∝ √det(G⁻¹), we want grad_U = -∇(0.5 log|G⁻¹|) = ∇(0.5 log|G|)
+  ✓ CORRECT: sign=+1 → grad_U ascends log|G| → pushes TOWARD high G⁻¹ regions
+[RHMC QUADRATIC ENERGY] step=2 start mean=1.8004 current mean=1.1521 Δ initial mean=-0.6483 Δ active mean=-0.0437
+
+[STEP k=2]
+  ||z2 - μ||:          mean=0.6838
+  ||z2 - z0||:         mean=0.0476
+  ||ρ2||:             mean=1.2607
+  log|G⁻¹(z2)|:       0.4207
+  Δ log|G⁻¹| (step):        +0.0068
+  corr(step, log|G⁻¹|):    +0.5631 (running)
+?!!!!computing potential gradient 1!!!
+?!!!!computing potential gradient 2!!!
+using g??????
+we did the grad of the log volume!!!
+!!!!sign is +1!!!
+
+[VOLUME FORCE & GRADIENT DIRECTION DEBUG]
+  representation: g
+  sign: 1
+  scale: 1
+  grad_log_vol mean: 1.415857e-01, norm: 2.963565e+00
+  grad_U mean: -1.415857e-01, norm: 2.963565e+00
+
+  Current metric values:
+    +0.5 log|G(z)|:     -0.210371
+    +0.5 log|G⁻¹(z)|:   0.210371
+    Sum (should ≈ 0):   0.000000
+
+  Gradient directions:
+    ∇(0.5 log|G|) norm:     2.964584e+00
+    ∇(0.5 log|G⁻¹|) norm:   2.964584e+00
+    ∇G · ∇G⁻¹ (should <0):  -1.141451e+01
+
+  Using rep='g': grad_log_vol = ∇(0.5 log|G⁻¹|)
+  grad_U = -1 * grad_log_vol
+  → For uniform prior p ∝ √det(G⁻¹), we want grad_U = -∇(0.5 log|G⁻¹|) = ∇(0.5 log|G|)
+  ✓ CORRECT: sign=+1 → grad_U ascends log|G| → pushes TOWARD high G⁻¹ regions
+
+[STEP SIZE SCALING DEBUG]
+  base step_size: 0.020000
+  velocity norm mean: 1.221587e+00
+  max_position_step: 1.0
+  scaling factor (max_pos_step/v_norm): 8.186074e-01
+  min_eig_Ginv mean: 4.897647e+00 (raw)
+  min_eig_clamped mean: 4.897647e+00
+  stiff_scale mean: 1.664906e+00
+?!!!!computing potential gradient 1!!!
+?!!!!computing potential gradient 2!!!
+using g??????
+we did the grad of the log volume!!!
+!!!!sign is +1!!!
+
+[VOLUME FORCE & GRADIENT DIRECTION DEBUG]
+  representation: g
+  sign: 1
+  scale: 1
+  grad_log_vol mean: 1.258304e-01, norm: 2.922107e+00
+  grad_U mean: -1.258304e-01, norm: 2.922107e+00
+
+  Current metric values:
+    +0.5 log|G(z)|:     -0.218099
+    +0.5 log|G⁻¹(z)|:   0.218099
+    Sum (should ≈ 0):   0.000000
+
+  Gradient directions:
+    ∇(0.5 log|G|) norm:     2.923081e+00
+    ∇(0.5 log|G⁻¹|) norm:   2.923081e+00
+    ∇G · ∇G⁻¹ (should <0):  -1.123574e+01
+
+  Using rep='g': grad_log_vol = ∇(0.5 log|G⁻¹|)
+  grad_U = -1 * grad_log_vol
+  → For uniform prior p ∝ √det(G⁻¹), we want grad_U = -∇(0.5 log|G⁻¹|) = ∇(0.5 log|G|)
+  ✓ CORRECT: sign=+1 → grad_U ascends log|G| → pushes TOWARD high G⁻¹ regions
+[RHMC QUADRATIC ENERGY] step=3 start mean=1.8004 current mean=1.1269 Δ initial mean=-0.6735 Δ active mean=-0.0252
+
+[STEP k=3]
+  ||z3 - μ||:          mean=0.6846
+  ||z3 - z0||:         mean=0.0695
+  ||ρ3||:             mean=1.2424
+  log|G⁻¹(z3)|:       0.4362
+  Δ log|G⁻¹| (step):        +0.0155
+  corr(step, log|G⁻¹|):    +0.8435 (running)
+
+[TRAJECTORY SUMMARY]
+  Initial ||z0 - μ||:    0.6855
+  Final ||zK - μ||:      0.6846
+  Total drift from z0:   0.0695
+  Net change in ||·-μ||: -0.0010
+  → RHMC MOVED TOWARD μ
+  → Trajectory is NON-MONOTONIC (oscillating)
+
+[METRIC EVOLUTION]
+  Initial log|G⁻¹(z0)|:  0.4169
+  Final log|G⁻¹(zK)|:    0.4362
+  Δ log|G⁻¹|:            0.0193
+  ✓ RHMC MOVED TO HIGHER log|G⁻¹| (toward prior!)
+  Correlation(step, log|G⁻¹|): 0.8435
+    → Strong increasing trend!
+  Correlation(||z-μ||, log|G⁻¹|): 0.0171
+
+================================================================================
+
+[RHMC DEBUG] G(z0): eig_min=4.952e-02, eig_max=9.951e+01, cond=2.010e+03, log|G|=-4.169e-01
+[RHMC DEBUG] G(zK): eig_min=4.788e-02, eig_max=9.952e+01, cond=2.079e+03, log|G|=-4.362e-01
+[RHMC DEBUG] latent drift: ||mu|| mean=2.087e+00, ||zK-mu|| mean=6.846e-01 (max=2.920e+00), ||zK-z0|| mean=6.947e-02 (max=1.200e-01)
+[RHMC DEBUG] momentum norms: initial mean=1.364e+00, final mean=1.242e+00
+
+[_compute_log_riemannian_gaussian BEFORE log_q_riem]
+  min_cov_eig:           0.001000
+  covariance_provided:   True
+  alpha:                 N/A (covariance provided)
+  Sigma eigenvalues:     min=0.003107, max=5.743713
+  Sigma trace:           1.150315
+  log|Sigma|:            -3.927089
+  ||z - μ||:             0.685536
+  [Comparison with raw G⁻¹(μ)]
+    G⁻¹(μ) eigenvalues:  min=0.010022, max=19.145363
+    log|G⁻¹(μ)|:         -1.524336
+    Expected log|Σ|:     -1.524336 (if α=1, ε≈0)
+    Actual log|Σ|:       -3.927089
+    Δ log|Σ|:            -2.402753
+
+[LOG_Q_RIEM STABILIZATION]
+  min_eig (jitter):     0.001000
+  was_stabilized:       False
+  Original Σ:
+    eigenvalues:        min=0.003107, max=5.743713
+    log|Σ|:             -3.927089
+
+================================================================================
+[LOG_Q_RIEM FULL DECOMPOSITION]
+================================================================================
+
+[STANDARD DECOMPOSITION]
+  Quadratic term: mean=-1.5344, min=-5.8263, max=-0.0132
+  Volume term:    mean=1.9635
+  Constant term:  -1.8379
+  Total log_q:    mean=-1.4087
+  ||z - μ||:      mean=0.6855
+  Σ eigenvalues:  min=0.003107, max=5.743713
+
+[MAHALANOBIS EIGENBASIS DECOMPOSITION]
+  Euclidean ||z-μ||²:    mean=0.8124
+  Mahalanobis (z-μ)ᵀΣ⁻¹(z-μ): mean=3.0688
+  Ratio (Mahal/Euclid):  3.7773
+
+  Per-eigenvalue contributions (batch mean, first sample detailed):
+    Dim 0: λ=0.2405, y[0]=0.0578, y²/λ=0.0139 (batch mean: 1.7384)
+    Dim 1: λ=0.2527, y[0]=0.0562, y²/λ=0.0125 (batch mean: 1.3304)
+
+  Dominant dimensions (contribution to Mahalanobis²):
+    Dim 0: 56.6% (cumulative: 56.6%)
+
+[CHI-SQUARED FIT]
+  Dimension D:           2
+  Expected Mahal²:       χ²(2) mean = 2.0
+  Observed Mahal²:       3.0688
+  Deviation:             1.0688 (53.4%)
+
+================================================================================
+
+[RHMC DEBUG] zK shape: torch.Size([32, 2]), mean: -0.0946, std: 1.3535
+🔍 FLOW DEBUG (step 2):
+   Input z range: [-2.321, 2.517]
+   Output z range: [-2.565, 2.446]
+   Log det Jacobian (mean): 0.010
+   Jacobian range: [-0.083, 0.075]
+
+[DEBUG] --- FLOW JACOBIAN SUMMARY ---
+[DEBUG FLOW 0] shape=(32,), min=-0.1216, max=-0.0235, mean=-0.0886, std=0.0269
+[DEBUG FLOW 1] shape=(32,), min=-0.0834, max=0.0753, mean=0.0105, std=0.0557
+[DEBUG FLOW 2] shape=(32,), min=-0.0399, max=0.1274, mean=0.0070, std=0.0424
+[DEBUG FLOW 3] shape=(32,), min=0.0216, max=0.1245, mean=0.0508, std=0.0212
+[DEBUG FLOW 4] shape=(32,), min=-0.1239, max=-0.0478, mean=-0.0772, std=0.0187
+[DEBUG FLOW 5] shape=(32,), min=-0.1321, max=0.0032, mean=-0.0833, std=0.0299
+[DEBUG FLOW 6] shape=(32,), min=0.0422, max=0.1053, mean=0.0642, std=0.0177
+[KL ROUTE] RHMC Monte-Carlo branch (prior_mode=uniform)
+preferred?!?!: g
+[CONSISTENCY] mean||G⁻¹_lm - G⁻¹_rhmc||_F=3.439e-05, mean(|½log|G⁻¹|+½(−log|G|)|)=2.548e+00
+[DEBUG] Attempting pushforward calculation with stage_zS shape: torch.Size([32, 2])
+preferred?!?!: g
+[PUSH DEBUG] transported metric stats: eig_min=5.412e-02, eig_max=1.412e+02, cond(G')=2.610e+03, cond(G'^-1)=2.537e+03, min_sv(J)=7.120e-01, ||G'·G'^-1-I||_F=8.762e-02
+[DEBUG] Pushforward results: G_pushforward=True, rep_push=g
+[DEBUG] half_logdet_push_g mean: 0.07640278339385986
+[DEBUG] half_logdet_push_ginv mean: 0.1014188826084137
+[DEBUG] G_pushforward shape: torch.Size([32, 2, 2])
+[DEBUG] G_pushforward has NaN: False
+[DEBUG] G_pushforward has inf: False
+[DEBUG] G_pushforward eigenvalues - min: 0.054116, max: 141.242050
+[DEBUG] G_pushforward condition number: 2610.003258
+[DEBUG] log_p_prime_zF mean: 0.101419, min: -4.334770, max: 2.863480
+[DEBUG] log_p_prime_zF has NaN: False, has inf: False
+[DEBUG] Using rep_push='g', log_p_prime_zF mean: 0.1014188826084137
+
+[LOG_Q FROM RHMC]
+  log_q provided by rhmc_log_q (not computed here)
+  Total log_q:      -1.4087 (range: [-5.2138, +1.9145])
+  ||z0 - μ||:       0.6855
+  rhmc_alpha:       0.3
+
+[_get_inverse_metric NORMALIZATION]
+  mode:                  none
+  Original G⁻¹ eigenvalues: min=0.010022, max=19.145369
+  After clamping:        min=0.010022, max=19.145369
+
+[_make_covariance TARGET RADIUS]
+  initial_target_radius: 0.000000
+  override_target_radius: 0.000000
+  input alpha:           0.300000
+  eps_reg:               1.000000e-04
+  Target radius disabled (target_r=0), using alpha=0.3
+  [Σ CONSISTENCY] mean|log|Σ| - (log|G⁻¹|+d·log α)| = 5.1921e-03
+[Σ SOURCE] builder (explicit) log|Σ|=-3.9271
+  [Σ BUILDER CHECK] pre-extract log|Σ|=-3.9271
+  [SIGMA RECON SHAPES] stage_z0: (32, 2) mu: (32, 2) Sigma_mu: (32, 2, 2)
+  Σ_μ eigenvalues:  min=0.003107, max=5.743713
+  log|Σ_μ|:         -3.9271
+  Σ_μ trace:        0.493154
+  [SIGMA RECON SHAPES] diff: (32, 2) Sigma_mu_inv: (32, 2, 2)
+  [Reconstructed decomposition]
+    Quadratic term: -1.5344
+    Volume term:    +1.9635
+    Constant term:  -1.8379
+    Sum:            -1.4087
+  [SIGMA CONSISTENCY] mean||Σ_loss - Σ_rhmc||_F=0.000e+00, mean||Σ_loss - Σ_cache||_F=0.000e+00, mean||Σ_loss - Σ_rebuild||_F=0.000e+00
+  [SIGMA CONSISTENCY] log|Σ|: loss=-3.9271, rhmc=-3.9271, cache=-3.9271, rebuild=-3.9271
+  [Σ SOURCE] loss=builder (explicit), rhmc=traj, cache=posterior._last_sigma_mu, rebuild=loss(copy)
+preferred?!?!: g
+[METRIC DEBUG] G(z0): rep=g | eig_min=4.952e-02, eig_max=9.951e+01, cond(G)=2.010e+03 | eig_min_inv=1.005e-02, eig_max_inv=2.019e+01, cond(G⁻¹)=2.010e+03 | log|G|=-4.169e-01, log|G⁻¹|=4.169e-01 | ||G·G⁻¹-I||_F=6.560e-17
+preferred?!?!: g
+[METRIC DEBUG] G(zS): rep=g | eig_min=4.788e-02, eig_max=9.952e+01, cond(G)=2.079e+03 | eig_min_inv=1.005e-02, eig_max_inv=2.089e+01, cond(G⁻¹)=2.079e+03 | log|G|=-4.362e-01, log|G⁻¹|=4.362e-01 | ||G·G⁻¹-I||_F=4.740e-17
+[DEBUG] KL CALCULATION - log_p_prime_zF is None: False
+[DEBUG] KL CALCULATION - log_q mean: -1.2920613288879395
+[DEBUG] KL CALCULATION - delta_kin mean: -0.3459538221359253
+[DEBUG] KL CALCULATION - delta_vol mean: 0.0
+[DEBUG] KL CALCULATION - volume_bias_weight: 1.0
+[DEBUG] INTERMEDIATE KL TERMS:
+[DEBUG] - log_q has NaN: False, has inf: False
+[DEBUG] - delta_kin has NaN: False, has inf: False
+[DEBUG] - delta_vol has NaN: False, has inf: False
+[DEBUG] - log_p_prime_zF has NaN: False, has inf: False
+[DEBUG] FORMULATION B - log_p_prime_zF mean: 0.1014188826084137
+[DEBUG] FORMULATION B - (volume_bias_weight * log_p_prime_zF) mean: 0.1014188826084137
+[DEBUG] FORMULATION B - kl_terms mean: -1.739434003829956
+[DEBUG] FINAL KL_TERMS CHECK:
+[DEBUG] - kl_terms mean: -1.739434, min: -8.405486, max: 5.185119
+[DEBUG] - kl_terms has NaN: False, has inf: False
+[DEBUG] FINAL KL LOSS: -1.739434003829956
+[KL VALIDATION] Negative KL detected (-1.7394)
+[KL VALIDATION] This indicates numerical instability in the calculation
+[KL VALIDATION] log_q mean=-1.4087, volume term mean=0.1014
+[KL TRUE EST] logZ_est=+3.758288, kl_loss=+2.018854, kl_true_est=+2.018854, included_in_loss=True
+[KL DEBUG] corr(||zS-mu||, max_eig(G(zS)))=-2.247e-01, max_eig_mean=5.223e+00
+[LATENT DEBUG] StageC (zS - mu): pc1_ratio=0.747, pc2_ratio=0.253, eig_min=1.963e-01, eig_max=5.789e-01, trace=7.752e-01
+[LATENT DEBUG] StageC mu: pc1_ratio=0.613, pc2_ratio=0.387, eig_min=1.867e+00, eig_max=2.961e+00, trace=4.828e+00
+[KL DEBUG] corr(||zS-mu||, max_eig(G(zS)))=-2.247e-01, max_eig_mean=5.223e+00
+[LATENT DEBUG] StageC (zS - mu): pc1_ratio=0.747, pc2_ratio=0.253, eig_min=1.963e-01, eig_max=5.789e-01, trace=7.752e-01
+[LATENT DEBUG] StageC mu: pc1_ratio=0.613, pc2_ratio=0.387, eig_min=1.867e+00, eig_max=2.961e+00, trace=4.828e+00
+[KL DEBUG] latent norms: ||mu|| mean=2.087e+00, ||z0-mu|| mean=6.855e-01, ||zS-mu|| mean=6.846e-01, ||zS-z0|| mean=6.947e-02
+[KL DEBUG] flow stats: log_q mean=-1.409e+00, sum_logdet_flow mean=-1.167e-01, delta_kin mean=-3.460e-01, delta_vol mean=0.000e+00
+[KL DEBUG] volume identity residual: mean=1.743e-01, max=5.290e-01
+preferred?!?!: g
+preferred?!?!: g
+[KL DEBUG] kinetic density: start_mean=-2.530e+00, end_mean=-2.183e+00, diff_mean=-3.464e-01, delta_kin_residual=4.331e-04
+[GRAD TRACE] kl_grad_sanity failed: element 0 of tensors does not require grad and does not have a grad_fn
+[LOSS TRACE] failed: element 0 of tensors does not require grad and does not have a grad_fn
+preferred?!?!: g
+[DEBUG] Metric eigvals: min 0.04787718132138252 max 99.52053833007812 mean 5.196985244750977
+[DEBUG] Latent z stats: min -2.3925249576568604 max 2.695518732070923 mean -0.09463941305875778 std 1.35350501537323
+✅ Added 128 more encoder means (total: 384)
+✅ RHVAE-Volume Acceptance Rate: 0.984
+✅ Loaded Stage-B PCA basis from /scratch/alaforgu/longitudinal_experiments/RlVAE/outputs/stages/B_RHVAE_MLP_2_SPRITES/metric_rescaled_pca_ld2.npz
+✅ Using Stage-B PCA basis for enhanced KL visualization
+

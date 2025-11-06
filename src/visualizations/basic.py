@@ -1109,6 +1109,22 @@ Timesteps: {n_obs}"""
                 if z_posterior is None:
                     z_posterior = mu_aligned  # fallback
 
+                # Also fetch the raw encoder means directly from the encoder to avoid any
+                # alignment/transport ambiguities in the dashboard visualization.
+                mu_true = None
+                try:
+                    enc_raw = self.model.encoder(x_sample[:, 0])  # first timestep
+                    if hasattr(enc_raw, 'mu') and enc_raw.mu is not None:
+                        mu_true = enc_raw.mu
+                    elif hasattr(enc_raw, 'embedding') and enc_raw.embedding is not None:
+                        mu_true = enc_raw.embedding
+                    elif isinstance(enc_raw, torch.Tensor):
+                        mu_true = enc_raw
+                    if mu_true is not None and mu_true.ndim == 2:
+                        mu_true = mu_true.unsqueeze(1).expand(-1, mu_aligned.shape[1], -1)
+                except Exception:
+                    mu_true = None
+
                 # Ensure proper tensor format
                 if isinstance(mu_aligned, list):
                     mu_aligned = torch.stack([torch.as_tensor(z) for z in mu_aligned], dim=0)
@@ -1565,12 +1581,28 @@ Timesteps: {n_obs}"""
                     return np.zeros((0, 2), dtype=np.float32)
                 return pca.transform(tensor.detach().cpu().numpy())
 
+            # Fetch raw encoder means (μ encoder) for overlay comparison
+            mu_true = None
+            try:
+                enc_raw = self.model.encoder(x_sample[:, 0])  # first timestep
+                if hasattr(enc_raw, 'mu') and enc_raw.mu is not None:
+                    mu_true = enc_raw.mu
+                elif hasattr(enc_raw, 'embedding') and enc_raw.embedding is not None:
+                    mu_true = enc_raw.embedding
+                elif isinstance(enc_raw, torch.Tensor):
+                    mu_true = enc_raw
+                if isinstance(mu_true, torch.Tensor) and mu_true.ndim == 2:
+                    mu_true = mu_true.unsqueeze(1).expand(-1, mu_aligned.shape[1], -1)
+            except Exception:
+                mu_true = None
+
             posterior_2d = project(posterior_samples)
             prior_2d = project(z_prior)
             mu_2d = project(mu_aligned_flat)
+            mu_true_2d = project(mu_true.reshape(-1, mu_true.shape[-1])) if isinstance(mu_true, torch.Tensor) else np.zeros((0,2))
             centroids_2d = project(centroids_flat) if centroids_flat.numel() > 0 else np.zeros((0, 2))
 
-            # Grid for log|G| background
+            # Grid for log|G|/log|G^{-1}| background
             metric = getattr(self.model, 'modular_metric', None)
             if metric is None:
                 metric = getattr(self.model, 'metric_tensor', None)
@@ -1597,19 +1629,77 @@ Timesteps: {n_obs}"""
             grid_torch = torch.from_numpy(latent_grid_np).to(device=device, dtype=mu_aligned_flat.dtype)
 
             with torch.no_grad():
-                if hasattr(metric, 'compute_log_det_metric'):
-                    logdet = metric.compute_log_det_metric(grid_torch).detach().cpu().numpy()
-                else:
-                    G = metric.compute_metric(grid_torch)
-                    logdet = torch.logdet(G.float()).detach().cpu().numpy()
-            logdet_grid = logdet.reshape(grid_x.shape)
+                logdet_inv_np = None
+                logdet_g_np = None
+
+                # Prefer direct inverse-metric logdet if available
+                if hasattr(metric, 'compute_log_det_inverse_metric'):
+                    try:
+                        logdet_inv_np = metric.compute_log_det_inverse_metric(grid_torch).detach().cpu().numpy()
+                    except Exception:
+                        logdet_inv_np = None
+
+                # Otherwise, try via explicit inverse metric
+                if logdet_inv_np is None and hasattr(metric, 'compute_inverse_metric'):
+                    try:
+                        Ginv = metric.compute_inverse_metric(grid_torch)
+                        _, logdet = torch.linalg.slogdet(Ginv.float())
+                        logdet_inv_np = logdet.detach().cpu().numpy()
+                    except Exception:
+                        logdet_inv_np = None
+
+                # As a last resort, use log|G^{-1}| = -log|G|
+                if logdet_inv_np is None:
+                    if hasattr(metric, 'compute_log_det_metric'):
+                        try:
+                            logdet_g_np = metric.compute_log_det_metric(grid_torch).detach().cpu().numpy()
+                        except Exception:
+                            logdet_g_np = None
+                    if logdet_g_np is None:
+                        # Compute metric and its logdet directly
+                        G = metric.compute_metric(grid_torch)
+                        logdet_g_np = torch.logdet(G.float()).detach().cpu().numpy()
+                    logdet_inv_np = -logdet_g_np
+
+                # Optional consistency check if we can also estimate log|G|
+                if logdet_g_np is None:
+                    try:
+                        if hasattr(metric, 'compute_log_det_metric'):
+                            logdet_g_np = metric.compute_log_det_metric(grid_torch).detach().cpu().numpy()
+                        else:
+                            G = metric.compute_metric(grid_torch)
+                            logdet_g_np = torch.logdet(G.float()).detach().cpu().numpy()
+                    except Exception:
+                        logdet_g_np = None
+
+                if logdet_g_np is not None and logdet_inv_np is not None:
+                    consistency = np.mean(np.abs(logdet_inv_np + logdet_g_np))
+                    if consistency > 1e-2:
+                        print(f"[VIS WARNING] Inconsistent log-dets on grid: mean(|log|G⁻¹| + log|G||) = {consistency:.3e}")
+
+                # Sanitize for plotting: replace NaN/Inf with finite fill
+                if logdet_inv_np is None:
+                    print("[VIS WARNING] log|G⁻¹| grid unavailable; using zero background.")
+                    logdet_inv_np = np.zeros(grid_torch.shape[0], dtype=np.float32)
+                finite_mask = np.isfinite(logdet_inv_np)
+                if not finite_mask.any():
+                    print("[VIS WARNING] log|G⁻¹| grid has no finite values; using zero background.")
+                    logdet_inv_np = np.zeros_like(logdet_inv_np)
+                    finite_mask = np.isfinite(logdet_inv_np)
+                fill_value = float(np.nanmedian(logdet_inv_np[finite_mask]))
+                logdet_inv_np = np.where(finite_mask, logdet_inv_np, fill_value)
+
+            logdet_inv_grid = logdet_inv_np.reshape(grid_x.shape)
 
             # Build figure
             fig, axes = plt.subplots(2, 2, figsize=(14, 12), sharex=True, sharey=True)
             cmap = plt.get_cmap('viridis')
 
-            logdet_inv_grid = -logdet_grid
-            heat = axes[0, 0].contourf(grid_x, grid_y, logdet_inv_grid, levels=60, cmap=cmap)
+            try:
+                heat = axes[0, 0].contourf(grid_x, grid_y, logdet_inv_grid, levels=60, cmap=cmap)
+            except Exception as exc:
+                print(f"[VIS WARNING] contourf failed ({exc}); falling back to imshow")
+                heat = axes[0, 0].imshow(logdet_inv_grid, origin='lower', extent=[x_min, x_max, y_min, y_max], cmap=cmap, aspect='auto')
             axes[0, 0].set_title('Log|G^{-1}(z)| Field')
             fig.colorbar(heat, ax=axes[0, 0], label='log|det G^{-1}(z)|')
 
@@ -1626,7 +1716,9 @@ Timesteps: {n_obs}"""
 
             axes[1, 1].contourf(grid_x, grid_y, logdet_inv_grid, levels=60, cmap=cmap, alpha=0.75)
             if mu_2d.shape[0] > 0:
-                axes[1, 1].scatter(mu_2d[:, 0], mu_2d[:, 1], marker='x', s=35, c='tab:green', alpha=0.8, label='Encoder μ')
+                axes[1, 1].scatter(mu_2d[:, 0], mu_2d[:, 1], marker='x', s=35, c='tab:green', alpha=0.8, label='μ (aligned)')
+            if mu_true_2d.shape[0] > 0:
+                axes[1, 1].scatter(mu_true_2d[:, 0], mu_true_2d[:, 1], facecolors='none', edgecolors='lime', s=55, linewidths=1.2, label='μ (encoder)')
             if centroids_2d.shape[0] > 0:
                 axes[1, 1].scatter(centroids_2d[:, 0], centroids_2d[:, 1], s=70, edgecolors='black',
                                    facecolors='cyan', alpha=0.9, linewidth=1.5, label='Centroids')

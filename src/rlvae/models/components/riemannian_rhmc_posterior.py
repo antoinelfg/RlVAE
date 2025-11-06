@@ -14,6 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .metric_utils import half_logdet_volume
+from ...utils.grad_debug import volume_grad_sanity
 
 
 def _symmetrize(matrix: torch.Tensor) -> torch.Tensor:
@@ -60,25 +61,43 @@ def _log_kinetic_density(
     rho: torch.Tensor,
     eps: float,
 ) -> torch.Tensor:
-    """log π_kin(ρ|z) with kinetic metric G(z)."""
+    """log π_kin(ρ|z) with kinetic metric G(z).
+       pi_kin = N(0, G(z))
+    """
     if not hasattr(model, "G"):
         raise RuntimeError("Model missing metric tensor G for kinetic density computation.")
+    
     G = model.G(z)
     G = _symmetrize(G)
     d = G.shape[-1]
     eye = torch.eye(d, device=G.device, dtype=G.dtype).unsqueeze(0)
     jitter = float(max(eps, 1e-8))
-    G = G + jitter * eye
-    G_inv = torch.linalg.inv(G.float())
+    
+    # Appliquer le jitter pour la stabilité
+    G_jittered = G + jitter * eye
+    
+    # MODIFICATION 1: Calcule G_inv pour le terme quadratique
+    # L'énergie est 1/2 * rho^T * G_inv * rho
+    G_inv = torch.linalg.inv(G_jittered.float())
     quad = torch.einsum('bi,bij,bj->b', rho.float(), G_inv, rho.float())
-    half_logdet = -half_logdet_volume(G, 'g', jitter=jitter)
+    
+    # MODIFICATION 2: Le terme volume pour N(0, G) est 1/2 * log(det(G^-1))
+    # (ce que half_logdet_volume fait par défaut)
+    half_logdet = half_logdet_volume(G_jittered, 'g', jitter=jitter)
+    
     if torch.isnan(half_logdet).any():
+        # Branche de secours
         jitter = max(jitter * 10, 1e-5)
-        G = G + jitter * eye
-        G_inv = torch.linalg.inv(G.float())
-        quad = torch.einsum('bi,bij,bj->b', rho.float(), G_inv, rho.float())
-        half_logdet = -half_logdet_volume(G, 'g', jitter=jitter)
+        G_jittered_retry = G + jitter * eye
+        
+        # Recalculer les deux termes
+        G_inv_retry = torch.linalg.inv(G_jittered_retry.float())
+        quad = torch.einsum('bi,bij,bj->b', rho.float(), G_inv_retry, rho.float())
+        half_logdet = half_logdet_volume(G_jittered_retry, 'g', jitter=jitter)
+
     const = z.shape[-1] * math.log(2 * math.pi)
+    
+    # Formule pour log N(rho | 0, G)
     return (-0.5 * quad + half_logdet - 0.5 * const).to(z.dtype)
 
 
@@ -143,7 +162,6 @@ def log_q_riem(
     
     # DIAGNOSTIC: Log stabilization details
     if os.environ.get("RLVAE_DEBUG", "0") == "1":
-        import torch
         try:
             eigvals_orig = torch.linalg.eigvalsh(Sigma_flat)
             eigvals_stab = torch.linalg.eigvalsh(stabilized_sigma)
@@ -167,7 +185,7 @@ def log_q_riem(
     diff = (z_flat - mu_flat).unsqueeze(-1)
     diff32 = diff.float() if diff.dtype != chol.dtype else diff
     sol32 = torch.cholesky_solve(diff32, chol)
-    quad_form = torch.einsum('bij,bij->b', diff32, sol32)
+    quad_form = torch.einsum('...ij,...ij->...', diff32, sol32)
     log_det = 2.0 * torch.log(torch.diagonal(chol, dim1=-2, dim2=-1) + 1e-18).sum(dim=-1)
     const = 0.5 * D * math.log(2 * math.pi)
     
@@ -302,8 +320,8 @@ class RiemannianRHMCPosterior(nn.Module):
                 return self.config.get(key, default)
             except Exception:
                 return default
-        self.rhmc_steps = int(_cfg_get('rhmc_steps', 4))
-        self.rhmc_step_size = float(_cfg_get('rhmc_step_size', 0.1))
+        self.rhmc_steps = int(_cfg_get('rhmc_steps', 3))
+        self.rhmc_step_size = float(_cfg_get('rhmc_step_size', 0.02))
         # DEBUG: Log what config was passed
         import os
         if os.environ.get("RLVAE_DEBUG", "0") == "1":
@@ -339,6 +357,15 @@ class RiemannianRHMCPosterior(nn.Module):
         self.min_cov_eig = float(_cfg_get('min_cov_eig', 1e-3))  # ensure >= eps_reg
         if self.min_cov_eig < self.eps_reg:
             self.min_cov_eig = self.eps_reg
+        self.metric_eig_ceiling = float(_cfg_get('metric_eig_ceiling', float('inf')))
+        if not math.isfinite(self.metric_eig_ceiling) or self.metric_eig_ceiling <= 0:
+            self.metric_eig_ceiling = float('inf')
+        self.max_cov_eig = float(_cfg_get('max_cov_eig', 1.0))
+        if not math.isfinite(self.max_cov_eig) or self.max_cov_eig <= 0:
+            self.max_cov_eig = float('inf')
+        self.max_alpha_eff = float(_cfg_get('max_alpha_eff', 50.0))
+        if not math.isfinite(self.max_alpha_eff) or self.max_alpha_eff <= 0:
+            self.max_alpha_eff = float('inf')
         self.max_momentum_norm = float(_cfg_get('max_momentum_norm', 3.0))
         self.max_velocity_norm = float(_cfg_get('max_velocity_norm', 2.0))
         self.max_position_step = float(_cfg_get('max_position_step', 1.0))
@@ -355,14 +382,17 @@ class RiemannianRHMCPosterior(nn.Module):
             print(f"[RHMC INIT] ⚠️ Unknown kl_prior_mode='{self.kl_prior_mode}', falling back to 'volume_gaussian'")
             self.kl_prior_mode = 'volume_gaussian'
         self.uniform_prior_log_norm = float(_cfg_get('uniform_prior_log_norm', 0.0))
-        self.volume_bias_weight = float(_cfg_get('volume_bias_weight', 1.0))
+        self.volume_bias_weight = float(_cfg_get('volume_bias_weight', 2.0))
         self.volume_grad_scale = float(_cfg_get('volume_grad_scale', 1.0))
         # New stability/geometry options
         self.soft_position_norm = float(_cfg_get('soft_position_norm', 5.5))
-        self.kinetic_grad_enabled = bool(_cfg_get('kinetic_grad_enabled', False))
+        self.kinetic_grad_enabled = bool(_cfg_get('kinetic_grad_enabled', True))
         self.kinetic_grad_weight = float(_cfg_get('kinetic_grad_weight', 1.0))
         self.projection_step_scale = float(_cfg_get('projection_step_scale', 0.05))
         self.initial_max_norm = float(_cfg_get('initial_max_norm', 1.5))
+        # Stabilization for volume-gradient path
+        self.volume_grad_jitter = float(_cfg_get('volume_grad_jitter', 1e-4))
+        self.volume_grad_eig_floor = float(_cfg_get('volume_grad_eig_floor', 1e-2))
         # Control how the volume force is computed (diagnostics/toggles)
         self.volume_force_representation = str(_cfg_get('volume_force_representation', 'g')).lower()  # 'g' or 'ginv'
         self.volume_force_sign = float(_cfg_get('volume_force_sign', 1.0))  # +1 or -1
@@ -370,11 +400,25 @@ class RiemannianRHMCPosterior(nn.Module):
         self._step_scaling_logged = False  # For one-time debug logging
         
         # FIX: Covariance normalization and target radius (critical for correct KL)
-        self.sigma_normalization_mode = str(_cfg_get('sigma_normalization_mode', 'geomean')).lower()
-        self.initial_target_radius = float(_cfg_get('initial_target_radius', 1.0))
+        self.sigma_normalization_mode = str(_cfg_get('sigma_normalization_mode', 'none')).lower()
+        self.initial_target_radius = float(_cfg_get('initial_target_radius', 0.))
         # Volume acceptance defaults: disabled unless explicitly requested
-        self.initial_volume_tolerance = float(_cfg_get('initial_volume_tolerance', 0.0))
+        self.initial_volume_tolerance = float(_cfg_get('initial_volume_tolerance', 0.))
         self.initial_max_retries = int(_cfg_get('initial_max_retries', 0))
+        self.initial_volume_logdet_tol = float(_cfg_get('initial_volume_logdet_tol', 0.0))
+        self.initial_volume_max_adjustments = int(_cfg_get('initial_volume_max_adjustments', 0))
+        self.initial_volume_shrink_factor = float(_cfg_get('initial_volume_shrink_factor', 0.5))
+        self.initial_volume_min_alpha = float(_cfg_get('initial_volume_min_alpha', 1e-4))
+        self.initial_volume_warmup_steps = int(_cfg_get('initial_volume_warmup_steps', 0))
+        self.initial_volume_warmup_step_size = float(_cfg_get('initial_volume_warmup_step_size', 0.05))
+        self.initial_volume_warmup_max_step = float(_cfg_get('initial_volume_warmup_max_step', 0.0))
+        if not (0.0 < self.initial_volume_shrink_factor < 1.0):
+            self.initial_volume_shrink_factor = 0.5
+        if self.initial_volume_min_alpha <= 0.0:
+            self.initial_volume_min_alpha = 1e-4
+        self.max_quadratic_growth = float(_cfg_get('max_quadratic_growth', 12.0))
+        if not math.isfinite(self.max_quadratic_growth) or self.max_quadratic_growth <= 0:
+            self.max_quadratic_growth = 0.0
 
         # Default return behaviour
         self.default_return_initial = True
@@ -453,11 +497,15 @@ class RiemannianRHMCPosterior(nn.Module):
                     self.eps_reg = float(eps_reg)
                 except Exception:
                     pass
+            if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                print("[RHMC DEBUG] entering _sample_initial_riemannian")
+            # Always rebuild Σμ from the current μ; never reuse stale cache
+            self._last_sigma_mu = None
             z0, Sigma_mu = self._sample_initial_riemannian(mu, log_var, alpha_eff)
             self._last_sigma_mu = Sigma_mu.detach().clone()
 
             # Step 2: RHMC exploration (differentiable pushforward)
-            z_final, traj_states = self._rhmc_exploration(z0, record_traj=traj_flag, mu=mu)
+            z_final, traj_states, delta_logdet = self._rhmc_exploration(z0, record_traj=traj_flag, mu=mu)
 
             debug_mode = os.environ.get("RLVAE_DEBUG", "0") == "1"
             if debug_mode:
@@ -567,11 +615,7 @@ class RiemannianRHMCPosterior(nn.Module):
                     'jac_logdet': None if jac_flag else None,
                     'trajectory': traj_states,
                     'Sigma_mu': Sigma_mu.detach(),
-                    'delta_vol': torch.zeros(
-                        z_final.shape[0],
-                        device=z_final.device,
-                        dtype=z_final.dtype,
-                    ),
+                    'delta_vol': delta_logdet,
                     'delta_kin': (
                         _log_kinetic_density(self._ctx['model'], traj_states[0]['z'], traj_states[0]['rho'], self.eps_reg)
                         - _log_kinetic_density(self._ctx['model'], traj_states[-1]['z'], traj_states[-1]['rho'], self.eps_reg)
@@ -600,27 +644,73 @@ class RiemannianRHMCPosterior(nn.Module):
             with amp_ctx:
                 return _run()
     
-    def _sample_initial_riemannian(
+    def _sample_initial_once(
         self,
         mu: torch.Tensor,
         log_var: torch.Tensor,
         alpha: float,
+        *,
+        target_radius: Optional[float] = None,
+        diagnostics_enabled: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Step 1: Sample z₀ ~ N_Riem(μ, Σ(μ)) with Σ = α·Ĝ^{-1}(μ) + εI.
+        Perform a single draw z₀ ~ N_Riem(μ, Σ(μ)) with Σ = α·Ĝ^{-1}(μ) + εI.
         Returns both the samples and the covariance used (for log-density).
         """
         batch_size, latent_dim = mu.shape
+
         try:
             if self.use_factorized_G_mu:
                 # Efficient sampling using factorization of G(μ):
                 # z0 = μ + C^{-T}·sqrt(α)·ξ1 + sqrt(ε)·ξ2 where G(μ) = C Cᵀ
                 # Build covariance explicitly for return: Σ = α·G^{-1}(μ) + εI
+                if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                    print("[RHMC DEBUG] factorized path -> _make_covariance")
                 # 1) Factorize G(μ)
                 d = mu.shape[-1]
                 I = torch.eye(d, device=mu.device, dtype=mu.dtype).unsqueeze(0)
                 G_mu = self._ctx['model'].G(mu)
                 G_mu = _symmetrize(G_mu)
+                if diagnostics_enabled and os.environ.get("RLVAE_DEBUG", "0") == "1":
+                    grad_counter = getattr(self, "_mu_gradient_diag_count", 0)
+                    if grad_counter < 5:
+                        try:
+                            with torch.enable_grad():
+                                mu_dbg = mu.detach().clone().requires_grad_(True)
+                                G_mu_dbg = self._ctx['model'].G(mu_dbg)
+                                G_mu_dbg = _symmetrize(G_mu_dbg)
+                                half_logdet_mu_dbg = half_logdet_volume(G_mu_dbg.float(), 'g', jitter=self.eps_reg)
+                                logdet_mu_dbg = -half_logdet_mu_dbg
+                                grad_mu_dbg = torch.autograd.grad(
+                                    logdet_mu_dbg.sum(),
+                                    mu_dbg,
+                                    retain_graph=False,
+                                    create_graph=False,
+                                    allow_unused=True,
+                                )[0]
+                            grad_mu_dbg = torch.zeros_like(mu) if grad_mu_dbg is None else grad_mu_dbg.detach()
+                            grad_norm = torch.norm(grad_mu_dbg, dim=-1)
+                            print("\n[MU GRADIENT DEBUG]")
+                            print(f"  log|G(μ)| mean={logdet_mu_dbg.mean().item():+.4f}")
+                            print(f"  ||∇ log|G(μ)|| mean={grad_norm.mean().item():.4f}, max={grad_norm.max().item():.4f}")
+                            centroids = getattr(self._ctx['model'], 'centroids_tens', None)
+                            if centroids is not None:
+                                centroids = centroids.to(mu.device, mu.dtype)
+                                dists = torch.cdist(mu.detach(), centroids)
+                                min_dists, min_idx = dists.min(dim=1)
+                                nearest = centroids[min_idx]
+                                dir_to_centroid = torch.nn.functional.normalize(nearest - mu.detach(), dim=-1)
+                                grad_dir = torch.nn.functional.normalize(grad_mu_dbg, dim=-1)
+                                align = (dir_to_centroid * grad_dir).sum(dim=-1)
+                                print(
+                                    f"  Nearest-centroid dist mean={min_dists.mean().item():.4f}, "
+                                    f"grad alignment mean={align.mean().item():.4f}"
+                                )
+                            else:
+                                print("  Centroids unavailable; skipping alignment diagnostic.")
+                        except Exception as grad_exc:
+                            print(f"[MU GRADIENT DEBUG] failed: {grad_exc}")
+                        self._mu_gradient_diag_count = grad_counter + 1
                 C, _, _ = _safe_cholesky(G_mu + self.eps_reg * I, self.min_cov_eig)
                 # 2) Multi-try sampling
                 if C.ndim == 2:
@@ -635,16 +725,23 @@ class RiemannianRHMCPosterior(nn.Module):
                 z_cand = mu.float().unsqueeze(1) + (alpha ** 0.5) * y + (self.eps_reg ** 0.5) * xi2.float()
                 with torch.no_grad():
                     z_eval = z_cand.reshape(B * K, D)
-                    from .metric_utils import half_logdet_volume
                     Gz = self._ctx['model'].G(z_eval)
-                    h = half_logdet_volume(Gz, 'g', jitter=self.eps_reg).reshape(B, K)  # FIXED: Negate to maximize +½log|G⁻¹|
+                    print('checkkkkkk')
+                    # Selection score: maximize +½ log|G^{-1}(z)|. For rep='g',
+                    # half_logdet_volume(G, 'g') returns -½ log|G| = +½ log|G^{-1}|.
+                    # So we should NOT negate here.
+                    h = half_logdet_volume(Gz, 'g', jitter=self.eps_reg).reshape(B, K)
                 best = torch.argmax(h, dim=1)
                 
                 # DIAGNOSTIC: Analyze candidates before selection
                 # Compute G^{-1}(μ) and Sigma early for diagnostics
                 G_inv_mu_diag = torch.linalg.inv(G_mu.float())
-                Sigma_diag = self._make_covariance(G_inv_mu_diag.to(mu.dtype), alpha)
-                if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                Sigma_diag = self._make_covariance(
+                    G_inv_mu_diag.to(mu.dtype),
+                    alpha,
+                    target_radius=target_radius,
+                )
+                if diagnostics_enabled and os.environ.get("RLVAE_DEBUG", "0") == "1":
                     batch_counter = getattr(self, '_debug_batch_counter', 0)
                     self._diagnose_candidates(z_cand.to(mu.dtype), mu, Sigma_diag, h, best, batch_counter)
                     self._debug_batch_counter = batch_counter + 1
@@ -663,21 +760,72 @@ class RiemannianRHMCPosterior(nn.Module):
                 # 5) Prepare Σ for return (already computed for diagnostics)
                 Sigma = Sigma_diag
                 # Save z_selected (after multi-try, before volume) and z_base for stage tracking
-                z_selected = z0.clone() if os.environ.get("RLVAE_DEBUG", "0") == "1" else None
+                z_selected = z0.clone() if diagnostics_enabled and os.environ.get("RLVAE_DEBUG", "0") == "1" else None
                 # Optional manifold-aware acceptance: require non-decrease in log|G^{-1}|
                 z0 = self._initial_accept_volume(z0, mu, Sigma)
                 
                 # DIAGNOSTIC: Comprehensive initial sampling analysis with stage comparison
-                if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                if diagnostics_enabled and os.environ.get("RLVAE_DEBUG", "0") == "1":
                     self._diagnose_initial_sample(z_selected, z0, mu, Sigma, alpha)
                     self._diagnose_metric_at_samples(z0, mu, z_selected)
                 
                 return z0, Sigma
             else:
                 # Standard covariance-based path with multi-try sampling
+                # BUGFIX: _make_covariance expects G^{-1}(μ). We were incorrectly
+                # passing inv(G^{-1}(μ)) = G(μ), which flips the intended precision/covariance.
+                # Use the inverse metric directly.
+                if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                    print("[RHMC DEBUG] standard path -> _make_covariance")
                 G_inv_mu = self._get_inverse_metric(mu)
-                Sigma = self._make_covariance(G_inv_mu, alpha)
+                Sigma = self._make_covariance(
+                    torch.linalg.inv(G_inv_mu),
+                    alpha,
+                    target_radius=target_radius,
+                )
+                print('checkkkkkk1')
                 chol, Sigma, _ = _safe_cholesky(Sigma, self.min_cov_eig)
+                if diagnostics_enabled and os.environ.get("RLVAE_DEBUG", "0") == "1":
+                    grad_counter = getattr(self, "_mu_gradient_diag_count", 0)
+                    if True:
+                        try:
+                            with torch.enable_grad():
+                                mu_dbg = mu.detach().clone().requires_grad_(True)
+                                print('are we here')
+                                G_mu_dbg = self._ctx['model'].G(mu_dbg)
+                                G_mu_dbg = _symmetrize(G_mu_dbg)
+                                half_logdet_mu_dbg = half_logdet_volume(G_mu_dbg.float(), 'g', jitter=self.eps_reg)
+                                logdet_mu_dbg = half_logdet_mu_dbg
+                                grad_mu_dbg = torch.autograd.grad(
+                                    logdet_mu_dbg.sum(),
+                                    mu_dbg,
+                                    retain_graph=False,
+                                    create_graph=False,
+                                    allow_unused=True,
+                                )[0]
+                            grad_mu_dbg = torch.zeros_like(mu) if grad_mu_dbg is None else grad_mu_dbg.detach()
+                            grad_norm = torch.norm(grad_mu_dbg, dim=-1)
+                            print("\n[MU GRADIENT DEBUG]")
+                            print(f"  log|G(μ)| mean={logdet_mu_dbg.mean().item():+.4f}")
+                            print(f"  ||∇ log|G(μ)|| mean={grad_norm.mean().item():.4f}, max={grad_norm.max().item():.4f}")
+                            centroids = getattr(self._ctx['model'], 'centroids_tens', None)
+                            if centroids is not None:
+                                centroids = centroids.to(mu.device, mu.dtype)
+                                dists = torch.cdist(mu.detach(), centroids)
+                                min_dists, min_idx = dists.min(dim=1)
+                                nearest = centroids[min_idx]
+                                dir_to_centroid = torch.nn.functional.normalize(nearest - mu.detach(), dim=-1)
+                                grad_dir = torch.nn.functional.normalize(grad_mu_dbg, dim=-1)
+                                align = (dir_to_centroid * grad_dir).sum(dim=-1)
+                                print(
+                                    f"  Nearest-centroid dist mean={min_dists.mean().item():.4f}, "
+                                    f"grad alignment mean={align.mean().item():.4f}"
+                                )
+                            else:
+                                print("  Centroids unavailable; skipping alignment diagnostic.")
+                        except Exception as grad_exc:
+                            print(f"[MU GRADIENT DEBUG] failed: {grad_exc}")
+                        self._mu_gradient_diag_count = grad_counter + 1
                 
                 B, D = mu.shape
                 K = int(getattr(self, 'initial_n_candidates', 1))
@@ -727,15 +875,15 @@ class RiemannianRHMCPosterior(nn.Module):
                 transformed = torch.bmm(chol, eps.transpose(-1, -2)).transpose(-1, -2)  # [B, K, D]
                 z_cand = mu.float().unsqueeze(1) + transformed
                 # Evaluate 0.5 log|G^{-1}| at candidates and pick best per batch
-                with torch.enable_grad():
-                    z_eval = z_cand.reshape(B * K, D).detach().requires_grad_(False)
+                with torch.no_grad():
+                    z_eval = z_cand.reshape(B * K, D)
                     Gz = self._ctx['model'].G(z_eval)
-                    from .metric_utils import half_logdet_volume
-                    h = -half_logdet_volume(Gz, 'g', jitter=self.eps_reg).reshape(B, K)  # FIXED: Negate to maximize +½log|G⁻¹|
+                    # Same selection score for the standard path
+                    h = half_logdet_volume(Gz, 'g', jitter=self.eps_reg).reshape(B, K)
                 best_idx = torch.argmax(h, dim=1)
                 
                 # DIAGNOSTIC: Analyze candidates before selection
-                if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                if diagnostics_enabled and os.environ.get("RLVAE_DEBUG", "0") == "1":
                     batch_counter = getattr(self, '_debug_batch_counter', 0)
                     self._diagnose_candidates(z_cand.to(mu.dtype), mu, Sigma, h, best_idx, batch_counter)
                     self._debug_batch_counter = batch_counter + 1
@@ -753,11 +901,11 @@ class RiemannianRHMCPosterior(nn.Module):
                     scale = torch.clamp(max_norm / (dnorm + 1e-12), max=1.0)
                     z0 = mu + scale * delta
                 # Save z_selected (after multi-try, before volume) for stage tracking
-                z_selected = z0.clone() if os.environ.get("RLVAE_DEBUG", "0") == "1" else None
+                z_selected = z0.clone() if diagnostics_enabled and os.environ.get("RLVAE_DEBUG", "0") == "1" else None
                 z0 = self._initial_accept_volume(z0, mu, Sigma)
                 
                 # DIAGNOSTIC: Comprehensive initial sampling analysis with stage comparison
-                if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                if diagnostics_enabled and os.environ.get("RLVAE_DEBUG", "0") == "1":
                     self._diagnose_initial_sample(z_selected, z0, mu, Sigma, alpha)
                     self._diagnose_metric_at_samples(z0, mu, z_selected)
                 
@@ -773,8 +921,149 @@ class RiemannianRHMCPosterior(nn.Module):
                 latent_dim, device=mu.device, dtype=mu.dtype
             ).unsqueeze(0)
             return z0, Sigma
+
+    def _sample_initial_riemannian(
+        self,
+        mu: torch.Tensor,
+        log_var: torch.Tensor,
+        alpha: float,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Adaptive initial draw with optional shrinkage toward high-volume regions
+        and a light volume-gradient warm-up.
+        """
+        shrink_steps = max(0, int(self.initial_volume_max_adjustments))
+        volume_tol = float(max(0.0, self.initial_volume_logdet_tol))
+        shrink_factor = float(min(max(self.initial_volume_shrink_factor, 1e-3), 0.999))
+        min_alpha = float(max(self.initial_volume_min_alpha, 1e-6))
+        if volume_tol <= 0.0:
+            shrink_steps = 0
+
+        alpha_current = max(float(alpha), min_alpha)
+        if self.initial_target_radius > 0:
+            target_radius_current = float(self.initial_target_radius)
+        else:
+            target_radius_current = 0.0
+        debug_mode = os.environ.get("RLVAE_DEBUG", "0") == "1"
+
+        with torch.no_grad():
+            logdet_mu = torch.linalg.slogdet(self._get_inverse_metric(mu))[1]
+        logdet_mu_mean = logdet_mu.mean().item()
+
+        last_z = None
+        last_sigma = None
+        last_delta = None
+
+        for attempt in range(shrink_steps + 1):
+            diagnostics_enabled = (attempt == shrink_steps)
+            z0, Sigma = self._sample_initial_once(
+                mu,
+                log_var,
+                alpha_current,
+                target_radius=target_radius_current,
+                diagnostics_enabled=diagnostics_enabled,
+            )
+            if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                try:
+                    logdet_sigma = torch.linalg.slogdet(Sigma.float())[1].mean().item()
+                    print(f"[RHMC DEBUG] using _make_covariance for attempt {attempt} log|Σ|={logdet_sigma:+.4f}")
+                except Exception:
+                    print(f"[RHMC DEBUG] using _make_covariance for attempt {attempt}")
+            with torch.no_grad():
+                logdet_z0 = torch.linalg.slogdet(self._get_inverse_metric(z0))[1]
+            logdet_z0_mean = logdet_z0.mean().item()
+            delta = logdet_z0_mean - logdet_mu_mean
+
+            if debug_mode:
+                print(
+                    f"[INITIAL SHRINK] attempt={attempt} "
+                    f"alpha={alpha_current:.4g} radius={target_radius_current:.4g} "
+                    f"logdet(z0)={logdet_z0_mean:+.4f} Δ={delta:+.4f}"
+                )
+
+            last_z, last_sigma, last_delta = z0, Sigma, delta
+
+            if shrink_steps == 0 or delta >= -volume_tol or attempt == shrink_steps:
+                break
+
+            alpha_current = max(alpha_current * shrink_factor, min_alpha)
+            if target_radius_current > 0:
+                target_radius_current = max(
+                    target_radius_current * math.sqrt(shrink_factor),
+                    1e-6,
+                )
+
+        if last_z is None or last_sigma is None:
+            raise RuntimeError("Adaptive initial sampling failed to produce a sample.")
+
+        if self.initial_volume_warmup_steps > 0 and self.initial_volume_warmup_step_size > 0:
+            last_z = self._apply_volume_warmup(
+                last_z,
+                steps=self.initial_volume_warmup_steps,
+                step_size=self.initial_volume_warmup_step_size,
+                max_step_norm=self.initial_volume_warmup_max_step,
+            )
+            if debug_mode:
+                with torch.no_grad():
+                    warmed_logdet = torch.linalg.slogdet(self._get_inverse_metric(last_z))[1]
+                print(
+                    f"[INITIAL WARMUP] steps={self.initial_volume_warmup_steps} "
+                    f"logdet(z_warm)={warmed_logdet.mean().item():+.4f} "
+                    f"Δ={warmed_logdet.mean().item() - logdet_mu_mean:+.4f}"
+                )
+
+        return last_z, last_sigma
+
+    def _apply_volume_warmup(
+        self,
+        z: torch.Tensor,
+        *,
+        steps: int,
+        step_size: float,
+        max_step_norm: float,
+    ) -> torch.Tensor:
+        """Small gradient-ascent warm-up on log|G⁻¹(z)| to nudge samples toward high-volume regions."""
+        if steps <= 0 or step_size <= 0:
+            return z
+        debug_mode = os.environ.get("RLVAE_DEBUG", "0") == "1"
+        z_cur = z
+        for idx in range(int(steps)):
+            z_cur = z_cur.detach().requires_grad_(True)
+            G_z = self._ctx['model'].G(z_cur)
+            G_z = torch.linalg.inv(_symmetrize(G_z))
+            print('okokok')
+            # For rep='g', half_logdet is -½ log|G| = +½ log|G^{-1}|. Ascend this directly.
+            half_logdet = half_logdet_volume(G_z.float(), 'g', jitter=self.eps_reg)
+            logdet = half_logdet
+            grad = torch.autograd.grad(
+                logdet.sum(),
+                z_cur,
+                create_graph=True,
+                retain_graph=False,
+                allow_unused=False,
+            )[0]
+            if max_step_norm > 0:
+                grad_norm = grad.norm(dim=-1, keepdim=True).clamp(min=1e-12)
+                scale = torch.clamp(max_step_norm / grad_norm, max=1.0)
+                grad = grad * scale
+            z_next = z_cur + step_size * grad
+            z_cur = z_next
+            if debug_mode:
+                with torch.no_grad():
+                    current_logdet = torch.linalg.slogdet(self._get_inverse_metric(z_cur))[1]
+                print(
+                    f"[VOLUME WARMUP] step={idx} "
+                    f"logdet={current_logdet.mean().item():+.4f}"
+                )
+        return z_cur
     
-    def _make_covariance(self, G_inv: torch.Tensor, alpha: float) -> torch.Tensor:
+    def _make_covariance(
+        self,
+        G_inv: torch.Tensor,
+        alpha: float,
+        *,
+        target_radius: Optional[float] = None,
+    ) -> torch.Tensor:
         """
         Build SPD covariance Σ = α·Ĝ^{-1} + εI with eigenvalue clipping and
         optional normalization so that initial draws have a predictable radius.
@@ -788,9 +1077,11 @@ class RiemannianRHMCPosterior(nn.Module):
             evals, evecs = torch.linalg.eigh(Ginv.float())
             evals_orig = evals.clone()  # Save for diagnostics
             evals = torch.clamp(evals, min=self.min_cov_eig)
+            if math.isfinite(self.metric_eig_ceiling):
+                evals = torch.clamp(evals, max=self.metric_eig_ceiling)
             
             # Optional normalization by geometric mean so det(Ginv_norm)=1
-            mode = str(getattr(self, 'sigma_normalization_mode', 'geomean')).lower()
+            mode = str(getattr(self, 'sigma_normalization_mode', 'none')).lower()
             
             # DIAGNOSTIC: Show normalization mode and effect
             if os.environ.get("RLVAE_DEBUG", "0") == "1":
@@ -809,6 +1100,8 @@ class RiemannianRHMCPosterior(nn.Module):
                     print(f"  log|G⁻¹_norm|:         {torch.log(evals_normalized).sum(dim=-1).mean().item():.6f} (should be ~0)")
                 
                 evals = evals_normalized
+                if math.isfinite(self.metric_eig_ceiling):
+                    evals = torch.clamp(evals, max=self.metric_eig_ceiling)
             elif mode == 'trace':
                 tr = evals.sum(dim=-1, keepdim=True)
                 evals_normalized = d * evals / torch.clamp(tr, min=1e-12)
@@ -819,6 +1112,8 @@ class RiemannianRHMCPosterior(nn.Module):
                     print(f"  trace(G⁻¹_norm):       {evals_normalized.sum(dim=-1).mean().item():.6f} (should be {d})")
                 
                 evals = evals_normalized
+                if math.isfinite(self.metric_eig_ceiling):
+                    evals = torch.clamp(evals, max=self.metric_eig_ceiling)
             
             # Recompose normalized precision
             Ginv_norm = (evecs @ torch.diag_embed(evals) @ evecs.transpose(-1, -2)).to(Ginv.dtype)
@@ -828,12 +1123,14 @@ class RiemannianRHMCPosterior(nn.Module):
         eye = torch.eye(d, device=Ginv.device, dtype=Ginv.dtype).unsqueeze(0)
 
         # Adapt alpha to hit a target Euclidean radius for initial draws
-        target_r = float(getattr(self, 'initial_target_radius', 1.0))
+        target_r = self.initial_target_radius if target_radius is None else float(target_radius)
         
         # DIAGNOSTIC: Show target radius adjustment
         if os.environ.get("RLVAE_DEBUG", "0") == "1":
             print(f"\n[_make_covariance TARGET RADIUS]")
-            print(f"  initial_target_radius: {target_r:.6f}")
+            print(f"  initial_target_radius: {self.initial_target_radius:.6f}")
+            if target_radius is not None:
+                print(f"  override_target_radius: {target_r:.6f}")
             print(f"  input alpha:           {alpha:.6f}")
             print(f"  eps_reg:               {self.eps_reg:.6e}")
         
@@ -844,8 +1141,11 @@ class RiemannianRHMCPosterior(nn.Module):
                 alpha_eff = ((target_r ** 2) - d * self.eps_reg) / torch.clamp(tr_ginv, min=1e-12)
                 # Keep batch-shapes aligned
                 alpha_eff = alpha_eff.clamp(min=1e-6).to(Ginv_norm.dtype)
+                if math.isfinite(self.max_alpha_eff):
+                    alpha_eff = alpha_eff.clamp(max=self.max_alpha_eff)
                 import numpy as np
-                Sigma = alpha_eff.unsqueeze(-1).unsqueeze(-1) * Ginv_norm + self.eps_reg * eye
+                Sigma = alpha_eff.unsqueeze(-1).unsqueeze(-1) * torch.linalg.inv(Ginv_norm) + self.eps_reg * eye
+                print('okokok2')
                 if os.environ.get("RLVAE_DEBUG", "0") == "1":
                     print(f"  trace(G⁻¹_norm):       {tr_ginv.mean().item():.6f}")
                     print(f"  alpha_eff (adjusted):  {alpha_eff.mean().item():.6f}")
@@ -860,6 +1160,7 @@ class RiemannianRHMCPosterior(nn.Module):
                     print(f"  Target radius adjustment failed, using alpha={alpha}")
         else:
             import numpy as np
+            print('okokok3')
             Sigma = alpha * Ginv_norm + self.eps_reg * eye
             if os.environ.get("RLVAE_DEBUG", "0") == "1":
                 print(f"  Target radius disabled (target_r=0), using alpha={alpha}")
@@ -871,10 +1172,32 @@ class RiemannianRHMCPosterior(nn.Module):
                     expected = logdet_ginv + (d * alpha_log)
                     diff = (logdet_s - expected).abs().mean()
                     print(f"  [Σ CONSISTENCY] mean|log|Σ| - (log|G⁻¹|+d·log α)| = {diff.item():.4e}")
+                    # Additional diagnostic: check which interpretation (G vs G⁻¹)
+                    # better matches Σ ignoring εI effect. If treating the input as a
+                    # metric G explains Σ much better than as precision G⁻¹, warn.
+                    try:
+                        # Build G (metric) from Ginv_norm via Cholesky solve
+                        chol_gi, _ = self._cholesky_spd(Ginv_norm.float(), jitter=1e-6)
+                        dloc = Ginv_norm.shape[-1]
+                        eye_loc = torch.eye(dloc, device=Ginv_norm.device, dtype=Ginv_norm.dtype).unsqueeze(0).expand_as(Ginv_norm)
+                        G_norm = torch.cholesky_solve(eye_loc, chol_gi).to(Ginv_norm.dtype)
+                        sign_g, logdet_g = torch.slogdet(G_norm)
+                        expected_if_G = (-logdet_g + (d * alpha_log))
+                        diff_if_G = (logdet_s - expected_if_G).abs().mean()
+                        # If G interpretation is much closer than G⁻¹, warn loudly
+                        if diff_if_G.item() + 0.5 < diff.item():
+                            print(
+                                f"[COV WARN] _make_covariance: input likely METRIC G (not G⁻¹). "
+                                f"mean|Δ| vs G: {diff_if_G.item():.3e}  vs G⁻¹: {diff.item():.3e}"
+                            )
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 
-        return self._stabilize_spd(_symmetrize(Sigma), self.min_cov_eig)
+        Sigma = self._stabilize_spd(_symmetrize(Sigma), self.min_cov_eig)
+        Sigma = self._cap_covariance_eigs(Sigma)
+        return Sigma
 
     def _resolve_alpha(self) -> float:
         """
@@ -959,8 +1282,6 @@ class RiemannianRHMCPosterior(nn.Module):
             if (tol <= 0 and max_refine <= 0) or Sigma is None:
                 return z0
 
-            from .metric_utils import half_logdet_volume
-
             with torch.no_grad():
                 G_mu = self._ctx['model'].G(mu)
                 target = half_logdet_volume(G_mu, 'g', jitter=self.eps_reg) - tol
@@ -973,7 +1294,7 @@ class RiemannianRHMCPosterior(nn.Module):
                 total_attempts = max(0, max_refine) + 1
                 for attempt in range(total_attempts):
                     Gz = self._ctx['model'].G(z)
-                    hz = -half_logdet_volume(Gz, 'g', jitter=self.eps_reg)
+                    hz = half_logdet_volume(Gz, 'g', jitter=self.eps_reg)
                     accept_mask = hz >= target
                     if accept_mask.all():
                         return torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
@@ -1025,7 +1346,7 @@ class RiemannianRHMCPosterior(nn.Module):
             evals, evecs = torch.linalg.eigh(m32)
             floor = max(self.eps_reg, 1e-6)
             evals = torch.clamp(evals, min=floor)
-            ceil = float(getattr(self, "metric_eig_ceiling", 1e6))
+            ceil = float(getattr(self, "metric_eig_ceiling", float('inf')))
             if math.isfinite(ceil) and ceil > 0:
                 evals = torch.clamp(evals, max=ceil)
             G_inv = (evecs @ torch.diag_embed(evals) @ evecs.transpose(-1, -2)).to(G_inv.dtype)
@@ -1047,6 +1368,24 @@ class RiemannianRHMCPosterior(nn.Module):
             d = matrix.shape[-1]
             eye = torch.eye(d, device=matrix.device, dtype=matrix.dtype).unsqueeze(0)
             return _symmetrize(matrix + min_eig * eye)
+
+    def _cap_covariance_eigs(self, Sigma: torch.Tensor) -> torch.Tensor:
+        """Enforce an upper bound on covariance eigenvalues to avoid runaway spreads."""
+        if not math.isfinite(self.max_cov_eig):
+            return Sigma
+        try:
+            Sigma32 = Sigma.float() if Sigma.dtype in (torch.float16, torch.bfloat16) else Sigma
+            evals, evecs = torch.linalg.eigh(_symmetrize(Sigma32))
+            capped = evals.clamp(min=self.min_cov_eig, max=self.max_cov_eig)
+            if os.environ.get("RLVAE_DEBUG", "0") == "1" and (capped != evals).any():
+                diff = torch.abs(capped - evals).max().item()
+                print(f"[COV CLAMP] Applied max_cov_eig={self.max_cov_eig:.4f} (max adjustment={diff:.4e})")
+            Sigma_capped = evecs @ torch.diag_embed(capped) @ evecs.transpose(-1, -2)
+            return _symmetrize(Sigma_capped.to(Sigma.dtype))
+        except Exception as exc:
+            if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                print(f"[COV CLAMP] Failed to cap eigenvalues: {exc}")
+            return Sigma
 
     def _diagnose_initial_sample(
         self, 
@@ -1513,7 +1852,7 @@ class RiemannianRHMCPosterior(nn.Module):
         z0: torch.Tensor,
         record_traj: bool = False,
         mu: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[List[Dict[str, torch.Tensor]]]]:
+    ) -> Tuple[torch.Tensor, Optional[List[Dict[str, torch.Tensor]]], torch.Tensor]:
         """
         Step 2: Simple RHMC exploration without acceptance/rejection.
         
@@ -1567,9 +1906,18 @@ class RiemannianRHMCPosterior(nn.Module):
                 'logdet_Ginv': [init_logdet],
             }
         
+        delta_logdet = torch.zeros(z.shape[0], device=z.device, dtype=z.dtype)
+        # AMP-safe: compute quadratic energy in float32 to avoid Half/Float mismatch
+        G_inv_ref = self._get_inverse_metric(z)
+        rho32 = rho.float() if rho.dtype in (torch.float16, torch.bfloat16) else rho
+        G_inv_ref32 = G_inv_ref.float() if G_inv_ref.dtype in (torch.float16, torch.bfloat16) else G_inv_ref
+        quadratic_ref32 = torch.einsum('bi,bij,bj->b', rho32, G_inv_ref32, rho32)
+        quadratic_ref = quadratic_ref32.to(z.dtype)
+        quadratic_start = quadratic_ref.clone()
+        resample_counter = 0
         # Simple leapfrog integration
         if record_traj:
-            traj = [{'step': 0, 'z': z.clone(), 'rho': rho.clone()}]
+            traj = [{'step': 0, 'z': z.clone().detach(), 'rho': rho.clone().detach(), 'logdet': torch.zeros_like(delta_logdet)}]
         else:
             traj = None
 
@@ -1581,9 +1929,54 @@ class RiemannianRHMCPosterior(nn.Module):
             self._rhmc_loop_logged = True
 
         for step in range(self.rhmc_steps):
-            z, rho = self._leapfrog_step(z, rho, self.rhmc_step_size)
+            z, rho, logdet_step = self._leapfrog_step(z, rho, self.rhmc_step_size)
+            delta_logdet = delta_logdet + logdet_step
+            try:
+                G_inv_cur = self._get_inverse_metric(z)
+                rho32 = rho.float() if rho.dtype in (torch.float16, torch.bfloat16) else rho
+                G_inv_cur32 = G_inv_cur.float() if G_inv_cur.dtype in (torch.float16, torch.bfloat16) else G_inv_cur
+                q_cur32 = torch.einsum('bi,bij,bj->b', rho32, G_inv_cur32, rho32)
+                q_cur = q_cur32.to(z.dtype)
+                drift_from_start = q_cur - quadratic_start
+                drift_active = q_cur - quadratic_ref
+                if self.max_quadratic_growth > 0:
+                    exceed_mask = drift_active > self.max_quadratic_growth
+                    if exceed_mask.any():
+                        with torch.no_grad():
+                            rho_new = self._sample_momentum(z[exceed_mask].detach())
+                        rho = rho.clone()
+                        rho[exceed_mask] = rho_new
+                        rho_new32 = rho_new.float() if rho_new.dtype in (torch.float16, torch.bfloat16) else rho_new
+                        G_inv_exc32 = G_inv_cur[exceed_mask].float() if G_inv_cur.dtype in (torch.float16, torch.bfloat16) else G_inv_cur[exceed_mask]
+                        q_new32 = torch.einsum('bi,bij,bj->b', rho_new32, G_inv_exc32, rho_new32)
+                        q_new = q_new32.to(z.dtype)
+                        q_cur = q_cur.clone()
+                        q_cur[exceed_mask] = q_new
+                        quadratic_ref = quadratic_ref.clone()
+                        quadratic_ref[exceed_mask] = q_new
+                        quadratic_start = quadratic_start.clone()
+                        quadratic_start[exceed_mask] = q_new
+                        if record_traj and traj:
+                            traj[0]['rho'][exceed_mask] = rho_new.detach()
+                        resample_counter += int(exceed_mask.sum().item())
+                        if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                            print(f"[RHMC QUADRATIC ENERGY] resampled momentum for {int(exceed_mask.sum().item())} sample(s) at step {step+1}")
+                        drift_from_start = q_cur - quadratic_start
+                        drift_active = q_cur - quadratic_ref
+                quadratic_ref = q_cur.detach()
+                if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                    print(
+                        f"[RHMC QUADRATIC ENERGY] step={step+1} "
+                        f"start mean={quadratic_start.mean().item():.4f} "
+                        f"current mean={q_cur.mean().item():.4f} "
+                        f"Δ initial mean={drift_from_start.mean().item():+.4f} "
+                        f"Δ active mean={drift_active.mean().item():+.4f}"
+                    )
+            except Exception as quad_exc:
+                if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                    print(f"[RHMC QUADRATIC ENERGY] diagnostic failed: {quad_exc}")
             if record_traj:
-                traj.append({'step': step + 1, 'z': z.clone(), 'rho': rho.clone()})
+                traj.append({'step': step + 1, 'z': z.clone().detach(), 'rho': rho.clone().detach(), 'logdet': logdet_step.clone().detach()})
             
             # DIAGNOSTIC: Track each step
             if os.environ.get("RLVAE_DEBUG", "0") == "1" and mu is not None:
@@ -1619,6 +2012,25 @@ class RiemannianRHMCPosterior(nn.Module):
                 print(f"  ||z{step+1} - z0||:         mean={dist_z_z0.mean().item():.4f}")
                 print(f"  ||ρ{step+1}||:             mean={rho_norm.mean().item():.4f}")
                 print(f"  log|G⁻¹(z{step+1})|:       {logdet_val:.4f}")
+                
+                if len(trajectory_data['logdet_Ginv']) >= 2:
+                    prev_logdet = trajectory_data['logdet_Ginv'][-2]
+                    delta_logdet = logdet_val - prev_logdet
+                    print(f"  Δ log|G⁻¹| (step):        {delta_logdet:+.4f}")
+                    if delta_logdet < 0:
+                        print("  ⚠️  Volume drop detected this step (log|G⁻¹| decreased).")
+                    
+                    if len(trajectory_data['logdet_Ginv']) >= 3:
+                        import numpy as np
+                        steps_arr = np.arange(len(trajectory_data['logdet_Ginv']))
+                        logdets_arr = np.array(trajectory_data['logdet_Ginv'])
+                        if np.std(logdets_arr) > 1e-9:
+                            corr_running = float(np.corrcoef(steps_arr, logdets_arr)[0, 1])
+                            print(f"  corr(step, log|G⁻¹|):    {corr_running:+.4f} (running)")
+                            if corr_running < -0.3:
+                                print("  ⚠️  Running correlation negative — check force orientation!")
+                        else:
+                            print("  corr(step, log|G⁻¹|):    +0.0000 (insufficient variance)")
         
         # DIAGNOSTIC: Trajectory Summary
         if os.environ.get("RLVAE_DEBUG", "0") == "1" and mu is not None:
@@ -1689,8 +2101,21 @@ class RiemannianRHMCPosterior(nn.Module):
                             print(f"      This suggests RHMC pushes samples to low-volume regions.")
             
             print(f"\n{'='*80}\n")
+            try:
+                logdet_stats = delta_logdet.detach()
+                print(f"[RHMC VOLUME JACOBIAN]")
+                print(f"  log|det DΦ| mean: {logdet_stats.mean().item():.4f}")
+                print(f"  log|det DΦ| min:  {logdet_stats.min().item():.4f}")
+                print(f"  log|det DΦ| max:  {logdet_stats.max().item():.4f}")
+                if resample_counter > 0:
+                    print(
+                        f"[RHMC QUADRATIC ENERGY] momentum resampled {resample_counter} "
+                        f"time(s) (threshold {self.max_quadratic_growth})"
+                    )
+            except Exception:
+                pass
 
-        return z, traj
+        return z, traj, delta_logdet
     
     def _sample_momentum(self, z: torch.Tensor) -> torch.Tensor:
         """
@@ -1726,6 +2151,10 @@ class RiemannianRHMCPosterior(nn.Module):
         - Jacobian of the integrator is ignored (KL jacobian mode is a placeholder).
         """
         try:
+            batch_size = z.shape[0]
+            latent_dim = z.shape[-1]
+            logdet_step = torch.zeros(batch_size, device=z.device, dtype=z.dtype)
+
             # Ensure z requires grad to build autograd graph inside integrator
             if not z.requires_grad:
                 z = z.clone().requires_grad_(True)
@@ -1737,11 +2166,14 @@ class RiemannianRHMCPosterior(nn.Module):
                 try:
                     z_req = z
                     G_inv_k = self._get_inverse_metric(z_req)
-                    s = torch.einsum('bi,bij,bj->b', rho, G_inv_k, rho)
-                    kin_grad = torch.autograd.grad(s.sum(), z_req, retain_graph=True, create_graph=False, allow_unused=True)[0]
+                    # AMP-safe: compute kinetic energy in float32 when needed
+                    rho_work = rho.float() if rho.dtype in (torch.float16, torch.bfloat16) else rho
+                    G_inv_k_work = G_inv_k.float() if G_inv_k.dtype in (torch.float16, torch.bfloat16) else G_inv_k
+                    s_work = torch.einsum('bi,bij,bj->b', rho_work, G_inv_k_work, rho_work)
+                    kin_grad = torch.autograd.grad(s_work.sum(), z_req, retain_graph=True, create_graph=False, allow_unused=True)[0]
                     if kin_grad is None:
                         kin_grad = torch.zeros_like(z_req)
-                    grad_U = grad_U + self.kinetic_grad_weight * kin_grad
+                    grad_U = grad_U + self.kinetic_grad_weight * kin_grad.to(z.dtype)
                 except Exception:
                     pass
             rho = rho - 0.5 * step_size * grad_U
@@ -1753,12 +2185,24 @@ class RiemannianRHMCPosterior(nn.Module):
             d = z.shape[-1]
             I = torch.eye(d, device=z.device, dtype=G_inv.dtype).unsqueeze(0)
             G_inv_reg = G_inv + self.eps_reg * I
-            velocity = torch.einsum('bij,bj->bi', G_inv_reg, rho)
+            # AMP-safe velocity computation
+            rho_work = rho.float() if rho.dtype in (torch.float16, torch.bfloat16) else rho
+            G_inv_reg_work = G_inv_reg.float() if G_inv_reg.dtype in (torch.float16, torch.bfloat16) else G_inv_reg
+            velocity_work = torch.einsum('bij,bj->bi', G_inv_reg_work, rho_work)
+            velocity = velocity_work.to(z.dtype)
             # Guard against non-finite velocity components
             velocity = torch.nan_to_num(velocity, nan=0.0, posinf=0.0, neginf=0.0)
             # Clip velocity
             v_norm = torch.norm(velocity, dim=-1, keepdim=True)
-            velocity = torch.where(v_norm > self.max_velocity_norm, velocity * (self.max_velocity_norm / (v_norm + 1e-12)), velocity)
+            if self.max_velocity_norm > 0:
+                vel_scale = torch.where(
+                    v_norm > self.max_velocity_norm,
+                    self.max_velocity_norm / (v_norm + 1e-12),
+                    torch.ones_like(v_norm)
+                )
+                velocity = velocity * vel_scale
+                rho = rho * vel_scale
+                logdet_step = logdet_step + latent_dim * torch.log(vel_scale.squeeze(-1).clamp(min=1e-6))
             # Adaptive effective step to bound position change
             eff_step = step_size#torch.clamp(self.max_position_step / (v_norm + 1e-12), max=1.0) * step_size
             
@@ -1802,17 +2246,22 @@ class RiemannianRHMCPosterior(nn.Module):
                 z_norm_soft = torch.norm(z, dim=-1, keepdim=True)
                 soft_mask = z_norm_soft > soft_limit
                 if soft_mask.any():
-                    scale = torch.tanh(z_norm_soft / soft_limit)
-                    rho = rho * scale
+                    scale_full = torch.ones_like(z_norm_soft)
+                    scale_full[soft_mask] = torch.tanh(z_norm_soft[soft_mask] / soft_limit).clamp(min=1e-6)
+                    rho = rho * scale_full
+                    logdet_step = logdet_step + torch.where(
+                        soft_mask.squeeze(-1),
+                        latent_dim * torch.log(scale_full.squeeze(-1).clamp(min=1e-6)),
+                        torch.zeros_like(logdet_step),
+                    )
             # Optional single-step projection toward high log|G^{-1}|
             try:
                 tau = float(self.projection_step_scale) * float(step_size)
                 if tau > 0:
                     z_req = z.clone().detach().requires_grad_(True)
-                    # grad log|G^{-1}| = -2 * grad(half_logdet_volume(G, 'g'))
+                    # grad 0.5·log|G^{-1}| via metric route
                     G_proj = self._ctx['model'].G(z_req)
-                    from .metric_utils import half_logdet_volume
-                    vol_g = half_logdet_volume(G_proj, 'ginv', jitter=self.eps_reg)
+                    vol_g = half_logdet_volume(G_proj, 'g', jitter=self.eps_reg)
                     grad_vol_g = torch.autograd.grad(vol_g.sum(), z_req, retain_graph=False, create_graph=False, allow_unused=True)[0]
                     if grad_vol_g is not None:
                         grad_logdet_ginv = 2.0 * grad_vol_g
@@ -1836,7 +2285,13 @@ class RiemannianRHMCPosterior(nn.Module):
                         f"🔴 [RHMC] Position norm clipping: {n_clipped}/{z.shape[0]} exceeded {norm_limit} "
                         f"(max norm: {z_norm.max().item():.2f})"
                     )
-                z = torch.where(z_norm > norm_limit, z * (norm_limit / (z_norm + 1e-12)), z)
+                clip_factor = torch.where(
+                    z_norm > norm_limit,
+                    norm_limit / (z_norm + 1e-12),
+                    torch.ones_like(z_norm)
+                )
+                logdet_step = logdet_step + (z_norm > norm_limit).squeeze(-1).to(logdet_step.dtype) * latent_dim * torch.log(clip_factor.squeeze(-1).clamp(min=1e-6))
+                z = torch.where(z_norm > norm_limit, z * clip_factor, z)
             
             # Half step for momentum
             grad_U = self._compute_potential_gradient(z)
@@ -1855,11 +2310,12 @@ class RiemannianRHMCPosterior(nn.Module):
             rho = rho - 0.5 * step_size * grad_U
             rho = torch.nan_to_num(rho, nan=0.0, posinf=0.0, neginf=0.0)
             
-            return z, rho
+            return z, rho, logdet_step
             
         except Exception as e:
             print(f"⚠️ Leapfrog step failed: {e}")
-            return z, rho
+            zeros = torch.zeros(z.shape[0], device=z.device, dtype=z.dtype)
+            return z, rho, zeros
     
     def _compute_log_posterior(self, z: torch.Tensor, mu: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
         """
@@ -2031,14 +2487,36 @@ class RiemannianRHMCPosterior(nn.Module):
             print('?!!!!computing potential gradient 2!!!')
             rep = getattr(self, 'volume_force_representation', 'g')
             rep = rep if rep in ('g', 'ginv') else 'g'
+            grad_jitter = float(getattr(self, 'volume_grad_jitter', self.eps_reg))
+            eig_floor = float(getattr(self, 'volume_grad_eig_floor', 0.0))
             if rep == 'g':
+                print('using g??????')
                 G = self._ctx['model'].G(z)
                 G32 = G.float() if G.dtype in (torch.float16, torch.bfloat16) else G
-                log_vol = half_logdet_volume(G32, 'g', jitter=self.eps_reg)  # = +½ log|G^{-1}|
+                # Clamp spectrum before logdet gradient to avoid NaNs
+                try:
+                    evals, evecs = torch.linalg.eigh(0.5 * (G32 + G32.transpose(-1, -2)))
+                    if eig_floor > 0:
+                        evals = torch.clamp(evals, min=eig_floor)
+                    G32 = evecs @ (evals.unsqueeze(-1) * evecs.transpose(-1, -2))
+                except Exception:
+                    pass
+                d = G32.shape[-1]
+                eye = torch.eye(d, device=G32.device, dtype=G32.dtype).unsqueeze(0)
+                log_vol = half_logdet_volume(G32 + grad_jitter * eye, 'g', jitter=grad_jitter)  # = +½ log|G^{-1}|
             else:
                 Ginv = self._get_inverse_metric(z)
                 Ginv32 = Ginv.float() if Ginv.dtype in (torch.float16, torch.bfloat16) else Ginv
-                log_vol = half_logdet_volume(Ginv32, 'ginv', jitter=self.eps_reg)  # = +½ log|G^{-1}|
+                try:
+                    evals, evecs = torch.linalg.eigh(0.5 * (Ginv32 + Ginv32.transpose(-1, -2)))
+                    if eig_floor > 0:
+                        evals = torch.clamp(evals, min=eig_floor)
+                    Ginv32 = evecs @ (evals.unsqueeze(-1) * evecs.transpose(-1, -2))
+                except Exception:
+                    pass
+                d = Ginv32.shape[-1]
+                eye = torch.eye(d, device=Ginv32.device, dtype=Ginv32.dtype).unsqueeze(0)
+                log_vol = half_logdet_volume(Ginv32 + grad_jitter * eye, 'ginv', jitter=grad_jitter)  # = +½ log|G^{-1}|
 
             grad_log_vol, = torch.autograd.grad(
                 log_vol.sum(),
@@ -2103,23 +2581,96 @@ class RiemannianRHMCPosterior(nn.Module):
                     G32 = G_z.float()
                     Ginv32 = Ginv_z.float()
                     
-                    logdet_G = 0.5 * torch.linalg.slogdet(G32)[1]
-                    logdet_Ginv = 0.5 * torch.linalg.slogdet(Ginv32)[1]
+                    # Use Cholesky-based half-logdet for numerical stability under SPD assumptions.
+                    half_logdet_g = half_logdet_volume(G32, 'g', jitter=self.eps_reg)  # = -½ log|G|
+                    half_logdet_ginv = half_logdet_volume(Ginv32, 'ginv', jitter=self.eps_reg)  # = +½ log|G⁻¹|
+                    logdet_G = -half_logdet_g
+                    logdet_Ginv = half_logdet_ginv
                     
                     print(f"\n  Current metric values:")
                     print(f"    +0.5 log|G(z)|:     {logdet_G.mean().item():.6f}")
                     print(f"    +0.5 log|G⁻¹(z)|:   {logdet_Ginv.mean().item():.6f}")
                     print(f"    Sum (should ≈ 0):   {(logdet_G.mean() + logdet_Ginv.mean()).item():.6f}")
+                    if not torch.isfinite(logdet_G).all() or not torch.isfinite(logdet_Ginv).all():
+                        print("  ⚠️  Non-finite logdet encountered; inspect metric conditioning.")
+                        try:
+                            eigvals_G = torch.linalg.eigvalsh(G32)
+                            eigvals_Ginv = torch.linalg.eigvalsh(Ginv32)
+                            print(f"    eig(G)  min={eigvals_G.min().item():.4e}, max={eigvals_G.max().item():.4e}")
+                            print(f"    eig(G⁻¹) min={eigvals_Ginv.min().item():.4e}, max={eigvals_Ginv.max().item():.4e}")
+                        except Exception as eig_exc:
+                            print(f"    (Eigenvalue check failed: {eig_exc})")
                     
-                    # Compute gradient in BOTH representations
-                    grad_G, = -torch.autograd.grad(logdet_G.sum(), z, retain_graph=True, create_graph=False, allow_unused=True)
-                    grad_Ginv, = -torch.autograd.grad(logdet_Ginv.sum(), z, retain_graph=True, create_graph=False, allow_unused=True)
+                    # Compute gradient in BOTH representations using detached copies to avoid polluting the training graph.
+                    grad_G = grad_Ginv = None
+                    try:
+                        with torch.enable_grad():
+                            z_dbg = z.detach().clone().requires_grad_(True)
+                            G_dbg = self._ctx['model'].G(z_dbg)
+                            G_dbg = _symmetrize(G_dbg)
+                            half_logdet_g_dbg = half_logdet_volume(G_dbg.float(), 'g', jitter=self.eps_reg)
+                            logdet_G_dbg = -half_logdet_g_dbg
+                            grad_G = -torch.autograd.grad(
+                                logdet_G_dbg.sum(),
+                                z_dbg,
+                                retain_graph=True,
+                                create_graph=False,
+                                allow_unused=True,
+                            )[0]
+
+                            # Invert without additional clamps for diagnostic purposes only.
+                            Ginv_dbg = torch.linalg.inv(G_dbg.float()).to(G_dbg.dtype)
+                            half_logdet_ginv_dbg = half_logdet_volume(Ginv_dbg.float(), 'ginv', jitter=self.eps_reg)
+                            logdet_Ginv_dbg = half_logdet_ginv_dbg
+                            grad_Ginv = -torch.autograd.grad(
+                                logdet_Ginv_dbg.sum(),
+                                z_dbg,
+                                retain_graph=False,
+                                create_graph=False,
+                                allow_unused=True,
+                            )[0]
+                            if grad_G is not None:
+                                grad_G = grad_G.detach()
+                            if grad_Ginv is not None:
+                                grad_Ginv = grad_Ginv.detach()
+                    except Exception as grad_exc:
+                        print(f"  [Gradient diagnostic failed: {grad_exc}]")
+                    
+                    def _grad_stats(name: str, tensor: Optional[torch.Tensor]) -> Tuple[float, bool]:
+                        if tensor is None:
+                            return float("nan"), False
+                        finite_mask = torch.isfinite(tensor)
+                        if not finite_mask.all():
+                            print(f"  ⚠️  {name} contains non-finite entries "
+                                  f"(nan={torch.isnan(tensor).any().item()}, "
+                                  f"inf={torch.isinf(tensor).any().item()}).")
+                        norm = torch.linalg.norm(tensor, dim=-1)
+                        finite_norm = norm[torch.isfinite(norm)]
+                        norm_mean = finite_norm.mean().item() if finite_norm.numel() > 0 else float("nan")
+                        return norm_mean, finite_mask.all().item()
+                    
+                    norm_grad_G, grad_G_ok = _grad_stats("∇(0.5 log|G|)", grad_G)
+                    norm_grad_Ginv, grad_Ginv_ok = _grad_stats("∇(0.5 log|G⁻¹|)", grad_Ginv)
                     
                     if grad_G is not None and grad_Ginv is not None:
+                        dot = (grad_G * grad_Ginv).sum(dim=-1)
+                        if torch.isfinite(dot).any():
+                            dot_val = dot[torch.isfinite(dot)].mean().item()
+                        else:
+                            dot_val = float("nan")
                         print(f"\n  Gradient directions:")
-                        print(f"    ∇(0.5 log|G|) norm:     {torch.norm(grad_G, dim=-1).mean().item():.6e}")
-                        print(f"    ∇(0.5 log|G⁻¹|) norm:   {torch.norm(grad_Ginv, dim=-1).mean().item():.6e}")
-                        print(f"    ∇G · ∇G⁻¹ (should <0):  {(grad_G * grad_Ginv).sum().item():.6e}")
+                        print(f"    ∇(0.5 log|G|) norm:     {norm_grad_G:.6e}")
+                        print(f"    ∇(0.5 log|G⁻¹|) norm:   {norm_grad_Ginv:.6e}")
+                        print(f"    ∇G · ∇G⁻¹ (should <0):  {dot_val:.6e}")
+                        if (not grad_G_ok) or (not grad_Ginv_ok) or not torch.isfinite(dot).all():
+                            print("    ⚠️  Gradient diagnostics detected non-finite values; check conditioning.")
+                            try:
+                                eigvals_G = torch.linalg.eigvalsh(G32.detach())
+                                eigvals_Ginv = torch.linalg.eigvalsh(Ginv32.detach())
+                                print(f"       eig(G)  min={eigvals_G.min().item():.4e}, max={eigvals_G.max().item():.4e}")
+                                print(f"       eig(G⁻¹) min={eigvals_Ginv.min().item():.4e}, max={eigvals_Ginv.max().item():.4e}")
+                            except Exception as eig_exc:
+                                print(f"       (Eigenvalue check failed: {eig_exc})")
                         
                         # What grad_U actually is
                         if rep == 'g':
@@ -2142,6 +2693,23 @@ class RiemannianRHMCPosterior(nn.Module):
                     print(f"  [Error computing gradient verification: {e}]")
                 
                 self._volume_force_logged = True
+
+            # EXTENDED TRACE: gradient sanity with finite differences and route comparisons
+            # Only run heavy RHMC gradient trace if explicitly requested
+            if os.environ.get("RLVAE_TRACE_RHMC", "0") == "1":
+                try:
+                    volume_grad_sanity(
+                        self._ctx['model'],
+                        z.detach(),
+                        rep=rep,
+                        sign=float(sign),
+                        jitter=float(self.eps_reg),
+                        eig_floor=float(getattr(self, 'volume_grad_eig_floor', 0.0)),
+                        label="_compute_potential_gradient",
+                    )
+                except Exception as _e:
+                    if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                        print(f"[GRAD TRACE] volume_grad_sanity failed: {_e}")
             
             return grad.to(z.dtype)
         except Exception:

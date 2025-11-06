@@ -2683,7 +2683,7 @@ class ExperimentRunner:
                     self.M_tens = self.mix_atoms
                     self.bg_strength = 1e-2
                     self.bg_radius = None
-                    self.use_background_identity = True
+                    self.use_background_identity = False
 
                 def parameters(self):
                     return iter([torch.empty(0, device=self.device)])
@@ -3440,13 +3440,13 @@ class ExperimentRunner:
                     except Exception:
                         return fallback_value
 
-                rh_steps = _posterior_get('rhmc_steps', getattr(self.config.model, 'rhmc_steps', 4))
+                rh_steps = _posterior_get('rhmc_steps', getattr(self.config.model, 'rhmc_steps', 3))
                 try:
                     rh_steps = int(rh_steps)
                 except Exception:
                     rh_steps = 0
 
-                rh_eps = _posterior_get('rhmc_step_size', getattr(self.config.model, 'rhmc_step_size', 0.1))
+                rh_eps = _posterior_get('rhmc_step_size', getattr(self.config.model, 'rhmc_step_size', 0.02))
                 import os
                 if os.environ.get("RLVAE_DEBUG", "0") == "1":
                     print(f"[RUN_EXP DEBUG] rhmc_step_size from config: {rh_eps}")
@@ -3460,7 +3460,7 @@ class ExperimentRunner:
                     rh_eps = 0.02
                 rh_alpha = _positive_or(
                     _posterior_get('rhmc_alpha', getattr(self.config.model, 'rhmc_alpha', None)),
-                    getattr(self.config.model, 'posterior_local_alpha', 0.1) ###where that counts!!!
+                    getattr(self.config.model, 'posterior_local_alpha', 0.01) ###where that counts!!!
                 )
                 # Hard override via environment takes precedence for end-to-end consistency
                 try:

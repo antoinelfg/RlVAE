@@ -365,6 +365,8 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         kl_prior_mode_cfg = loss_cfg.get('kl_prior_mode', getattr(self.config, 'kl_prior_mode', 'uniform'))
         volume_bias_weight = float(loss_cfg.get('volume_bias_weight', getattr(self.config, 'volume_bias_weight', 1.0)))
         volume_grad_scale = float(loss_cfg.get('volume_grad_scale', getattr(self.config, 'volume_grad_scale', 1.0)))
+        use_pushforward_metric = loss_cfg.get('use_pushforward_metric', getattr(self.config, 'use_pushforward_metric', None))
+        use_flow_corrections = loss_cfg.get('use_flow_corrections', getattr(self.config, 'use_flow_corrections', None))
         self._volume_bias_weight_cfg = volume_bias_weight
         self._volume_grad_scale_cfg = volume_grad_scale
         
@@ -375,17 +377,22 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
                   f"mu_l2_weight={self.config_resolved.get('mu_l2_weight', 0.0)}")
             self._loss_config_traced = True
         
+        # Allow choosing metric representation from config (default 'g'), and pass mu regularizers from config
+        metric_rep_pref = loss_cfg.get('metric_representation', 'g')
+        mu_centroid_weight = float(loss_cfg.get('mu_centroid_weight', getattr(self.config, 'mu_centroid_weight', 0.0)))
+        mu_volume_weight = float(loss_cfg.get('mu_volume_weight', getattr(self.config, 'mu_volume_weight', 0.0)))
         self.loss_manager = LossManager(
             beta=float(loss_cfg.get('beta', self.config_resolved.get('beta', 1.0))),
             riemannian_beta=float(loss_cfg.get('riemannian_beta', self.config_resolved.get('riemannian_beta', self.config_resolved.get('beta', 1.0)))),
-            loop_penalty_weight=self.config_resolved.get('loop', {}).get('penalty', 1.0),
+            loop_penalty_weight=self.config_resolved.get('loop', {}).get('penalty', 0.0),
             device=self.device,
-            # Prefer working in precision space to avoid unnecessary inversions
-            metric_representation='ginv',
+            metric_representation=metric_rep_pref,
             metric_reg_weight=metric_reg_weight,
             metric_reg_type=metric_reg_type,
             metric_reg_target=metric_reg_target,
             mu_l2_weight=mu_l2_weight,
+            mu_centroid_weight=mu_centroid_weight,
+            mu_volume_weight=mu_volume_weight,
             kl_prior_mode=kl_prior_mode_cfg,
             kl_use_metric_normalization=kl_use_metric_normalization,
             kl_metric_norm_mode=kl_metric_norm_mode,
@@ -393,6 +400,10 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             kl_metric_eval_point=kl_metric_eval_point,
             volume_bias_weight=volume_bias_weight,
             volume_grad_scale=volume_grad_scale,
+            use_pushforward_metric=use_pushforward_metric,
+            use_flow_corrections=use_flow_corrections,
+            kl_include_logZ_in_loss=bool(loss_cfg.get('kl_include_logZ_in_loss', getattr(self.config, 'kl_include_logZ_in_loss', False))),
+            kl_flip_logq_sign=bool(loss_cfg.get('kl_flip_logq_sign', getattr(self.config, 'kl_flip_logq_sign', False))),
         )
         # Route tracing: LossManager created successfully
         if not hasattr(self, '_loss_created_traced'):
@@ -900,6 +911,7 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             except Exception:
                 # Last resort: standard KL
                 log_var_clamped = torch.clamp(log_var, -10.0, 10.0)
+                print(f"[KL DEBUG!!!!!????] log_var_clamped: {log_var_clamped.min():.4f}, {log_var_clamped.max():.4f}")
                 return -0.5 * torch.sum(1 + log_var_clamped - mu.pow(2) - log_var_clamped.exp(), dim=1).mean()
         return self.loss_manager.compute_riemannian_kl_loss(mu, log_var, z_samples, metric_tensor)
     
@@ -1270,6 +1282,13 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         except Exception as _e:
             print(f"[GRAD DEBUG] Unable to attach mu grad hook: {_e}")
         # Optional: align μ distribution to metric centroid stats (first-batch calibration)
+        # One‑time integrity probe (debug): record μ before/after any alignment and report Δ
+        _mu_probe_before = None
+        try:
+            if os.environ.get('RLVAE_DEBUG', '0') == '1' and not hasattr(self, '_mu_align_probe_done'):
+                _mu_probe_before = mu.detach().clone()
+        except Exception:
+            _mu_probe_before = None
         if self.mu_alignment_enabled:
             try:
                 if not self._mu_align_ready:
@@ -1288,6 +1307,22 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
                     mu = mu * self._mu_align_scale + self._mu_align_bias
             except Exception:
                 pass
+        # Report μ change (once) for transparency; no effect on training
+        try:
+            if os.environ.get('RLVAE_DEBUG', '0') == '1' and not hasattr(self, '_mu_align_probe_done'):
+                mu_after = mu.detach()
+                if _mu_probe_before is None:
+                    _mu_probe_before = mu_after.clone()
+                delta = (mu_after - _mu_probe_before).abs()
+                mean_delta = float(delta.mean().item()) if delta.numel() else 0.0
+                max_delta = float(delta.max().item()) if delta.numel() else 0.0
+                print(
+                    f"[MU ALIGN PROBE] enabled={bool(self.mu_alignment_enabled)} "
+                    f"mean|Δμ|={mean_delta:.3e} max|Δμ|={max_delta:.3e}"
+                )
+                self._mu_align_probe_done = True
+        except Exception:
+            pass
         # TRACE encoder outputs
         try:
     
@@ -1508,6 +1543,35 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             x_for_loss = x[:, :1]
             recon_for_loss = recon_x[:, :1]
 
+        # Attach gradient hooks for μ and zS once to inspect non‑RHMC gradients
+        try:
+            if self.training and getattr(mu, 'requires_grad', False) and not hasattr(self, '_mu_loss_hook_set'):
+                mu.retain_grad()
+                def _mu_loss_hook(g):
+                    try:
+                        if not hasattr(self, '_mu_loss_grad_printed') and os.environ.get('RLVAE_GRAD_TRACE','0') == '1':
+                            print(f"[LOSS TRACE] hook ∂Total/∂μ norm={g.norm().item():.4e} mean={g.mean().item():+.4e}")
+                            self._mu_loss_grad_printed = True
+                    except Exception:
+                        pass
+                    return g
+                mu.register_hook(_mu_loss_hook)
+                self._mu_loss_hook_set = True
+            if self.training and isinstance(stage_zS, torch.Tensor) and getattr(stage_zS, 'requires_grad', False) and not hasattr(self, '_zS_loss_hook_set'):
+                stage_zS.retain_grad()
+                def _zS_loss_hook(g):
+                    try:
+                        if not hasattr(self, '_zS_loss_grad_printed') and os.environ.get('RLVAE_GRAD_TRACE','0') == '1':
+                            print(f"[LOSS TRACE] hook ∂Total/∂zS norm={g.norm().item():.4e} mean={g.mean().item():+.4e}")
+                            self._zS_loss_grad_printed = True
+                    except Exception:
+                        pass
+                    return g
+                stage_zS.register_hook(_zS_loss_hook)
+                self._zS_loss_hook_set = True
+        except Exception:
+            pass
+
         losses = self.loss_manager.compute_total_loss(
             x=x_for_loss,
             x_recon=recon_for_loss,
@@ -1530,8 +1594,8 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             rhmc_log_q=rhmc_log_q if self.posterior_type == "riemannian_rhmc" else None,
             rhmc_traj_info=rhmc_traj if self.posterior_type == "riemannian_rhmc" else None,
             rhmc_posterior=getattr(self, 'posterior_sampler_rhmc', None) if self.posterior_type == "riemannian_rhmc" else None,
-            rhmc_kl_mode=str(getattr(self.config, 'rhmc_kl_mode', 'mc')).lower(),
-            rhmc_kl_source=str(getattr(self.config, 'rhmc_kl_source', 'z0')).lower(),
+            rhmc_kl_mode=str(getattr(self.config, 'rhmc_kl_mode', getattr(getattr(self.config, 'posterior', {}), 'rhmc_kl_mode', 'mc'))).lower(),
+            rhmc_kl_source=str(getattr(self.config, 'rhmc_kl_source', getattr(getattr(self.config, 'posterior', {}), 'rhmc_kl_source', 'z0'))).lower(),
             rhmc_kl_jacobian=bool(getattr(self.config, 'rhmc_kl_jacobian', False)),
         )
         # One-time check: encoder params require_grad
@@ -1637,7 +1701,7 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             },
             'hyperparameters': {
                 'beta': self.config.beta,
-                'riemannian_beta': self.config.get('riemannian_beta', 0.0),
+                'riemannian_beta': self.config.get('riemannian_beta', 1.0),
                 'cycle_penalty': self.config.loop.penalty
             },
             'modular_components': {

@@ -36,7 +36,7 @@ output:
 wandb:
   enabled: true
   mode: online         # online | offline | disabled
-  project: rlvae-three-stage-visuals
+  project: RlVAE-posterior
   entity: null
   group: null
   tags:
@@ -116,15 +116,18 @@ settings:
       hidden_size: 256
       n_blocks: 2
       n_hidden: 1
-      output_clip: 10.0
-      logdet_clip: 5.0
+      output_clip: 8.0
+      logdet_clip: 2.0
 
     losses:
       beta: 1.0
       riemannian_beta: 1.0
       flow_weight: 1.0
       loop_penalty_weight: 0.0
-      mu_l2_weight: 0.
+      mu_l2_weight: 0
+      mu_volume_weight: 0.0           # Disable μ volume bias for cleaner gradients
+      mu_centroid_weight: 0.0         # Keep centroid pull off unless desired
+      metric_representation: g
       kl_prior_mode: uniform
       kl_metric_eval_point: mu
       kl_use_metric_normalization: false  # FIX: Disable metric normalization in KL
@@ -132,14 +135,20 @@ settings:
       volume_bias_weight: 1.
       volume_grad_scale: 1.
       use_riemannian_kl: true
+      use_pushforward_metric: true
+      use_flow_corrections: true
+      kl_include_logZ_in_loss: true
+      kl_flip_logq_sign: true
+      kl_free_bits: 0.0
 
     posterior:
       type: riemannian_rhmc
-      rhmc_steps: 4                      # FIX: ENABLE RHMC (was 0!)
-      rhmc_step_size: 0.10               # FIX: INCREASED step size (was 0.02, too small with scaling)
-      rhmc_alpha: 1                    # FIX: Increased for better Σ_μ scale
+      rhmc_steps: 5                     # Slightly more exploration
+      rhmc_step_size: 0.03              # Larger step size for better mixing
+      rhmc_alpha: 0.3                   # FIX: Increased for better Σ_μ scale
       rhmc_eps_reg: 1.0e-4               # FIX: Standard regularization
       min_cov_eig: 1.0e-3                # FIX: Minimum eigenvalue for Cholesky
+      volume_force_representation: g     # Use metric 'g' for volume gradient
       
       # CRITICAL FIX: Disable multi-try and volume acceptance to avoid distribution bias
       initial_n_candidates: 1            # FIX: No multi-try sampling (was 8 by default)
@@ -162,11 +171,15 @@ settings:
       maha_clip: 20.0
       cov_norm_mode: none                # FIX: No normalization
       sigma_normalization_mode: none     # FIX: PRESERVE anisotropy - no normalization
-      initial_target_radius: 0.0         # FIX: Disable target radius forcing
-      
+      initial_target_radius: 0        # Target Euclidean radius for Σ-based draw
+      max_cov_eig: inf                 # Softer cap to avoid constant clamping
+    
       rhmc_kl_mode: mc
       rhmc_kl_source: z0
       rhmc_kl_jacobian: false
+
+    # Disable μ alignment transform so encoder μ is used directly
+    mu_alignment_enabled: false
 
     metric:
       path: outputs/stages/B_RHVAE_MLP_2_SPRITES/metric_rescaled.pt  # Isotropic 10x rescale (no anisotropy boost)
@@ -185,8 +198,8 @@ settings:
       method: posterior_hmc
       use_riemannian: true
 
-    phase1_training: true
-    centroid_regularizer_enabled: true
+    phase1_training: false
+    centroid_regularizer_enabled: false
     centroid_regularizer_weight: 0.2
 
     pretrained:
@@ -265,9 +278,9 @@ settings:
         lr: 1.0e-4
         riemannian_beta: 1.0
         posterior:
-          rhmc_alpha: 1                # FIX: Override with diagnostic-based value
-          rhmc_steps: 4                  # FIX: Ensure RHMC is active
-          rhmc_step_size: 0.10           # FIX: Match increased step size
+          rhmc_alpha: 0.3                # FIX: Override with diagnostic-based value
+          rhmc_steps: 3                  # FIX: Ensure RHMC is active
+          rhmc_step_size: 0.02           # FIX: Match increased step size
           max_position_norm: 0.0
           max_position_step: 1.0         # FIX: Match increased position step limit
           max_velocity_norm: 2.0         # FIX: Match increased velocity limit
