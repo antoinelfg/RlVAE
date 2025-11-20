@@ -12,7 +12,7 @@ Handles all loss computations for Riemannian VAE models including:
 
 import math
 import os
-from contextlib import nullcontext
+from contextlib import nullcontext, contextmanager
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, Union
 
@@ -23,6 +23,7 @@ import torch.nn.functional as F
 
 from .metric_utils import half_logdet_volume as _global_half_logdet_volume
 from ...utils.grad_debug import kl_grad_sanity
+from ...utils.stagec_debugger import stagec_debugger
 from .metric_tensor import inverse_fallback_count
 
 class LossManager(nn.Module):
@@ -35,10 +36,10 @@ class LossManager(nn.Module):
         metric_reg_weight: float = 2.0,  # NEW: weight for metric regularization
         metric_reg_type: str = 'none',   # NEW: type: 'none', 'determinant', 'condition', 'smoothness'
         metric_reg_target: float = 2.0,  # NEW: target value for regularization (e.g., logdet target)
-        mu_volume_weight: float = 20.0,
+        mu_volume_weight: float = 0.0,
         # μ anchoring
         mu_l2_weight: float = 0.0,
-        mu_centroid_weight: float = 0.0,
+        mu_centroid_weight: float = 5.0,
         recon_scale: float = 255.0,
         kl_monitor_baseline_tau: float = 0.98,
         metric_representation: str = "g",
@@ -47,8 +48,8 @@ class LossManager(nn.Module):
         # Optional amplification of volume terms / gradients
         volume_bias_weight: float = 2.0,
         volume_grad_scale: float = 1.0,
-        use_pushforward_metric: Optional[bool] = False,
-        use_flow_corrections: Optional[bool] = False,
+        use_pushforward_metric: Optional[bool] = True,
+        use_flow_corrections: Optional[bool] = True,
         kl_free_bits: float = 0.0,
         # Riemannian KL options (to mirror original model behavior)
         kl_use_metric_normalization: bool = True,
@@ -413,8 +414,8 @@ class LossManager(nn.Module):
         if z is None:
             return None, None
 
-        preferred = self.metric_representation.lower()
-        print(f"preferred?!?!: {preferred}")
+        #preferred = self.metric_representation.lower()
+        #print(f"preferred?!?!: {preferred}")
 
         def _resolve(component: Any) -> tuple[Optional[torch.Tensor], Optional[str]]:
             if component is None:
@@ -663,6 +664,66 @@ class LossManager(nn.Module):
         print(f"[DEBUG] log_gaussian_density - log_prob has NaN: {torch.isnan(log_prob).any().item()}, has inf: {torch.isinf(log_prob).any().item()}")
         
         return log_prob.to(z.dtype if z.dtype.is_floating_point else stabilized.dtype)
+
+    @contextmanager
+    def _suppress_strict_rhmc(self, rhmc_posterior: Optional[Any]):
+        if rhmc_posterior is None:
+            yield
+            return
+        ctx = getattr(rhmc_posterior, "_ctx", {})
+        model = ctx.get("model") if isinstance(ctx, dict) else None
+        prev_attr = None
+        if model is not None and hasattr(model, "riemannian_strict"):
+            prev_attr = model.riemannian_strict
+            model.riemannian_strict = False
+        prev_env = os.environ.get("RLVAE_STRICT", None)
+        os.environ["RLVAE_STRICT"] = "0"
+        try:
+            yield
+        finally:
+            if prev_attr is not None and model is not None:
+                model.riemannian_strict = prev_attr
+            if prev_env is None:
+                os.environ.pop("RLVAE_STRICT", None)
+            else:
+                os.environ["RLVAE_STRICT"] = prev_env
+
+    def _sanitize_covariance(self, covariance: Optional[torch.Tensor], mu: torch.Tensor) -> Optional[torch.Tensor]:
+        if covariance is None:
+            return None
+        cov = covariance
+        if cov.dim() == 4 and cov.shape[0] == cov.shape[1] and cov.shape[0] == mu.shape[0]:
+            idx = torch.arange(cov.shape[0], device=cov.device)
+            cov = cov[idx, idx]
+        if cov.dim() == 3 and cov.shape[0] == 1:
+            cov = cov.expand(mu.shape[0], -1, -1)
+        return cov.to(device=mu.device, dtype=mu.dtype)
+
+    def _compute_log_q_from_sample(
+        self,
+        sample: torch.Tensor,
+        mu: torch.Tensor,
+        log_var: torch.Tensor,
+        rhmc_posterior: Optional[Any],
+        *,
+        covariance: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        cov = self._sanitize_covariance(covariance, mu)
+        try:
+            if rhmc_posterior is not None:
+                with self._suppress_strict_rhmc(rhmc_posterior):
+                    return rhmc_posterior._compute_log_riemannian_gaussian(
+                        sample,
+                        mu,
+                        log_var,
+                        covariance=cov,
+                    ).to(mu.dtype)
+        except Exception as exc:
+            if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                print(f"[LOG_Q RIEM DEBUG] fallback ({exc})")
+        diff = sample - mu
+        d = diff.shape[-1]
+        return (-0.5 * torch.sum(diff ** 2, dim=-1) - 0.5 * d * math.log(2 * math.pi)).to(mu.dtype)
 
     def _half_logdet_volume(
         self,
@@ -1579,19 +1640,31 @@ class LossManager(nn.Module):
         if self.mu_centroid_weight > 0.0:
             try:
                 centroids = None
-                if metric_tensor is not None and hasattr(metric_tensor, 'centroids_tens') and metric_tensor.centroids_tens is not None:
-                    centroids = metric_tensor.centroids_tens.to(mu.device, mu.dtype)
-                elif rhmc_posterior is not None:
-                    model_ref = getattr(rhmc_posterior, '_ctx', {}).get('model', None)
-                    if model_ref is not None and hasattr(model_ref, 'centroids_tens') and model_ref.centroids_tens is not None:
-                        centroids = model_ref.centroids_tens.to(mu.device, mu.dtype)
+                # Prefer direct metric tensor buffers
+                if metric_tensor is not None:
+                    if hasattr(metric_tensor, "centroids") and metric_tensor.centroids is not None:
+                        centroids = metric_tensor.centroids.to(mu.device, mu.dtype)
+                    elif hasattr(metric_tensor, "centroids_tens") and metric_tensor.centroids_tens is not None:
+                        centroids = metric_tensor.centroids_tens.to(mu.device, mu.dtype)
+                # Fallback: fetch from model via posterior context
+                if centroids is None and rhmc_posterior is not None:
+                    model_ref = getattr(getattr(rhmc_posterior, "_ctx", {}), "get", lambda *_: None)("model", None)
+                    if model_ref is not None:
+                        if hasattr(model_ref, "centroids") and model_ref.centroids is not None:
+                            centroids = model_ref.centroids.to(mu.device, mu.dtype)
+                        elif hasattr(model_ref, "centroids_tens") and model_ref.centroids_tens is not None:
+                            centroids = model_ref.centroids_tens.to(mu.device, mu.dtype)
+
                 if isinstance(centroids, torch.Tensor) and centroids.numel() > 0:
-                    dists = torch.cdist(mu, centroids)  # [B, K]
+                    dists = torch.cdist(mu, centroids)
                     min_idx = dists.argmin(dim=1)
                     c_near = centroids[min_idx]
                     mu_centroid_reg = self.mu_centroid_weight * (mu - c_near).pow(2).sum(dim=-1).mean().to(x.dtype)
-                    if os.environ.get('RLVAE_DEBUG', '0') == '1':
-                        print(f"[MU CENTROID REG] weight={self.mu_centroid_weight:.3f}, loss={mu_centroid_reg.item():.4f}")
+                    if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                        print(f"[MU CENTROID REG] ACTIVE weight={self.mu_centroid_weight:.3f}, loss={mu_centroid_reg.item():.4f}")
+                else:
+                    if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                        print("[MU CENTROID REG] skipped: no centroids available.")
             except Exception as exc:
                 if os.environ.get('RLVAE_DEBUG', '0') == '1':
                     print(f"[MU CENTROID REG] failed: {exc}")
@@ -1733,394 +1806,81 @@ class LossManager(nn.Module):
                 except Exception:
                     sigma_from_post = None
 
+                sigma_for_logq = sigma_from_post
                 if _src == "z0":
-                    if rhmc_log_q is not None:
-                        log_q = rhmc_log_q.to(mu.dtype)
-                        
-                        # DIAGNOSTIC: log_q was provided by RHMC, decompose it
-                        if os.environ.get("RLVAE_DEBUG", "0") == "1":
-                            print(f"\n[LOG_Q FROM RHMC]")
-                            print(f"  log_q provided by rhmc_log_q (not computed here)")
-                            print(f"  Total log_q:      {log_q.mean().item():+.4f} (range: [{log_q.min().item():+.4f}, {log_q.max().item():+.4f}])")
-                            print(f"  ||z0 - μ||:       {torch.norm(stage_z0 - mu, dim=-1).mean().item():.4f}")
-                            
-                            # Try to get rhmc_alpha
-                            if rhmc_posterior is not None:
-                                if hasattr(rhmc_posterior, 'rhmc_alpha'):
-                                    print(f"  rhmc_alpha:       {rhmc_posterior.rhmc_alpha}")
-                                elif hasattr(rhmc_posterior, 'alpha'):
-                                    print(f"  alpha:            {rhmc_posterior.alpha}")
-                                else:
-                                    print(f"  rhmc_alpha:       Not found")
-                                
-                                # Rebuild Σ via posterior builder for diagnostics of the true dynamic Σ
-                                sigma_loss_dbg: Optional[torch.Tensor] = None
-                                if (
-                                    rhmc_posterior is not None and
-                                    hasattr(rhmc_posterior, '_get_inverse_metric') and
-                                    hasattr(rhmc_posterior, '_make_covariance')
-                                ):
+                    sigma_loss_dbg: Optional[torch.Tensor] = None
+                    if (
+                        rhmc_posterior is not None
+                        and hasattr(rhmc_posterior, "_get_inverse_metric")
+                        and hasattr(rhmc_posterior, "_make_covariance")
+                    ):
+                        try:
+                            Ginv_mu_dbg = rhmc_posterior._get_inverse_metric(mu)
+                            alpha_dbg = float(getattr(rhmc_posterior, "rhmc_alpha", 1.0))
+                            target_r_dbg = float(getattr(rhmc_posterior, "initial_target_radius", 0.0))
+                            sigma_loss_dbg = rhmc_posterior._make_covariance(Ginv_mu_dbg, alpha_dbg, target_radius=target_r_dbg)
+                            if sigma_loss_dbg.dim() != 3 or sigma_loss_dbg.shape[0] != mu.shape[0]:
+                                sig_list = []
+                                for b in range(mu.shape[0]):
+                                    Ginv_b = rhmc_posterior._get_inverse_metric(mu[b : b + 1])
+                                    S_b = rhmc_posterior._make_covariance(Ginv_b, alpha_dbg, target_radius=target_r_dbg)
+                                    if S_b.dim() == 4 and S_b.shape[0] == S_b.shape[1] == 1:
+                                        S_b = S_b[0, 0]
+                                    elif S_b.dim() == 3 and S_b.shape[0] == 1:
+                                        S_b = S_b[0]
+                                    sig_list.append(S_b.to(dtype=torch.float32, device=mu.device))
+                                sigma_loss_dbg = torch.stack(sig_list, dim=0)
+                                if os.environ.get("RLVAE_DEBUG", "0") == "1":
                                     try:
-                                        Ginv_mu_dbg = rhmc_posterior._get_inverse_metric(mu)
-                                        alpha_dbg = float(getattr(rhmc_posterior, 'rhmc_alpha', 1.0))
-                                        target_r_dbg = float(getattr(rhmc_posterior, 'initial_target_radius', 0.0))
-                                        sigma_loss_dbg = rhmc_posterior._make_covariance(Ginv_mu_dbg, alpha_dbg, target_radius=target_r_dbg)
-                                        if sigma_loss_dbg.dim() != 3 or sigma_loss_dbg.shape[0] != mu.shape[0]:
-                                            sig_list = []
-                                            for b in range(mu.shape[0]):
-                                                Ginv_b = rhmc_posterior._get_inverse_metric(mu[b:b+1])
-                                                S_b = rhmc_posterior._make_covariance(Ginv_b, alpha_dbg, target_radius=target_r_dbg)
-                                                if S_b.dim() == 4 and S_b.shape[0] == S_b.shape[1] == 1:
-                                                    S_b = S_b[0, 0]
-                                                elif S_b.dim() == 3 and S_b.shape[0] == 1:
-                                                    S_b = S_b[0]
-                                                sig_list.append(S_b.to(dtype=torch.float32, device=mu.device))
-                                            sigma_loss_dbg = torch.stack(sig_list, dim=0)
-                                            if os.environ.get("RLVAE_DEBUG", "0") == "1":
-                                                try:
-                                                    ld_fix = torch.linalg.slogdet(sigma_loss_dbg.float())[1].mean().item()
-                                                    print(f"[Σ SOURCE] builder (per-sample) log|Σ|={ld_fix:+.4f}")
-                                                except Exception:
-                                                    pass
-                                        if os.environ.get("RLVAE_DEBUG", "0") == "1" and sigma_loss_dbg is not None:
-                                            try:
-                                                ld_dbg = torch.linalg.slogdet(sigma_loss_dbg.float())[1].mean().item()
-                                                print(f"[Σ SOURCE] builder (explicit) log|Σ|={ld_dbg:+.4f}")
-                                            except Exception:
-                                                pass
+                                        ld_fix = torch.linalg.slogdet(sigma_loss_dbg.float())[1].mean().item()
+                                        print(f"[Σ SOURCE] builder (per-sample) log|Σ|={ld_fix:+.4f}")
                                     except Exception:
-                                        sigma_loss_dbg = None
-                                if sigma_loss_dbg is None:
-                                    try:
-                                        sigma_loss_dbg = self._resolve_sigma_mu(
-                                            mu,
-                                            None,
-                                            metric_tensor,
-                                            rhmc_posterior,
-                                            rhmc_traj_info,
-                                            jitter=eps_reg,
-                                        )
-                                    except Exception:
-                                        sigma_loss_dbg = None
-                                # Do NOT fall back to traj/cache here; require builder for 'loss'
-                                if sigma_loss_dbg is not None:
-                                    try:
-                                        # Operate in float32 for diagnostics; do not re-sanitize
-                                        sig = sigma_loss_dbg.to(dtype=torch.float32)
-                                        if os.environ.get("RLVAE_DEBUG", "0") == "1":
-                                            try:
-                                                ld_sig_pre = torch.linalg.slogdet(sig.float())[1].mean().item()
-                                                print(f"  [Σ BUILDER CHECK] pre-extract log|Σ|={ld_sig_pre:+.4f}")
-                                            except Exception:
-                                                pass
-                                        # At this point _resolve_sigma_mu already ensured [B,D,D]
-                                        if sig.dim() != 3 or sig.shape[0] != mu.shape[0]:
-                                            if os.environ.get("RLVAE_DEBUG", "0") == "1":
-                                                print("  [Σ BUILDER CHECK] unexpected shape post-resolve.")
-                                        # Shape diagnostics
-                                        try:
-                                            print("  [SIGMA RECON SHAPES] stage_z0:", tuple(stage_z0.shape),
-                                                  "mu:", tuple(mu.shape),
-                                                  "Sigma_mu:", tuple(sig.shape))
-                                        except Exception:
-                                            pass
-                                        eigvals_sigma = torch.linalg.eigvalsh(sig)
-                                        logdet_sigma = torch.linalg.slogdet(sig)[1]
-                                        print(f"  Σ_μ eigenvalues:  min={eigvals_sigma.min().item():.6f}, max={eigvals_sigma.max().item():.6f}")
-                                        print(f"  log|Σ_μ|:         {logdet_sigma.mean().item():.4f}")
-                                        print(f"  Σ_μ trace:        {torch.trace(sig[0]).item():.6f}")
-                                        
-                                        # Decompose log_q manually (float32 diagnostics)
-                                        diff = (stage_z0 - mu).to(dtype=torch.float32)
-                                        sig_inv = torch.linalg.inv(sig)
-                                        # Broadcast-safe expansion if needed
-                                        while sig_inv.dim() < diff.dim() + 1:
-                                            sig_inv = sig_inv.unsqueeze(-3)
-                                        expand_shape = list(diff.shape[:-1]) + [diff.shape[-1], diff.shape[-1]]
-                                        try:
-                                            sig_inv = sig_inv.expand(expand_shape)
-                                        except Exception:
-                                            pass
-                                        try:
-                                            print("  [SIGMA RECON SHAPES] diff:", tuple(diff.shape),
-                                                  "Sigma_mu_inv:", tuple(sig_inv.shape))
-                                        except Exception:
-                                            pass
-                                        v = diff.unsqueeze(-1)  # ... x D x 1
-                                        mv = torch.matmul(sig_inv, v).squeeze(-1)  # ... x D
-                                        quad_form = torch.einsum('...i,...i->...', diff, mv)
-                                        d = diff.shape[-1]
-                                        const_term = d * np.log(2 * np.pi)
-                                        
-                                        quad_term = -0.5 * quad_form
-                                        volume_term = -0.5 * logdet_sigma
-                                        const_contrib = -0.5 * const_term
-                                        
-                                        print(f"  [Reconstructed decomposition]")
-                                        print(f"    Quadratic term: {quad_term.mean().item():+.4f}")
-                                        print(f"    Volume term:    {volume_term.mean().item():+.4f}")
-                                        print(f"    Constant term:  {const_contrib:+.4f}")
-                                        print(f"    Sum:            {(quad_term + volume_term + const_contrib).mean().item():+.4f}")
-                                        # Sigma consistency vs posterior payload/cache/rebuild
-                                        try:
-                                            sig_ref_rhmc = None
-                                            if isinstance(rhmc_traj_info, dict) and isinstance(rhmc_traj_info.get('Sigma_mu', None), torch.Tensor):
-                                                sig_ref_rhmc = rhmc_traj_info['Sigma_mu']
-                                            sig_ref_cache = getattr(rhmc_posterior, '_last_sigma_mu', None) if rhmc_posterior is not None else None
-                                            # Rebuild reference = use the same builder result used as 'loss'
-                                            sig_rebuild = sig.clone().to(dtype=torch.float32)
-                                            # Normalize refs to float32 and extract diag if needed
-                                            def _norm_ref(a: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
-                                                if not isinstance(a, torch.Tensor):
-                                                    return None
-                                                a = a.to(dtype=torch.float32, device=sig.device)
-                                                try:
-                                                    if a.dim() == 4 and a.shape[0] == a.shape[1] and a.shape[0] == sig.shape[0]:
-                                                        idx2 = torch.arange(a.shape[0], device=a.device)
-                                                        a = a[idx2, idx2]
-                                                except Exception:
-                                                    pass
-                                                return a
-                                            sig_ref_rhmc = _norm_ref(sig_ref_rhmc)
-                                            sig_ref_cache = _norm_ref(sig_ref_cache)
-                                            sig_rebuild = _norm_ref(sig_rebuild)
-                                            def _fro(a, b):
-                                                if not (isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor)):
-                                                    return float('nan')
-                                                a32 = a.to(dtype=torch.float32)
-                                                b32 = b.to(dtype=torch.float32)
-                                                return torch.linalg.norm(a32 - b32, dim=(-1, -2)).mean().item()
-                                            dif_rhmc = _fro(sig, sig_ref_rhmc) if sig_ref_rhmc is not None else float('nan')
-                                            dif_cache = _fro(sig, sig_ref_cache) if isinstance(sig_ref_cache, torch.Tensor) else float('nan')
-                                            dif_reb = _fro(sig, sig_rebuild) if sig_rebuild is not None else float('nan')
-                                            def _ld(a):
-                                                return torch.linalg.slogdet(a.to(dtype=torch.float32))[1].mean().item() if isinstance(a, torch.Tensor) else float('nan')
-                                            ld_mu = _ld(sig)
-                                            ld_rhmc = _ld(sig_ref_rhmc)
-                                            ld_cache = _ld(sig_ref_cache)
-                                            ld_reb = _ld(sig_rebuild)
-                                            print(
-                                                f"  [SIGMA CONSISTENCY] mean||Σ_loss - Σ_rhmc||_F={dif_rhmc:.3e}, "
-                                                f"mean||Σ_loss - Σ_cache||_F={dif_cache:.3e}, mean||Σ_loss - Σ_rebuild||_F={dif_reb:.3e}"
-                                            )
-                                            print(
-                                                f"  [SIGMA CONSISTENCY] log|Σ|: loss={ld_mu:+.4f}, rhmc={ld_rhmc:+.4f}, cache={ld_cache:+.4f}, rebuild={ld_reb:+.4f}"
-                                            )
-                                            if os.environ.get("RLVAE_DEBUG", "0") == "1":
-                                                print(f"  [Σ SOURCE] loss=builder (explicit), rhmc=traj, cache=posterior._last_sigma_mu, rebuild=loss(copy)")
-                                        except Exception as _e_sig2:
-                                            print(f"  [SIGMA CONSISTENCY] failed: {_e_sig2}")
-                                    except Exception as e:
-                                        try:
-                                            print(f"  Could not reconstruct Σ_μ: {e}")
-                                            # Extra context to debug einsum shape issues
-                                            try:
-                                                print("  [SIGMA RECON EXCEPT] stage_z0 shape:", tuple(stage_z0.shape))
-                                            except Exception:
-                                                pass
-                                            try:
-                                                print("  [SIGMA RECON EXCEPT] mu shape:", tuple(mu.shape))
-                                            except Exception:
-                                                pass
-                                            try:
-                                                sig_rhmc = rhmc_traj_info.get('Sigma_mu', None) if isinstance(rhmc_traj_info, dict) else None
-                                                if isinstance(sig_rhmc, torch.Tensor):
-                                                    print("  [SIGMA RECON EXCEPT] Σ_rhmc shape:", tuple(sig_rhmc.shape))
-                                            except Exception:
-                                                pass
-                                        except Exception:
-                                            pass
-                    else:
-                        # Always rebuild Σ from posterior builder to reflect current μ
-                        if os.environ.get("RLVAE_DEBUG", "0") == "1":
-                            print("[SIGMA RESOLVE] calling _resolve_sigma_mu (log_q path)", flush=True)
-                        Sigma_mu = self._resolve_sigma_mu(
-                            mu,
-                            None,
-                            metric_tensor,
-                            rhmc_posterior,
-                            rhmc_traj_info,
-                            jitter=eps_reg,
-                        )
-                        if os.environ.get("RLVAE_DEBUG", "0") == "1" and isinstance(Sigma_mu, torch.Tensor):
-                            try:
-                                ld_loss = torch.linalg.slogdet(Sigma_mu.float())[1].mean().item()
-                                print(f"[LOSS Σ] log|Σ| used for log_q: {ld_loss:+.4f}")
-                            except Exception:
-                                pass
-                        if Sigma_mu is not None:
-                            if os.environ.get("RLVAE_DEBUG", "0") == "1":
-                                # DEBUG: Check Sigma_mu for NaN/inf and condition number
-                                print(f"[DEBUG] Sigma_mu shape: {Sigma_mu.shape}")
-                                print(f"[DEBUG] Sigma_mu has NaN: {torch.isnan(Sigma_mu).any().item()}")
-                                print(f"[DEBUG] Sigma_mu has inf: {torch.isinf(Sigma_mu).any().item()}")
-                                
-                                # Calculate eigenvalues and condition number
+                                        pass
+                            if os.environ.get("RLVAE_DEBUG", "0") == "1" and sigma_loss_dbg is not None:
                                 try:
-                                    eigvals = torch.linalg.eigvalsh(Sigma_mu)
-                                    min_eig = eigvals.min().item()
-                                    max_eig = eigvals.max().item()
-                                    cond_num = max_eig / min_eig if min_eig > 0 else float('inf')
-                                    print(f"[DEBUG] Sigma_mu eigenvalues - min: {min_eig:.6f}, max: {max_eig:.6f}")
-                                    print(f"[DEBUG] Sigma_mu condition number: {cond_num:.6f}")
-                                    if min_eig <= 0:
-                                        print(f"[WARNING] Sigma_mu has non-positive minimum eigenvalue: {min_eig}")
-                                    if cond_num > 1e12:
-                                        print(f"[WARNING] Sigma_mu has high condition number: {cond_num:.2e}")
-                                except Exception as e:
-                                    print(f"[WARNING] Failed to compute Sigma_mu eigenvalues: {e}")
+                                    ld_dbg = torch.linalg.slogdet(sigma_loss_dbg.float())[1].mean().item()
+                                    print(f"[Σ SOURCE] builder (explicit) log|Σ|={ld_dbg:+.4f}")
+                                except Exception:
+                                    pass
+                        except Exception:
+                            sigma_loss_dbg = None
+                    if sigma_loss_dbg is None:
+                        try:
+                            sigma_loss_dbg = self._resolve_sigma_mu(
+                                mu,
+                                None,
+                                metric_tensor,
+                                rhmc_posterior,
+                                sum_logdet_flow,
+                                rhmc_traj_info,
+                                eps_reg,
+                                stage_z0,
+                                zS_effective,
+                                z_seq,
+                                z_samples,
+                                stage_zF,
+                                stage_zS,
+                                stage_z0,
+                                stage_zF,
+                            )
+                        except Exception:
+                            sigma_loss_dbg = None
+                    if sigma_loss_dbg is None and sigma_from_post is not None:
+                        sigma_loss_dbg = sigma_from_post
+                    if sigma_loss_dbg is not None:
+                        sigma_for_logq = sigma_loss_dbg
 
-                                # Consistency diagnostics: compare Σ used/available across components
-                                try:
-                                    # Normalize all references in float32 and extract diag if needed
-                                    sig_ref_rhmc = None
-                                    if isinstance(rhmc_traj_info, dict) and isinstance(rhmc_traj_info.get('Sigma_mu', None), torch.Tensor):
-                                        sig_ref_rhmc = rhmc_traj_info['Sigma_mu']
-                                    sig_ref_cache = getattr(rhmc_posterior, '_last_sigma_mu', None) if rhmc_posterior is not None else None
-                                    def _norm_ref2(a: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
-                                        if not isinstance(a, torch.Tensor):
-                                            return None
-                                        a = a.to(dtype=torch.float32, device=Sigma_mu.device)
-                                        try:
-                                            if a.dim() == 4 and a.shape[0] == a.shape[1] and a.shape[0] == Sigma_mu.shape[0]:
-                                                idx3 = torch.arange(a.shape[0], device=a.device)
-                                                a = a[idx3, idx3]
-                                        except Exception:
-                                            pass
-                                        return a
-                                    sig_ref_rhmc = _norm_ref2(sig_ref_rhmc)
-                                    sig_ref_cache = _norm_ref2(sig_ref_cache)
-                                    # Attempt to rebuild Σ using RHMC posterior helpers
-                                    sig_rebuild = None
-                                    if rhmc_posterior is not None and hasattr(rhmc_posterior, '_get_inverse_metric') and hasattr(rhmc_posterior, '_make_covariance'):
-                                        try:
-                                            Ginv_mu_re = rhmc_posterior._get_inverse_metric(mu)
-                                            alpha_eff = float(getattr(rhmc_posterior, 'rhmc_alpha', 1.0))
-                                            target_r = float(getattr(rhmc_posterior, 'initial_target_radius', 0.0))
-                                            sig_rebuild = rhmc_posterior._make_covariance(Ginv_mu_re, alpha_eff, target_radius=target_r)
-                                            sig_rebuild = _norm_ref2(sig_rebuild)
-                                        except Exception:
-                                            sig_rebuild = None
-                                    def _fro(a, b):
-                                        if not (isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor)):
-                                            return float('nan')
-                                        a32 = a.to(dtype=torch.float32)
-                                        b32 = b.to(dtype=torch.float32)
-                                        return torch.linalg.norm(a32 - b32, dim=(-1, -2)).mean().item()
-                                    dif_rhmc = _fro(Sigma_mu, sig_ref_rhmc) if sig_ref_rhmc is not None else float('nan')
-                                    dif_cache = _fro(Sigma_mu, sig_ref_cache) if isinstance(sig_ref_cache, torch.Tensor) else float('nan')
-                                    dif_reb = _fro(Sigma_mu, sig_rebuild) if sig_rebuild is not None else float('nan')
-                                    # Logdet consistency as scalar summary
-                                    def _ld(a):
-                                        return torch.linalg.slogdet(a.to(dtype=torch.float32))[1].mean().item() if isinstance(a, torch.Tensor) else float('nan')
-                                    ld_mu = _ld(Sigma_mu)
-                                    ld_rhmc = _ld(sig_ref_rhmc)
-                                    ld_cache = _ld(sig_ref_cache)
-                                    ld_reb = _ld(sig_rebuild)
-                                    print(
-                                        f"[SIGMA CONSISTENCY] mean||Σ_mu - Σ_rhmc||_F={dif_rhmc:.3e}, "
-                                        f"mean||Σ_mu - Σ_cache||_F={dif_cache:.3e}, mean||Σ_mu - Σ_rebuild||_F={dif_reb:.3e}"
-                                    )
-                                    print(
-                                        f"[SIGMA CONSISTENCY] log|Σ|: loss={ld_mu:+.4f}, rhmc={ld_rhmc:+.4f}, cache={ld_cache:+.4f}, rebuild={ld_reb:+.4f}"
-                                    )
-                                except Exception as _e_sig:
-                                    print(f"[SIGMA CONSISTENCY] failed: {_e_sig}")
-                            
-                            # Compute log_q and add detailed diagnostics
-                            log_q = self._log_gaussian_density(stage_z0, mu, Sigma_mu, jitter=eps_reg).to(mu.dtype)
-                            
-                            # CRITICAL DIAGNOSTICS: Decompose log_q into components
-                            if os.environ.get("RLVAE_DEBUG", "0") == "1":
-                                try:
-                                    # Float32 diagnostics and shape prints
-                                    sig = Sigma_mu.to(dtype=torch.float32)
-                                    try:
-                                        if sig.dim() == 4 and sig.shape[0] == sig.shape[1] and sig.shape[0] == mu.shape[0]:
-                                            idx = torch.arange(sig.shape[0], device=sig.device)
-                                            sig = sig[idx, idx]
-                                    except Exception:
-                                        pass
-                                    diff = (stage_z0 - mu).to(dtype=torch.float32)
-                                    sig_inv = torch.linalg.inv(sig)
-                                    while sig_inv.dim() < diff.dim() + 1:
-                                        sig_inv = sig_inv.unsqueeze(-3)
-                                    expand_shape = list(diff.shape[:-1]) + [diff.shape[-1], diff.shape[-1]]
-                                    try:
-                                        sig_inv = sig_inv.expand(expand_shape)
-                                    except Exception:
-                                        pass
-                                    try:
-                                        print("  [LOG_Q SHAPES] stage_z0:", tuple(stage_z0.shape),
-                                              "mu:", tuple(mu.shape),
-                                              "Sigma_mu:", tuple(sig.shape))
-                                        print("  [LOG_Q SHAPES] diff:", tuple(diff.shape),
-                                              "Sigma_mu_inv:", tuple(sig_inv.shape))
-                                    except Exception:
-                                        pass
-                                    v = diff.unsqueeze(-1)
-                                    mv = torch.matmul(sig_inv, v).squeeze(-1)
-                                    quad_form = torch.einsum('...i,...i->...', diff, mv)
-                                    logdet_sigma = torch.linalg.slogdet(sig)[1]
-                                    d = diff.shape[-1]
-                                    const_term = d * np.log(2 * np.pi)
-                                    
-                                    quad_term = -0.5 * quad_form
-                                    volume_term = -0.5 * logdet_sigma
-                                    const_contrib = -0.5 * const_term
-                                    
-                                    print(f"\n[LOG_Q DECOMPOSITION]")
-                                    print(f"  Quadratic term:   {quad_term.mean().item():+.4f} (range: [{quad_term.min().item():+.4f}, {quad_term.max().item():+.4f}])")
-                                    print(f"  Volume term:      {volume_term.mean().item():+.4f} (range: [{volume_term.min().item():+.4f}, {volume_term.max().item():+.4f}])")
-                                    print(f"  Constant term:    {const_contrib:+.4f}")
-                                    print(f"  Total log_q:      {log_q.mean().item():+.4f}")
-                                    print(f"  ||z0 - μ||:       {torch.norm(diff, dim=-1).mean().item():.4f}")
-                                    print(f"  log|Σ_μ|:         {logdet_sigma.mean().item():.4f}")
-                                    
-                                    # Get rhmc_alpha if available
-                                    if rhmc_posterior is not None and hasattr(rhmc_posterior, 'rhmc_alpha'):
-                                        print(f"  rhmc_alpha:       {rhmc_posterior.rhmc_alpha}")
-                                    elif rhmc_posterior is not None and hasattr(rhmc_posterior, 'alpha'):
-                                        print(f"  alpha:            {rhmc_posterior.alpha}")
-                                    else:
-                                        print(f"  rhmc_alpha:       Not found in rhmc_posterior")
-                                    
-                                    # Eigenvalues of Σ_μ (already computed above)
-                                    eigvals_sigma = torch.linalg.eigvalsh(Sigma_mu)
-                                    print(f"  Σ_μ eigenvalues:  min={eigvals_sigma.min().item():.6f}, max={eigvals_sigma.max().item():.6f}")
-                                    print(f"  Σ_μ trace:        {torch.trace(Sigma_mu[0]).item():.6f}")
-                                    
-                                    # Compare with G^{-1}(μ) if available
-                                    if metric_tensor is not None:
-                                        try:
-                                            G_inv_mu, _ = self._evaluate_metric(mu, metric_tensor, rhmc_posterior, with_rep=True)
-                                            if G_inv_mu is not None:
-                                                eigvals_ginv = torch.linalg.eigvalsh(G_inv_mu)
-                                                print(f"  G^{{-1}}(μ) eigenvalues: min={eigvals_ginv.min().item():.6f}, max={eigvals_ginv.max().item():.6f}")
-                                                print(f"  G^{{-1}}(μ) trace:       {torch.trace(G_inv_mu[0]).item():.6f}")
-                                        except Exception as e_metric:
-                                            print(f"  G^{{-1}}(μ): Could not compute ({e_metric})")
-                                    
-                                except Exception as e:
-                                    print(f"[LOG_Q DECOMPOSITION] Failed: {e}")
-                        else:
-                            try:
-                                log_q = rhmc_posterior._compute_log_riemannian_gaussian(stage_z0, mu, log_var).to(mu.dtype)
-                            except Exception:
-                                diff = stage_z0 - mu
-                                d = diff.shape[-1]
-                                log_q = (-0.5 * torch.sum(diff ** 2, dim=-1) - 0.5 * d * np.log(2 * np.pi)).to(mu.dtype)
-                else:
-                    try:
-                        log_q = rhmc_posterior._compute_log_riemannian_gaussian(zS_effective, mu, log_var).to(mu.dtype)
-                    except Exception:
-                        diff = zS_effective - mu
-                        d = diff.shape[-1]
-                        log_q = (-0.5 * torch.sum(diff ** 2, dim=-1) - 0.5 * d * np.log(2 * np.pi)).to(mu.dtype)
+                sample_for_logq = stage_z0 if _src == "z0" else zS_effective
+                log_q = self._compute_log_q_from_sample(
+                    sample_for_logq,
+                    mu,
+                    log_var,
+                    rhmc_posterior,
+                    covariance=sigma_for_logq,
+                )
 
                 # Guard: sanitize log_q if any non-finite to prevent NaN KL
-                if isinstance(log_q, torch.Tensor):
-                    log_q = torch.nan_to_num(log_q, nan=0.0, posinf=0.0, neginf=0.0)
+                log_q = torch.nan_to_num(log_q, nan=0.0, posinf=0.0, neginf=0.0)
 
                 G_source, rep_source = self._evaluate_metric(stage_z0, metric_tensor, rhmc_posterior, with_rep=True)
                 if G_source is None or rep_source is None:
@@ -2253,7 +2013,26 @@ class LossManager(nn.Module):
                 
                 kl_loss = kl_terms.mean().to(x.dtype)
                 print(f"[DEBUG] FINAL KL LOSS: {kl_loss.item()}")
-                
+                if stagec_debugger.enabled:
+                    volume_term_mean = (
+                        float(log_p_prime_zF.mean().item()) if log_p_prime_zF is not None else float(half_logdet_target_ginv.mean().item())
+                    )
+                    payload = {
+                        "formulation": "B" if log_p_prime_zF is not None else "A",
+                        "log_q_mean": float(log_q_eval.mean().item()),
+                        "volume_term_mean": volume_term_mean,
+                        "delta_kin_mean": float(delta_kin.mean().item()),
+                        "delta_vol_mean": float(delta_vol.mean().item()),
+                        "flow_term_mean": float(flow_term.mean().item()) if log_p_prime_zF is None else None,
+                        "kl_loss": float(kl_loss.item()),
+                        "kl_terms": {
+                            "mean": float(kl_terms.mean().item()),
+                            "min": float(kl_terms.min().item()),
+                            "max": float(kl_terms.max().item()),
+                        },
+                    }
+                    stagec_debugger.log_event("kl_components", payload)
+
                 # Validate KL is non-negative (mathematical requirement)
                 if kl_loss < 0:
                     if os.environ.get("RLVAE_DEBUG", "0") == "1":

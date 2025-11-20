@@ -933,6 +933,39 @@ class LightningRlVAETrainer(L.LightningModule):
         for k in ['metric_reg', 'centroid_regularizer', 'spectral_penalty', 'smoothness_penalty', 'anisotropy_penalty']:
             if k in result and isinstance(result[k], torch.Tensor):
                 self.log(f'train_{k}', result[k])
+
+        # Optional gradient probe for debugging encoder connectivity / signal strength
+        probe_flag = str(os.getenv("RLVAE_GRAD_PROBE", "0")).lower() in ("1", "true", "yes")
+        if probe_flag:
+            try:
+                probe_every = max(1, int(os.getenv("RLVAE_GRAD_PROBE_EVERY", "10")))
+            except Exception:
+                probe_every = 10
+            if batch_idx % probe_every == 0:
+                print("\n[GRADIENT PROBE]")
+                mu_tensor = result.get('mu') if isinstance(result, dict) else None
+                if isinstance(mu_tensor, torch.Tensor):
+                    try:
+                        g_mu = torch.autograd.grad(total_loss, mu_tensor, retain_graph=True, allow_unused=True)[0]
+                        if g_mu is None:
+                            print("  ∂Loss/∂μ:      None (detached)")
+                        else:
+                            print(f"  ∂Loss/∂μ:      mean={g_mu.abs().mean().item():.3e} max={g_mu.abs().max().item():.3e}")
+                    except Exception as exc:
+                        print(f"  ∂Loss/∂μ check failed: {exc}")
+                else:
+                    print("  ∂Loss/∂μ:      skipped (μ tensor unavailable)")
+
+                if hasattr(self.model, 'encoder'):
+                    enc_params = list(self.model.encoder.parameters())
+                    total_scalars = sum(p.numel() for p in enc_params)
+                    trainable_scalars = sum(p.numel() for p in enc_params if p.requires_grad)
+                    print(f"  Encoder params: {len(enc_params)} tensors | scalars={total_scalars} (trainable={trainable_scalars})")
+                if hasattr(self.model, 'decoder'):
+                    dec_params = list(self.model.decoder.parameters())
+                    total_scalars = sum(p.numel() for p in dec_params)
+                    trainable_scalars = sum(p.numel() for p in dec_params if p.requires_grad)
+                    print(f"  Decoder params: {len(dec_params)} tensors | scalars={total_scalars} (trainable={trainable_scalars})")
         
         return total_loss
     
@@ -1292,6 +1325,17 @@ class LightningRlVAETrainer(L.LightningModule):
     
     def configure_optimizers(self):
         """Configure optimizers and schedulers."""
+        # Force-unfreeze encoder/decoder parameters (pretrained checkpoints may mark them frozen)
+        if hasattr(self.model, "encoder") and hasattr(self.model.encoder, "parameters"):
+            unfrozen = 0
+            for param in self.model.encoder.parameters():
+                if not param.requires_grad:
+                    param.requires_grad = True
+                    unfrozen += 1
+            print(f"[OPTIMIZER] 🔓 Encoder unfrozen params: {unfrozen}")
+        if hasattr(self.model, "decoder") and hasattr(self.model.decoder, "parameters"):
+            for param in self.model.decoder.parameters():
+                param.requires_grad = True
         optimizer_config = self.training_settings.optimizer
         param_groups = []
         metric_lr_scale = float(getattr(optimizer_config, 'metric_lr_scale', 0.25))

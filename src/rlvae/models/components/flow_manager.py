@@ -33,7 +33,7 @@ class FlowManager(nn.Module):
         self,
         latent_dim: int,
         n_flows: int = 8,
-        flow_hidden_size: int = 256,
+        flow_hidden_size: int = 64,
         flow_n_blocks: int = 2,
         flow_n_hidden: int = 1,
         device: Optional[torch.device] = None,

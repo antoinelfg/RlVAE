@@ -117,7 +117,7 @@ def extract_diverse_metric(
     model,
     architecture,
     latent_dim,
-    temperature=0.5,
+    temperature=0.2,
     regularization=0.01,
     num_centroids=50,
     save_dir="data/pretrained",
@@ -426,8 +426,16 @@ def extract_diverse_metric(
     
     metric_path = save_path / f"metric_diverse_{architecture}_ld{latent_dim}_{timestamp}.pt"
     torch.save(metric_data, metric_path)
+    # Also write a stable name for easy retrieval/overwriting
+    stable_metric_path = save_path / "metric_diverse_latest.pt"
+    try:
+        torch.save(metric_data, stable_metric_path)
+    except Exception as copy_exc:
+        print(f"⚠️  Could not write stable metric copy: {copy_exc}")
     
     print(f"✅ Saved DIVERSE metric to {metric_path}")
+    if stable_metric_path.exists():
+        print(f"✅ Latest metric also saved to {stable_metric_path}")
     print(f"   Architecture: {architecture.upper()}")
     print(f"   Latent dim: {latent_dim}")
     print(f"   Eigenvalue ratio: {eigenval_ratio.item():.2f}x")
@@ -519,6 +527,8 @@ def main():
                        help="Metric temperature (higher=more diverse)")
     parser.add_argument("--regularization", "-R", type=float, default=0.01,
                        help="Metric regularization (lower=more diverse)")
+    parser.add_argument("--save-dir", type=str, default="data/pretrained",
+                       help="Directory to save the trained components and metric (default: data/pretrained)")
     parser.add_argument("--preset", choices=["max_diversity", "balanced", "conservative"],
                        help="Use preset parameter combinations")
     parser.add_argument("--wandb-group", type=str, default=None,
@@ -744,7 +754,8 @@ def main():
         model, args.architecture, args.latent_dim,
         temperature=args.temperature, 
         regularization=args.regularization,
-        input_dim=(3, 64, 64) # Pass input_dim here
+        input_dim=(3, 64, 64), # Pass input_dim here
+        save_dir=args.save_dir,
     )
     
     component_paths['metric'] = metric_path

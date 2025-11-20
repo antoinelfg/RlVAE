@@ -122,12 +122,12 @@ settings:
     losses:
       beta: 1.0
       riemannian_beta: 1.0
-      flow_weight: 1.0
+      flow_weight: 10.0
       loop_penalty_weight: 0.0
       mu_l2_weight: 0
       mu_volume_weight: 0.0           # Disable μ volume bias for cleaner gradients
-      mu_centroid_weight: 0.0         # Keep centroid pull off unless desired
-      metric_representation: g
+      mu_centroid_weight: 5.0         # Keep centroid pull off unless desired
+      metric_representation: ginv
       kl_prior_mode: uniform
       kl_metric_eval_point: mu
       kl_use_metric_normalization: false  # FIX: Disable metric normalization in KL
@@ -138,12 +138,12 @@ settings:
       use_pushforward_metric: true
       use_flow_corrections: true
       kl_include_logZ_in_loss: true
-      kl_flip_logq_sign: true
+      kl_flip_logq_sign: false
       kl_free_bits: 0.0
 
     posterior:
       type: riemannian_rhmc
-      rhmc_steps: 5                     # Slightly more exploration
+      rhmc_steps: 8                     # Slightly more exploration
       rhmc_step_size: 0.03              # Larger step size for better mixing
       rhmc_alpha: 0.3                   # FIX: Increased for better Σ_μ scale
       rhmc_eps_reg: 1.0e-4               # FIX: Standard regularization
@@ -171,7 +171,7 @@ settings:
       maha_clip: 20.0
       cov_norm_mode: none                # FIX: No normalization
       sigma_normalization_mode: none     # FIX: PRESERVE anisotropy - no normalization
-      initial_target_radius: 0        # Target Euclidean radius for Σ-based draw
+      initial_target_radius: 0.2        # Target Euclidean radius for Σ-based draw
       max_cov_eig: inf                 # Softer cap to avoid constant clamping
     
       rhmc_kl_mode: mc
@@ -182,11 +182,19 @@ settings:
     mu_alignment_enabled: false
 
     metric:
-      path: outputs/stages/B_RHVAE_MLP_2_SPRITES/metric_rescaled.pt  # Isotropic 10x rescale (no anisotropy boost)
+      # Use the latest diverse Stage-B metric to recover the bean structure.
+      path: outputs/stages/B_RHVAE_MLP_2_SPRITES/metric_diverse_latest.pt
       trainable: false
       init_from_fixed: true
-      temperature_override: 0.3
+      temperature_override: 0.75
       regularization_override: 0.01
+      normalize_weight_sum: false
+      topk_weights: 20
+      #weight_kernel: mahalanobis_normed
+      weight_metric_normalization: none
+      use_background_identity: false
+      bg_strength: 0.0
+      eig_ceiling: 50.0
       regularization_weight: 0.0
       update_frequency: null
 
@@ -210,11 +218,11 @@ settings:
   training:
     strategy:
       max_epochs: 200
-      gradient_clip_val: 1.0
-      precision: 16-mixed
+      gradient_clip_val: 0.5
+      precision: 32
       accelerator: gpu
       devices: 1
-      accumulate_grad_batches: 1
+      accumulate_grad_batches: 4
       log_every_n_steps: 5
       val_check_interval: 0.5
       num_sanity_val_steps: 2
@@ -223,7 +231,7 @@ settings:
 
     optimizer:
       name: adam
-      lr: 2.0e-4
+      lr: 1.0e-5
       weight_decay: 1.0e-4
       betas: [0.9, 0.999]
 
@@ -231,7 +239,7 @@ settings:
       name: reduce_on_plateau
       mode: min
       factor: 0.8
-      patience: 5
+      patience: 50
       min_lr: 1.0e-7
       cooldown: 0
       threshold: 1.0e-3
@@ -257,7 +265,7 @@ settings:
       stage_a:
         enabled: false
         epochs: 100
-        lr: 1.0e-4
+        lr: 1.0e-5
         batch_size: 64
         architecture: mlp
         latent_dim: 2
@@ -275,12 +283,12 @@ settings:
       stage_c:
         enabled: true
         epochs: 200
-        lr: 1.0e-4
+        lr: 1.0e-5
         riemannian_beta: 1.0
         posterior:
           rhmc_alpha: 0.3                # FIX: Override with diagnostic-based value
-          rhmc_steps: 3                  # FIX: Ensure RHMC is active
-          rhmc_step_size: 0.02           # FIX: Match increased step size
+          rhmc_steps: 8                  # FIX: Ensure RHMC is active
+          rhmc_step_size: 0.05           # FIX: Match increased step size
           max_position_norm: 0.0
           max_position_step: 1.0         # FIX: Match increased position step limit
           max_velocity_norm: 2.0         # FIX: Match increased velocity limit
@@ -293,7 +301,7 @@ settings:
   pipeline:
     mode: three_stage
     run_stage_a: false
-    run_stage_b: false
+    run_stage_b: true
     run_stage_c: true
     run_sampling: false
     resume_from:

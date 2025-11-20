@@ -19,6 +19,7 @@ import warnings
 import os
 
 from .metric_utils import compute_metric_weights, normalize_metric_atoms
+from ...utils.stagec_debugger import stagec_debugger
 
 _INVERSE_FALLBACK_COUNTER = 0
 
@@ -551,6 +552,29 @@ class MetricTensor(nn.Module):
                 print(f"[MetricDebug] ||G·G⁻¹ - I|| ≈ {err:.3e}, mean log|det(G⁻¹)| ≈ {logdet:.3f}, "
                       f"sum_w mean={sum_w.mean().item():.3f} min={sum_w.min().item():.3f} max={sum_w.max().item():.3f}, "
                       f"dmin mean={d2min.mean().item():.3f}, T={float(temperature):.3f}")
+        if stagec_debugger.enabled:
+            try:
+                stagec_debugger.log_event(
+                    "metric_tensor_precision",
+                    {
+                        "batch": z.shape[0],
+                        "latent_dim": z.shape[-1],
+                        "temperature": float(temperature),
+                        "min_eig": float(evals.min().item()),
+                        "max_eig": float(evals.max().item()),
+                        "use_background_identity": bool(self.use_background_identity),
+                    },
+                )
+            except Exception:
+                stagec_debugger.log_event(
+                    "metric_tensor_precision",
+                    {
+                        "batch": z.shape[0],
+                        "latent_dim": z.shape[-1],
+                        "temperature": float(temperature),
+                        "use_background_identity": bool(self.use_background_identity),
+                    },
+                )
 
         if return_metric:
             return G_inv, G_metric

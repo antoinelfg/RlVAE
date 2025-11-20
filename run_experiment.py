@@ -70,6 +70,10 @@ try:
     from rlvae.models.components.metric_utils import compute_metric_weights, normalize_metric_atoms, half_logdet_volume
 except Exception:
     from models.components.metric_utils import compute_metric_weights, normalize_metric_atoms
+try:
+    from rlvae.utils.stagec_debugger import stagec_debugger
+except Exception:
+    from utils.stagec_debugger import stagec_debugger
 
 
 class ExperimentRunner:
@@ -3020,6 +3024,14 @@ class ExperimentRunner:
             self.config = OmegaConf.create(OmegaConf.to_container(stage_c_base, resolve=False))
             cfg = self.config
             print("\n=== [Stage C] RLVAE training ===")
+            stagec_debugger.log_event(
+                "stagec_start",
+                {
+                    "arch": getattr(cfg.model.encoder, 'architecture', None) if hasattr(cfg.model, 'encoder') and cfg.model.encoder is not None else 'mlp',
+                    "latent_dim": getattr(cfg.model, 'latent_dim', None),
+                    "metric_impl": getattr(cfg.experiment.stage_b, 'implementation', None),
+                },
+            )
             
             # Define architecture and latent_dim for Stage C
             arch = cfg.model.encoder.architecture if hasattr(cfg.model, 'encoder') and cfg.model.encoder is not None else 'mlp'
@@ -3070,17 +3082,20 @@ class ExperimentRunner:
                 # Train the model
                 print(f"[Stage C] 🚀 Starting RLVAE training with enhanced components...")
                 trainer.fit(model_wrapper, data_module)
-                
+
                 print(f"[Stage C] ✅ RLVAE training completed successfully!")
+                stagec_debugger.log_event("stagec_training_complete", {"status": "success"})
                 # Reuse the trained wrapper later if needed; also avoid
                 # re-instantiation that causes metric to be loaded twice.
                 self._stage_c_model_wrapper = model_wrapper
-                
+
             except Exception as e:
                 print(f"[Stage C] ❌ RLVAE training failed: {e}")
+                stagec_debugger.log_fallback("stagec_training_complete", reason="exception", payload={"error": str(e)})
                 raise
             # Enhanced path completes here; avoid legacy path below that
             # would recreate the model and reload the metric a second time.
+            stagec_debugger.flush()
             return
         else:
             # Fallback: Load components individually (legacy method)
@@ -3493,6 +3508,18 @@ class ExperimentRunner:
                         safeties[key] = float(val)
                     except Exception:
                         safeties[key] = float(default)
+                stagec_debugger.log_event(
+                    "stagec_rhmc_params_resolved",
+                    {
+                        "rhmc_steps": rh_steps,
+                        "rhmc_step_size": rh_eps,
+                        "alpha": rh_alpha,
+                        "eps_reg": rh_eps_reg,
+                        "safeties": safeties,
+                        "kl_metric_eval_point": getattr(self.config.model, 'kl_metric_eval_point', 'z'),
+                        "env_alpha": os.environ.get("RLVAE_ALPHA"),
+                    },
+                )
                 kl_eval = getattr(self.config.model, 'kl_metric_eval_point', 'z')
                 kl_norm = getattr(self.config.model, 'kl_use_metric_normalization', False)
                 kl_norm_mode = getattr(self.config.model, 'kl_metric_norm_mode', 'none')

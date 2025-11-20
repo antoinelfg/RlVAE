@@ -39,6 +39,7 @@ from .components.native_inverse_metric import NativeInverseMetricTensor
 from .components.manifold_sampler import ManifoldSampler
 from .components.metric_update_manager import MetricUpdateManager
 from pythae.models.base.base_utils import ModelOutput
+from ..utils.stagec_debugger import stagec_debugger
 
 
 class ModularRiemannianFlowVAE(RiemannianFlowVAE):
@@ -379,7 +380,7 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         
         # Allow choosing metric representation from config (default 'g'), and pass mu regularizers from config
         metric_rep_pref = loss_cfg.get('metric_representation', 'g')
-        mu_centroid_weight = float(loss_cfg.get('mu_centroid_weight', getattr(self.config, 'mu_centroid_weight', 0.0)))
+        mu_centroid_weight = float(loss_cfg.get('mu_centroid_weight', getattr(self.config, 'mu_centroid_weight', 5.0)))
         mu_volume_weight = float(loss_cfg.get('mu_volume_weight', getattr(self.config, 'mu_volume_weight', 0.0)))
         self.loss_manager = LossManager(
             beta=float(loss_cfg.get('beta', self.config_resolved.get('beta', 1.0))),
@@ -1212,6 +1213,17 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             encoder_out = self.encoder(x_0)
         mu = encoder_out.embedding
         log_var = encoder_out.log_covariance
+        stagec_debugger.log_event(
+            "encoder_forward",
+            {
+                "x_shape": list(x_0.shape),
+                "mu_shape": list(mu.shape),
+                "log_var_shape": list(log_var.shape),
+                "mu_dtype": str(mu.dtype),
+                "log_var_dtype": str(log_var.dtype),
+                "training": bool(self.training),
+            },
+        )
 
         if os.environ.get("RLVAE_DEBUG", "0") == "1":
             log_var_min = log_var.min().item()
@@ -1323,9 +1335,26 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
                 self._mu_align_probe_done = True
         except Exception:
             pass
+        if stagec_debugger.enabled:
+            try:
+                with torch.no_grad():
+                    mu_stats = {
+                        "mu_alignment_enabled": bool(getattr(self, "mu_alignment_enabled", False)),
+                        "mu_align_ready": bool(getattr(self, "_mu_align_ready", False)),
+                        "mu_mean": float(mu.mean().item()),
+                        "mu_std": float(mu.std(unbiased=False).item()),
+                        "log_var_mean": float(log_var.mean().item()),
+                        "log_var_std": float(log_var.std(unbiased=False).item()),
+                    }
+            except Exception:
+                mu_stats = {
+                    "mu_alignment_enabled": bool(getattr(self, "mu_alignment_enabled", False)),
+                    "mu_align_ready": bool(getattr(self, "_mu_align_ready", False)),
+                }
+            stagec_debugger.log_event("mu_alignment_status", mu_stats)
         # TRACE encoder outputs
         try:
-    
+
             if os.environ.get('RLVAE_TRACE', '0') == '1':
                 print(f"TRACE ENCODER mu: dtype={mu.dtype}, shape={tuple(mu.shape)}, mean={mu.mean().item():.4g}, std={mu.std().item():.4g}, min={mu.min().item():.4g}, max={mu.max().item():.4g}")
                 if isinstance(log_var, torch.Tensor):
@@ -1617,6 +1646,8 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         result = {
             'reconstruction': recon_x,
             'latent_samples': z_seq_tensor,
+            'mu': mu,
+            'log_var': log_var,
             'reconstruction_loss': losses['reconstruction_loss'],
             'kl_divergence_loss': losses['kl_divergence_loss'],
             'flow_loss': losses['flow_loss'],

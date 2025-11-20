@@ -15,6 +15,14 @@ import torch.nn.functional as F
 
 from .metric_utils import half_logdet_volume
 from ...utils.grad_debug import volume_grad_sanity
+from ...utils.stagec_debugger import stagec_debugger
+
+_HALF_DTYPES = (torch.float16, torch.bfloat16)
+
+
+def _to_float32(t: torch.Tensor) -> torch.Tensor:
+    """Promote low-precision tensors to float32 for linalg ops."""
+    return t.float() if t.dtype in _HALF_DTYPES else t
 
 
 def _symmetrize(matrix: torch.Tensor) -> torch.Tensor:
@@ -46,12 +54,29 @@ def _safe_cholesky(matrix: torch.Tensor, jitter: float) -> Tuple[torch.Tensor, t
         # If cholesky_ex reports non‑SPD, trigger jitter path
         if isinstance(info, torch.Tensor) and info.numel() > 0 and (info > 0).any():
             raise RuntimeError("cholesky_ex reported non‑SPD")
+        stagec_debugger.log_event(
+            "safe_cholesky",
+            {
+                "shape": list(matrix.shape),
+                "jitter": float(jitter),
+                "stabilized": False,
+            },
+        )
         return chol, matrix, False  # No stabilization needed
     except RuntimeError:
         d = matrix.shape[-1]
         eye = torch.eye(d, device=matrix.device, dtype=matrix.dtype).unsqueeze(0)
         stabilized = matrix + jitter * eye
         chol, _ = _chol(stabilized)
+        stagec_debugger.log_fallback(
+            "safe_cholesky",
+            reason="jitter_applied",
+            payload={
+                "shape": list(matrix.shape),
+                "jitter": float(jitter),
+                "d": d,
+            },
+        )
         return chol, stabilized, True  # Stabilization applied
 
 
@@ -111,6 +136,16 @@ def log_q_riem(
     """
     Compute log-density log N_Riem(z | μ, Σ) with Σ assumed SPD.
     """
+    if stagec_debugger.enabled:
+        stagec_debugger.log_event(
+            "log_q_riem_call",
+            {
+                "z_shape": list(z.shape),
+                "mu_shape": list(mu.shape),
+                "Sigma_shape": list(Sigma.shape),
+                "min_eig": float(min_eig),
+            },
+        )
     # Accept inputs with arbitrary leading batch dims [..., D] and [..., D, D]
     # Broadcast mu and Sigma to z's leading shape if necessary
     D = z.shape[-1]
@@ -162,25 +197,45 @@ def log_q_riem(
     
     # DIAGNOSTIC: Log stabilization details
     if os.environ.get("RLVAE_DEBUG", "0") == "1":
+        Sigma_dbg = _to_float32(Sigma_flat)
+        stab_dbg = _to_float32(stabilized_sigma)
         try:
-            eigvals_orig = torch.linalg.eigvalsh(Sigma_flat)
-            eigvals_stab = torch.linalg.eigvalsh(stabilized_sigma)
-            logdet_orig = torch.linalg.slogdet(Sigma_flat)[1]
-            logdet_stab = torch.linalg.slogdet(stabilized_sigma)[1]
-            
-            print(f"\n[LOG_Q_RIEM STABILIZATION]")
-            print(f"  min_eig (jitter):     {min_eig:.6f}")
-            print(f"  was_stabilized:       {was_stabilized}")
-            print(f"  Original Σ:")
-            print(f"    eigenvalues:        min={eigvals_orig.min().item():.6f}, max={eigvals_orig.max().item():.6f}")
-            print(f"    log|Σ|:             {logdet_orig.mean().item():.6f}")
-            if was_stabilized:
-                print(f"  Stabilized Σ:")
-                print(f"    eigenvalues:        min={eigvals_stab.min().item():.6f}, max={eigvals_stab.max().item():.6f}")
-                print(f"    log|Σ|:             {logdet_stab.mean().item():.6f}")
-                print(f"    Δ log|Σ|:           {(logdet_stab - logdet_orig).mean().item():+.6f}")
+            eigvals_orig = torch.linalg.eigvalsh(Sigma_dbg)
         except Exception as e:
-            print(f"[LOG_Q_RIEM STABILIZATION] Diagnostic failed: {e}")
+            eigvals_orig = None
+            print(f"[LOG_Q_RIEM STABILIZATION] eigvals_orig failed: {e}")
+        try:
+            eigvals_stab = torch.linalg.eigvalsh(stab_dbg)
+        except Exception as e:
+            eigvals_stab = None
+            print(f"[LOG_Q_RIEM STABILIZATION] eigvals_stab failed: {e}")
+        try:
+            logdet_orig = torch.linalg.slogdet(Sigma_dbg)[1]
+        except Exception as e:
+            logdet_orig = None
+            print(f"[LOG_Q_RIEM STABILIZATION] logdet_orig failed: {e}")
+        try:
+            logdet_stab = torch.linalg.slogdet(stab_dbg)[1]
+        except Exception as e:
+            logdet_stab = None
+            print(f"[LOG_Q_RIEM STABILIZATION] logdet_stab failed: {e}")
+
+        print(f"[LOG_Q_RIEM STABILIZATION]")
+        print(f"  min_eig (jitter):     {min_eig:.6f}")
+        print(f"  was_stabilized:       {was_stabilized}")
+        print(f"  Original Σ:")
+        if eigvals_orig is not None:
+            print(f"    eigenvalues:        min={eigvals_orig.min().item():.6f}, max={eigvals_orig.max().item():.6f}")
+        if logdet_orig is not None:
+            print(f"    log|Σ|:             {logdet_orig.mean().item():.6f}")
+        if was_stabilized:
+            print(f"  Stabilized Σ:")
+            if eigvals_stab is not None:
+                print(f"    eigenvalues:        min={eigvals_stab.min().item():.6f}, max={eigvals_stab.max().item():.6f}")
+            if logdet_stab is not None:
+                print(f"    log|Σ|:             {logdet_stab.mean().item():.6f}")
+            if logdet_orig is not None and logdet_stab is not None:
+                print(f"    Δ log|Σ|:           {(logdet_stab - logdet_orig).mean().item():+.6f}")
     
     diff = (z_flat - mu_flat).unsqueeze(-1)
     diff32 = diff.float() if diff.dtype != chol.dtype else diff
@@ -197,74 +252,20 @@ def log_q_riem(
         const_term = -const
         
         print(f"\n{'='*80}")
-        print(f"[LOG_Q_RIEM FULL DECOMPOSITION]")
-        print(f"{'='*80}")
-        
-        print(f"\n[STANDARD DECOMPOSITION]")
-        print(f"  Quadratic term: mean={quad_term.mean().item():.4f}, min={quad_term.min().item():.4f}, max={quad_term.max().item():.4f}")
-        print(f"  Volume term:    mean={vol_term.mean().item():.4f}")
-        print(f"  Constant term:  {const_term:.4f}")
-        print(f"  Total log_q:    mean={(quad_term + vol_term + const_term).mean().item():.4f}")
-        print(f"  ||z - μ||:      mean={torch.norm(z_flat - mu_flat, dim=-1).mean().item():.4f}")
-        print(f"  Σ eigenvalues:  min={eigvals_stab.min().item():.6f}, max={eigvals_stab.max().item():.6f}")
-        
-        # Eigenbasis decomposition
-        try:
-            # Eigendecomposition of Σ: Σ = V Λ Vᵀ
-            eigvals_sigma, eigvecs_sigma = torch.linalg.eigh(stabilized_sigma)
-            
-            # Transform diff to eigenspace: y = Vᵀ(z-μ)
-            diff_flat = (z_flat - mu_flat).unsqueeze(-1)
-            y = torch.einsum('bij,bj->bi', eigvecs_sigma.transpose(-1, -2), diff_flat.squeeze(-1))
-            
-            # Contribution per eigenvalue: y_i² / λ_i
-            contrib_per_eig = (y ** 2) / eigvals_sigma.clamp(min=1e-12)
-            
-            # Mahalanobis distance²: sum of contributions
-            mahal_sq = contrib_per_eig.sum(dim=-1)
-            euclidean_sq = torch.norm(diff_flat.squeeze(-1), dim=-1) ** 2
-            
-            print(f"\n[MAHALANOBIS EIGENBASIS DECOMPOSITION]")
-            print(f"  Euclidean ||z-μ||²:    mean={euclidean_sq.mean().item():.4f}")
-            print(f"  Mahalanobis (z-μ)ᵀΣ⁻¹(z-μ): mean={mahal_sq.mean().item():.4f}")
-            print(f"  Ratio (Mahal/Euclid):  {(mahal_sq.mean() / euclidean_sq.mean().clamp(min=1e-12)).item():.4f}")
-            print(f"\n  Per-eigenvalue contributions (batch mean, first sample detailed):")
-            
-            D_local = eigvals_sigma.shape[-1]
-            for i in range(D_local):
-                mean_contrib = contrib_per_eig[:, i].mean().item()
-                first_y = y[0, i].item()
-                first_lambda = eigvals_sigma[0, i].item()
-                first_contrib = contrib_per_eig[0, i].item()
-                print(f"    Dim {i}: λ={first_lambda:.4f}, y[0]={first_y:.4f}, y²/λ={first_contrib:.4f} (batch mean: {mean_contrib:.4f})")
-            
-            # Check which dimensions dominate
-            mean_contribs = contrib_per_eig.mean(dim=0)
-            total_contrib = mean_contribs.sum()
-            sorted_indices = torch.argsort(mean_contribs, descending=True)
-            cumulative = 0.0
-            print(f"\n  Dominant dimensions (contribution to Mahalanobis²):")
-            for idx in sorted_indices:
-                contrib_pct = (mean_contribs[idx] / total_contrib * 100).item()
-                cumulative += contrib_pct
-                if cumulative <= 90.0:  # Show top contributors up to 90%
-                    print(f"    Dim {idx.item()}: {contrib_pct:.1f}% (cumulative: {cumulative:.1f}%)")
-            
-            # Compare with expected χ²(D)
-            print(f"\n[CHI-SQUARED FIT]")
-            print(f"  Dimension D:           {D_local}")
-            print(f"  Expected Mahal²:       χ²({D_local}) mean = {D_local:.1f}")
-            print(f"  Observed Mahal²:       {mahal_sq.mean().item():.4f}")
-            print(f"  Deviation:             {(mahal_sq.mean().item() - D_local):.4f} ({100*(mahal_sq.mean().item() - D_local)/D_local:.1f}%)")
-            
-            if abs(mahal_sq.mean().item() - D_local) > 2 * np.sqrt(2 * D_local):
-                print(f"  ⚠️  WARNING: Significant deviation from χ²({D_local}) distribution!")
-                print(f"               Expected 2σ range: [{D_local - 2*np.sqrt(2*D_local):.1f}, {D_local + 2*np.sqrt(2*D_local):.1f}]")
-        
-        except Exception as e:
-            print(f"[LOG_Q_RIEM EIGENBASIS] Decomposition failed: {e}")
-        
-        print(f"\n{'='*80}\n")
+        if os.environ.get("RLVAE_DEBUG", "0") == "1":
+            try:
+                eigvals_sigma, eigvecs_sigma = torch.linalg.eigh(stab_dbg)
+                diff_flat = (z_flat - mu_flat).unsqueeze(-1)
+                y = torch.einsum('bij,bj->bi', eigvecs_sigma.transpose(-1, -2), diff_flat.squeeze(-1))
+                contrib_per_eig = (y ** 2) / eigvals_sigma.clamp(min=1e-12)
+                mahal_sq = contrib_per_eig.sum(dim=-1)
+                euclidean_sq = torch.norm(diff_flat.squeeze(-1), dim=-1) ** 2
+
+                print(f"\n[MAHALANOBIS EIGENBASIS DECOMPOSITION]")
+                print(f"  Euclidean ||z-μ||²:    mean={euclidean_sq.mean().item():.4f}")
+                print(f"  Mahalanobis (z-μ)ᵀΣ⁻¹(z-μ): mean={mahal_sq.mean().item():.4f}")
+            except Exception as e:
+                print(f"[LOG_Q_RIEM DIAGNOSE] failed: {e}")
     
     out = -0.5 * quad_form - 0.5 * log_det - const
     out = out.to(mu.dtype)
@@ -406,16 +407,22 @@ class RiemannianRHMCPosterior(nn.Module):
         self.initial_volume_tolerance = float(_cfg_get('initial_volume_tolerance', 0.))
         self.initial_max_retries = int(_cfg_get('initial_max_retries', 0))
         self.initial_volume_logdet_tol = float(_cfg_get('initial_volume_logdet_tol', 0.0))
-        self.initial_volume_max_adjustments = int(_cfg_get('initial_volume_max_adjustments', 0))
+        self.initial_volume_max_adjustments = int(_cfg_get('initial_volume_max_adjustments', 4))
         self.initial_volume_shrink_factor = float(_cfg_get('initial_volume_shrink_factor', 0.5))
+        self.initial_volume_grow_factor = float(_cfg_get('initial_volume_grow_factor', 2.0))
         self.initial_volume_min_alpha = float(_cfg_get('initial_volume_min_alpha', 1e-4))
+        self.initial_volume_max_alpha = float(_cfg_get('initial_volume_max_alpha', 10.0))
         self.initial_volume_warmup_steps = int(_cfg_get('initial_volume_warmup_steps', 0))
         self.initial_volume_warmup_step_size = float(_cfg_get('initial_volume_warmup_step_size', 0.05))
         self.initial_volume_warmup_max_step = float(_cfg_get('initial_volume_warmup_max_step', 0.0))
         if not (0.0 < self.initial_volume_shrink_factor < 1.0):
             self.initial_volume_shrink_factor = 0.5
+        if not math.isfinite(self.initial_volume_grow_factor) or self.initial_volume_grow_factor <= 1.0:
+            self.initial_volume_grow_factor = 2.0
         if self.initial_volume_min_alpha <= 0.0:
             self.initial_volume_min_alpha = 1e-4
+        if not math.isfinite(self.initial_volume_max_alpha) or self.initial_volume_max_alpha <= self.initial_volume_min_alpha:
+            self.initial_volume_max_alpha = max(self.initial_volume_min_alpha * 10.0, 1.0)
         self.max_quadratic_growth = float(_cfg_get('max_quadratic_growth', 12.0))
         if not math.isfinite(self.max_quadratic_growth) or self.max_quadratic_growth <= 0:
             self.max_quadratic_growth = 0.0
@@ -658,6 +665,17 @@ class RiemannianRHMCPosterior(nn.Module):
         Returns both the samples and the covariance used (for log-density).
         """
         batch_size, latent_dim = mu.shape
+        stagec_debugger.log_event(
+            "sample_initial_once_start",
+            {
+                "batch_size": batch_size,
+                "latent_dim": latent_dim,
+                "alpha": float(alpha),
+                "target_radius": float(target_radius or 0.0),
+                "use_factorized_G_mu": bool(self.use_factorized_G_mu),
+                "diagnostics_enabled": bool(diagnostics_enabled),
+            },
+        )
 
         try:
             if self.use_factorized_G_mu:
@@ -763,6 +781,16 @@ class RiemannianRHMCPosterior(nn.Module):
                 z_selected = z0.clone() if diagnostics_enabled and os.environ.get("RLVAE_DEBUG", "0") == "1" else None
                 # Optional manifold-aware acceptance: require non-decrease in log|G^{-1}|
                 z0 = self._initial_accept_volume(z0, mu, Sigma)
+                stagec_debugger.log_event(
+                    "sample_initial_once_factorized",
+                    {
+                        "candidate_stats": {
+                            "mean_norm": float(torch.norm(z0 - mu, dim=-1).mean().item()),
+                            "Sigma_logdet": float(torch.linalg.slogdet(Sigma.float())[1].mean().item()),
+                        },
+                        "target_radius": float(target_radius or 0.0),
+                    },
+                )
                 
                 # DIAGNOSTIC: Comprehensive initial sampling analysis with stage comparison
                 if diagnostics_enabled and os.environ.get("RLVAE_DEBUG", "0") == "1":
@@ -779,137 +807,155 @@ class RiemannianRHMCPosterior(nn.Module):
                     print("[RHMC DEBUG] standard path -> _make_covariance")
                 G_inv_mu = self._get_inverse_metric(mu)
                 Sigma = self._make_covariance(
-                    torch.linalg.inv(G_inv_mu),
+                    G_inv_mu,
                     alpha,
                     target_radius=target_radius,
                 )
-                print('checkkkkkk1')
-                chol, Sigma, _ = _safe_cholesky(Sigma, self.min_cov_eig)
-                if diagnostics_enabled and os.environ.get("RLVAE_DEBUG", "0") == "1":
-                    grad_counter = getattr(self, "_mu_gradient_diag_count", 0)
-                    if True:
-                        try:
-                            with torch.enable_grad():
-                                mu_dbg = mu.detach().clone().requires_grad_(True)
-                                print('are we here')
-                                G_mu_dbg = self._ctx['model'].G(mu_dbg)
-                                G_mu_dbg = _symmetrize(G_mu_dbg)
-                                half_logdet_mu_dbg = half_logdet_volume(G_mu_dbg.float(), 'g', jitter=self.eps_reg)
-                                logdet_mu_dbg = half_logdet_mu_dbg
-                                grad_mu_dbg = torch.autograd.grad(
-                                    logdet_mu_dbg.sum(),
-                                    mu_dbg,
-                                    retain_graph=False,
-                                    create_graph=False,
-                                    allow_unused=True,
-                                )[0]
-                            grad_mu_dbg = torch.zeros_like(mu) if grad_mu_dbg is None else grad_mu_dbg.detach()
-                            grad_norm = torch.norm(grad_mu_dbg, dim=-1)
-                            print("\n[MU GRADIENT DEBUG]")
-                            print(f"  log|G(μ)| mean={logdet_mu_dbg.mean().item():+.4f}")
-                            print(f"  ||∇ log|G(μ)|| mean={grad_norm.mean().item():.4f}, max={grad_norm.max().item():.4f}")
-                            centroids = getattr(self._ctx['model'], 'centroids_tens', None)
-                            if centroids is not None:
-                                centroids = centroids.to(mu.device, mu.dtype)
-                                dists = torch.cdist(mu.detach(), centroids)
-                                min_dists, min_idx = dists.min(dim=1)
-                                nearest = centroids[min_idx]
-                                dir_to_centroid = torch.nn.functional.normalize(nearest - mu.detach(), dim=-1)
-                                grad_dir = torch.nn.functional.normalize(grad_mu_dbg, dim=-1)
-                                align = (dir_to_centroid * grad_dir).sum(dim=-1)
-                                print(
-                                    f"  Nearest-centroid dist mean={min_dists.mean().item():.4f}, "
-                                    f"grad alignment mean={align.mean().item():.4f}"
-                                )
-                            else:
-                                print("  Centroids unavailable; skipping alignment diagnostic.")
-                        except Exception as grad_exc:
-                            print(f"[MU GRADIENT DEBUG] failed: {grad_exc}")
-                        self._mu_gradient_diag_count = grad_counter + 1
-                
-                B, D = mu.shape
-                K = int(getattr(self, 'initial_n_candidates', 1))
-                K = max(1, K)
-                
-                # Ensure chol has the correct shape [B, D, D]
-                if chol.ndim == 2:
-                    chol = chol.unsqueeze(0)  # [1, D, D] -> [B, D, D]
-                elif chol.ndim > 3:
-                    # Handle unexpected extra dimensions by reshaping
-                    # First, try to infer the correct dimensions
-                    total_elements = chol.numel()
-                    expected_elements = B * D * D
-                    if total_elements == expected_elements:
-                        chol = chol.reshape(B, D, D)
-                    else:
-                        # If dimensions don't match, try to infer from the tensor
-                        # Find the square root of the last two dimensions
-                        last_two_dims = chol.shape[-2:]
-                        if last_two_dims[0] == last_two_dims[1]:  # Square matrix
-                            inferred_D = last_two_dims[0]
-                            inferred_B = total_elements // (inferred_D * inferred_D)
-                            if inferred_B == B:
-                                chol = chol.reshape(B, inferred_D, inferred_D)
-                                D = inferred_D  # Update D to match the actual dimension
-                            else:
-                                # Fallback: use the last two dimensions as D x D
-                                chol = chol.reshape(-1, inferred_D, inferred_D)
-                                if chol.shape[0] != B:
-                                    chol = chol[:B] if chol.shape[0] > B else chol.expand(B, -1, -1)
-                                D = inferred_D
-                        else:
-                            raise RuntimeError(f"Cannot reshape chol tensor of shape {chol.shape} to [B={B}, D={D}, D={D}]. Total elements: {total_elements}, expected: {B * D * D}")
-                elif chol.shape[0] != B:
-                    # Handle batch size mismatch
-                    if chol.shape[0] == 1:
-                        chol = chol.expand(B, -1, -1)
-                    else:
-                        chol = chol[:B]  # Truncate or pad as needed
-                
-                eps = torch.randn(B, K, D, device=mu.device, dtype=chol.dtype)
-                
-                # Use batch matrix multiplication for efficiency
-                # chol: [B, D, D], eps: [B, K, D]
-                # We want: chol @ eps.transpose(-1, -2) -> [B, D, K]
-                # Then transpose to get [B, K, D]
-                transformed = torch.bmm(chol, eps.transpose(-1, -2)).transpose(-1, -2)  # [B, K, D]
-                z_cand = mu.float().unsqueeze(1) + transformed
-                # Evaluate 0.5 log|G^{-1}| at candidates and pick best per batch
-                with torch.no_grad():
-                    z_eval = z_cand.reshape(B * K, D)
-                    Gz = self._ctx['model'].G(z_eval)
-                    # Same selection score for the standard path
-                    h = half_logdet_volume(Gz, 'g', jitter=self.eps_reg).reshape(B, K)
-                best_idx = torch.argmax(h, dim=1)
-                
-                # DIAGNOSTIC: Analyze candidates before selection
-                if diagnostics_enabled and os.environ.get("RLVAE_DEBUG", "0") == "1":
-                    batch_counter = getattr(self, '_debug_batch_counter', 0)
-                    self._diagnose_candidates(z_cand.to(mu.dtype), mu, Sigma, h, best_idx, batch_counter)
-                    self._debug_batch_counter = batch_counter + 1
-                
-                z0 = z_cand[torch.arange(B, device=mu.device), best_idx]
-                z0 = z0.to(mu.dtype)
-                # Optional radial cap on initial displacement
+            debug_mode = os.environ.get("RLVAE_DEBUG", "0") == "1"
+            chol, Sigma, chol_was_stabilized = _safe_cholesky(Sigma, self.min_cov_eig)
+            if debug_mode and diagnostics_enabled:
+                grad_counter = getattr(self, "_mu_gradient_diag_count", 0)
                 try:
-                    max_norm = float(getattr(self, 'initial_max_norm', 0.0))
-                except Exception:
-                    max_norm = 0.0
-                if max_norm and max_norm > 0:
-                    delta = z0 - mu
-                    dnorm = torch.norm(delta, dim=-1, keepdim=True)
-                    scale = torch.clamp(max_norm / (dnorm + 1e-12), max=1.0)
-                    z0 = mu + scale * delta
-                # Save z_selected (after multi-try, before volume) for stage tracking
-                z_selected = z0.clone() if diagnostics_enabled and os.environ.get("RLVAE_DEBUG", "0") == "1" else None
-                z0 = self._initial_accept_volume(z0, mu, Sigma)
+                    with torch.enable_grad():
+                        mu_dbg = mu.detach().clone().requires_grad_(True)
+                        G_mu_dbg = self._ctx['model'].G(mu_dbg)
+                        G_mu_dbg = _symmetrize(G_mu_dbg)
+                        half_logdet_mu_dbg = half_logdet_volume(G_mu_dbg.float(), 'g', jitter=self.eps_reg)
+                        logdet_mu_dbg = half_logdet_mu_dbg
+                        grad_mu_dbg = torch.autograd.grad(
+                            logdet_mu_dbg.sum(),
+                            mu_dbg,
+                            retain_graph=False,
+                            create_graph=False,
+                            allow_unused=True,
+                        )[0]
+                    grad_mu_dbg = torch.zeros_like(mu) if grad_mu_dbg is None else grad_mu_dbg.detach()
+                    grad_norm = torch.norm(grad_mu_dbg, dim=-1)
+                    print("\n[MU GRADIENT DEBUG]")
+                    print(f"  log|G(μ)| mean={logdet_mu_dbg.mean().item():+.4f}")
+                    print(f"  ||∇ log|G(μ)|| mean={grad_norm.mean().item():.4f}, max={grad_norm.max().item():.4f}")
+                    centroids = getattr(self._ctx['model'], 'centroids_tens', None)
+                    if centroids is not None:
+                        centroids = centroids.to(mu.device, mu.dtype)
+                        dists = torch.cdist(mu.detach(), centroids)
+                        min_dists, min_idx = dists.min(dim=1)
+                        nearest = centroids[min_idx]
+                        dir_to_centroid = torch.nn.functional.normalize(nearest - mu.detach(), dim=-1)
+                        grad_dir = torch.nn.functional.normalize(grad_mu_dbg, dim=-1)
+                        align = (dir_to_centroid * grad_dir).sum(dim=-1)
+                        print(
+                            f"  Nearest-centroid dist mean={min_dists.mean().item():.4f}, "
+                            f"grad alignment mean={align.mean().item():.4f}"
+                        )
+                    else:
+                        print("  Centroids unavailable; skipping alignment diagnostic.")
+                except Exception as grad_exc:
+                    print(f"[MU GRADIENT DEBUG] failed: {grad_exc}")
+                self._mu_gradient_diag_count = grad_counter + 1
+
+            B, D = mu.shape
+            K = int(getattr(self, 'initial_n_candidates', 1))
+            K = max(1, K)
+
+            # Ensure chol has the correct shape [B, D, D]
+            if chol.ndim == 2:
+                chol = chol.unsqueeze(0)  # [1, D, D] -> [B, D, D]
+            elif chol.ndim > 3:
+                # Handle unexpected extra dimensions by reshaping
+                total_elements = chol.numel()
+                expected_elements = B * D * D
+                if total_elements == expected_elements:
+                    chol = chol.reshape(B, D, D)
+                else:
+                    last_two_dims = chol.shape[-2:]
+                    if last_two_dims[0] == last_two_dims[1]:  # Square matrix
+                        inferred_D = last_two_dims[0]
+                        inferred_B = total_elements // (inferred_D * inferred_D)
+                        if inferred_B == B:
+                            chol = chol.reshape(B, inferred_D, inferred_D)
+                            D = inferred_D
+                        else:
+                            chol = chol.reshape(-1, inferred_D, inferred_D)
+                            if chol.shape[0] != B:
+                                chol = chol[:B] if chol.shape[0] > B else chol.expand(B, -1, -1)
+                            D = inferred_D
+                    else:
+                        raise RuntimeError(
+                            f"Cannot reshape chol tensor of shape {chol.shape} to [B={B}, D={D}, D={D}]. "
+                            f"Total elements: {total_elements}, expected: {B * D * D}"
+                        )
+            elif chol.shape[0] != B:
+                # Handle batch size mismatch
+                if chol.shape[0] == 1:
+                    chol = chol.expand(B, -1, -1)
+                else:
+                    chol = chol[:B]
                 
-                # DIAGNOSTIC: Comprehensive initial sampling analysis with stage comparison
-                if diagnostics_enabled and os.environ.get("RLVAE_DEBUG", "0") == "1":
-                    self._diagnose_initial_sample(z_selected, z0, mu, Sigma, alpha)
-                    self._diagnose_metric_at_samples(z0, mu, z_selected)
-                
-                return z0, Sigma
+            eps = torch.randn(B, K, D, device=mu.device, dtype=chol.dtype)
+
+            # Use batch matrix multiplication for efficiency
+            # chol: [B, D, D], eps: [B, K, D]
+            # We want: chol @ eps.transpose(-1, -2) -> [B, D, K]
+            # Then transpose to get [B, K, D]
+            transformed = torch.bmm(chol, eps.transpose(-1, -2)).transpose(-1, -2)  # [B, K, D]
+            z_cand = mu.float().unsqueeze(1) + transformed
+            try:
+                Sigma_inv = torch.cholesky_inverse(chol.float())
+            except RuntimeError:
+                Sigma_inv = torch.pinverse(Sigma.float())
+            diff = (z_cand - mu.unsqueeze(1)).float()
+            mahal = torch.einsum('bkd,bij,bkj->bk', diff, Sigma_inv, diff)
+            # Evaluate 0.5 log|G^{-1}| at candidates and pick best per batch
+            with torch.no_grad():
+                z_eval = z_cand.reshape(B * K, D)
+                Gz = self._ctx['model'].G(z_eval)
+                # Same selection score for the standard path
+                h = half_logdet_volume(Gz, 'g', jitter=self.eps_reg).reshape(B, K)
+            best_idx = torch.argmax(h, dim=1)
+
+            # DIAGNOSTIC: Analyze candidates before selection
+            if diagnostics_enabled and os.environ.get("RLVAE_DEBUG", "0") == "1":
+                batch_counter = getattr(self, '_debug_batch_counter', 0)
+                self._diagnose_candidates(z_cand.to(mu.dtype), mu, Sigma, h, best_idx, batch_counter)
+                self._debug_batch_counter = batch_counter + 1
+            stagec_debugger.log_event(
+                "sample_initial_once_standard_candidates",
+                {
+                    "B": B,
+                    "K": K,
+                    "chol_was_stabilized": bool(chol_was_stabilized),
+                    "candidate_logdet_mean": float(h.mean().item()),
+                    "candidate_mahal_mean": float(mahal.mean().item()),
+                },
+            )
+            z0 = z_cand[torch.arange(B, device=mu.device), best_idx]
+            z0 = z0.to(mu.dtype)
+            # Optional radial cap on initial displacement
+            try:
+                max_norm = float(getattr(self, 'initial_max_norm', 0.0))
+            except Exception:
+                max_norm = 0.0
+            if max_norm and max_norm > 0:
+                delta = z0 - mu
+                dnorm = torch.norm(delta, dim=-1, keepdim=True)
+                scale = torch.clamp(max_norm / (dnorm + 1e-12), max=1.0)
+                z0 = mu + scale * delta
+            # Save z_selected (after multi-try, before volume) for stage tracking
+            z_selected = z0.clone() if diagnostics_enabled and os.environ.get("RLVAE_DEBUG", "0") == "1" else None
+            z0 = self._initial_accept_volume(z0, mu, Sigma)
+            
+            # DIAGNOSTIC: Comprehensive initial sampling analysis with stage comparison
+            if diagnostics_enabled and os.environ.get("RLVAE_DEBUG", "0") == "1":
+                self._diagnose_initial_sample(z_selected, z0, mu, Sigma, alpha)
+                self._diagnose_metric_at_samples(z0, mu, z_selected)
+            stagec_debugger.log_event(
+                "sample_initial_once_standard_result",
+                {
+                    "mean_norm": float(torch.norm(z0 - mu, dim=-1).mean().item()),
+                    "sigma_logdet": float(torch.linalg.slogdet(Sigma.float())[1].mean().item()),
+                },
+            )
+            return z0, Sigma
         except Exception as exc:
             if getattr(self, '_ctx', None) and getattr(self._ctx.get('model', None), 'riemannian_strict', False) or os.environ.get('RLVAE_STRICT', '0') == '1':
                 raise RuntimeError(f"RiemannianRHMCPosterior: initial sampling failed under strict mode: {exc}")
@@ -935,7 +981,9 @@ class RiemannianRHMCPosterior(nn.Module):
         shrink_steps = max(0, int(self.initial_volume_max_adjustments))
         volume_tol = float(max(0.0, self.initial_volume_logdet_tol))
         shrink_factor = float(min(max(self.initial_volume_shrink_factor, 1e-3), 0.999))
+        grow_factor = float(max(self.initial_volume_grow_factor, 1.001))
         min_alpha = float(max(self.initial_volume_min_alpha, 1e-6))
+        max_alpha = float(max(self.initial_volume_max_alpha, min_alpha * 1.01))
         if volume_tol <= 0.0:
             shrink_steps = 0
 
@@ -947,8 +995,19 @@ class RiemannianRHMCPosterior(nn.Module):
         debug_mode = os.environ.get("RLVAE_DEBUG", "0") == "1"
 
         with torch.no_grad():
-            logdet_mu = torch.linalg.slogdet(self._get_inverse_metric(mu))[1]
+            G_inv_mu_dbg = _to_float32(self._get_inverse_metric(mu))
+            logdet_mu = torch.linalg.slogdet(G_inv_mu_dbg)[1]
         logdet_mu_mean = logdet_mu.mean().item()
+        stagec_debugger.log_event(
+            "sample_initial_riemannian_start",
+            {
+                "alpha": float(alpha),
+                "shrink_steps": shrink_steps,
+                "volume_tol": volume_tol,
+                "initial_target_radius": float(getattr(self, "initial_target_radius", 0.0)),
+                "logdet_mu_mean": logdet_mu_mean,
+            },
+        )
 
         last_z = None
         last_sigma = None
@@ -970,9 +1029,26 @@ class RiemannianRHMCPosterior(nn.Module):
                 except Exception:
                     print(f"[RHMC DEBUG] using _make_covariance for attempt {attempt}")
             with torch.no_grad():
-                logdet_z0 = torch.linalg.slogdet(self._get_inverse_metric(z0))[1]
+                G_inv_z0_dbg = _to_float32(self._get_inverse_metric(z0))
+                logdet_z0 = torch.linalg.slogdet(G_inv_z0_dbg)[1]
             logdet_z0_mean = logdet_z0.mean().item()
             delta = logdet_z0_mean - logdet_mu_mean
+            if delta < -volume_tol:
+                action_hint = "grow"
+            elif delta > volume_tol:
+                action_hint = "shrink"
+            else:
+                action_hint = "accept"
+            stagec_debugger.log_event(
+                "sample_initial_riemannian_attempt",
+                {
+                    "attempt": attempt,
+                    "alpha": alpha_current,
+                    "target_radius": target_radius_current,
+                    "delta_logdet": delta,
+                    "action": action_hint,
+                },
+            )
 
             if debug_mode:
                 print(
@@ -983,15 +1059,32 @@ class RiemannianRHMCPosterior(nn.Module):
 
             last_z, last_sigma, last_delta = z0, Sigma, delta
 
-            if shrink_steps == 0 or delta >= -volume_tol or attempt == shrink_steps:
+            if abs(delta) <= volume_tol:
                 break
 
-            alpha_current = max(alpha_current * shrink_factor, min_alpha)
-            if target_radius_current > 0:
-                target_radius_current = max(
-                    target_radius_current * math.sqrt(shrink_factor),
-                    1e-6,
+            if attempt >= shrink_steps:
+                break
+
+            if delta < -volume_tol:
+                alpha_current = min(alpha_current * grow_factor, max_alpha)
+                stagec_debugger.log_event(
+                    "sample_initial_riemannian_adjust",
+                    {"attempt": attempt, "action": "grow", "alpha": alpha_current, "delta": delta},
                 )
+                continue
+
+            if delta > volume_tol:
+                alpha_current = max(alpha_current * shrink_factor, min_alpha)
+                if target_radius_current > 0:
+                    target_radius_current = max(
+                        target_radius_current * math.sqrt(shrink_factor),
+                        1e-6,
+                    )
+                stagec_debugger.log_event(
+                    "sample_initial_riemannian_adjust",
+                    {"attempt": attempt, "action": "shrink", "alpha": alpha_current, "delta": delta},
+                )
+                continue
 
         if last_z is None or last_sigma is None:
             raise RuntimeError("Adaptive initial sampling failed to produce a sample.")
@@ -1005,13 +1098,28 @@ class RiemannianRHMCPosterior(nn.Module):
             )
             if debug_mode:
                 with torch.no_grad():
-                    warmed_logdet = torch.linalg.slogdet(self._get_inverse_metric(last_z))[1]
+                    warmed_logdet = torch.linalg.slogdet(_to_float32(self._get_inverse_metric(last_z)))[1]
                 print(
                     f"[INITIAL WARMUP] steps={self.initial_volume_warmup_steps} "
                     f"logdet(z_warm)={warmed_logdet.mean().item():+.4f} "
                     f"Δ={warmed_logdet.mean().item() - logdet_mu_mean:+.4f}"
                 )
+            stagec_debugger.log_event(
+                "sample_initial_riemannian_warmup",
+                {
+                    "steps": self.initial_volume_warmup_steps,
+                    "step_size": self.initial_volume_warmup_step_size,
+                    "max_step_norm": self.initial_volume_warmup_max_step,
+                },
+            )
 
+        stagec_debugger.log_event(
+            "sample_initial_riemannian_result",
+              {
+                  "final_mean_norm": float(torch.norm(last_z - mu, dim=-1).mean().item()),
+                  "final_sigma_logdet": float(torch.linalg.slogdet(last_sigma.float())[1].mean().item()),
+              },
+        )
         return last_z, last_sigma
 
     def _apply_volume_warmup(
@@ -1025,6 +1133,14 @@ class RiemannianRHMCPosterior(nn.Module):
         """Small gradient-ascent warm-up on log|G⁻¹(z)| to nudge samples toward high-volume regions."""
         if steps <= 0 or step_size <= 0:
             return z
+        stagec_debugger.log_event(
+            "volume_warmup_start",
+            {
+                "steps": steps,
+                "step_size": step_size,
+                "max_step_norm": max_step_norm,
+            },
+        )
         debug_mode = os.environ.get("RLVAE_DEBUG", "0") == "1"
         z_cur = z
         for idx in range(int(steps)):
@@ -1050,13 +1166,12 @@ class RiemannianRHMCPosterior(nn.Module):
             z_cur = z_next
             if debug_mode:
                 with torch.no_grad():
-                    current_logdet = torch.linalg.slogdet(self._get_inverse_metric(z_cur))[1]
+                    current_logdet = torch.linalg.slogdet(_to_float32(self._get_inverse_metric(z_cur)))[1]
                 print(
                     f"[VOLUME WARMUP] step={idx} "
                     f"logdet={current_logdet.mean().item():+.4f}"
                 )
         return z_cur
-    
     def _make_covariance(
         self,
         G_inv: torch.Tensor,
@@ -1064,139 +1179,136 @@ class RiemannianRHMCPosterior(nn.Module):
         *,
         target_radius: Optional[float] = None,
     ) -> torch.Tensor:
-        """
-        Build SPD covariance Σ = α·Ĝ^{-1} + εI with eigenvalue clipping and
-        optional normalization so that initial draws have a predictable radius.
-        """
+        """Build SPD covariance Σ = α·G(μ) + εI using the metric (inverse of precision)."""
+
+        debug_mode = os.environ.get("RLVAE_DEBUG", "0") == "1"
+
         Ginv = _symmetrize(G_inv)
         if Ginv.ndim == 2:
             Ginv = Ginv.unsqueeze(0)
         d = Ginv.shape[-1]
-        # Clamp spectrum for robustness
+
         try:
             evals, evecs = torch.linalg.eigh(Ginv.float())
-            evals_orig = evals.clone()  # Save for diagnostics
+            evals_orig = evals.clone()
+
             evals = torch.clamp(evals, min=self.min_cov_eig)
             if math.isfinite(self.metric_eig_ceiling):
                 evals = torch.clamp(evals, max=self.metric_eig_ceiling)
-            
-            # Optional normalization by geometric mean so det(Ginv_norm)=1
-            mode = str(getattr(self, 'sigma_normalization_mode', 'none')).lower()
-            
-            # DIAGNOSTIC: Show normalization mode and effect
-            if os.environ.get("RLVAE_DEBUG", "0") == "1":
-                print(f"\n[_get_inverse_metric NORMALIZATION]")
-                print(f"  mode:                  {mode}")
-                print(f"  Original G⁻¹ eigenvalues: min={evals_orig.min().item():.6f}, max={evals_orig.max().item():.6f}")
-                print(f"  After clamping:        min={evals.min().item():.6f}, max={evals.max().item():.6f}")
-            
-            if mode == 'geomean':
+
+            mode = str(getattr(self, "sigma_normalization_mode", "none")).lower()
+            if mode == "geomean":
                 gm = torch.exp(torch.log(torch.clamp(evals, min=1e-12)).mean(dim=-1, keepdim=True))
-                evals_normalized = evals / gm
-                
-                if os.environ.get("RLVAE_DEBUG", "0") == "1":
-                    print(f"  Geomean:               {gm.mean().item():.6f}")
-                    print(f"  After geomean norm:    min={evals_normalized.min().item():.6f}, max={evals_normalized.max().item():.6f}")
-                    print(f"  log|G⁻¹_norm|:         {torch.log(evals_normalized).sum(dim=-1).mean().item():.6f} (should be ~0)")
-                
-                evals = evals_normalized
-                if math.isfinite(self.metric_eig_ceiling):
-                    evals = torch.clamp(evals, max=self.metric_eig_ceiling)
-            elif mode == 'trace':
+                evals = evals / gm
+            elif mode == "trace":
                 tr = evals.sum(dim=-1, keepdim=True)
-                evals_normalized = d * evals / torch.clamp(tr, min=1e-12)
-                
-                if os.environ.get("RLVAE_DEBUG", "0") == "1":
-                    print(f"  Trace:                 {tr.mean().item():.6f}")
-                    print(f"  After trace norm:      min={evals_normalized.min().item():.6f}, max={evals_normalized.max().item():.6f}")
-                    print(f"  trace(G⁻¹_norm):       {evals_normalized.sum(dim=-1).mean().item():.6f} (should be {d})")
-                
-                evals = evals_normalized
-                if math.isfinite(self.metric_eig_ceiling):
-                    evals = torch.clamp(evals, max=self.metric_eig_ceiling)
-            
-            # Recompose normalized precision
+                evals = d * evals / torch.clamp(tr, min=1e-12)
+
+            if math.isfinite(self.metric_eig_ceiling):
+                evals = torch.clamp(evals, max=self.metric_eig_ceiling)
+
+            if debug_mode:
+                print("\n[_get_inverse_metric NORMALIZATION]")
+                print(f"  mode:                  {mode}")
+                print(
+                    f"  Original G⁻¹ eigenvalues: min={evals_orig.min().item():.6f}, max={evals_orig.max().item():.6f}"
+                )
+                print(
+                    f"  After clamping/normalization: min={evals.min().item():.6f}, max={evals.max().item():.6f}"
+                )
+
+            stagec_debugger.log_event(
+                "make_covariance_eigs",
+                {
+                    "alpha": float(alpha),
+                    "target_radius": float(target_radius or 0.0),
+                    "mode": mode,
+                    "min_eig_before": float(evals_orig.min().item()),
+                    "max_eig_before": float(evals_orig.max().item()),
+                    "min_eig_after": float(evals.min().item()),
+                    "max_eig_after": float(evals.max().item()),
+                },
+            )
+
             Ginv_norm = (evecs @ torch.diag_embed(evals) @ evecs.transpose(-1, -2)).to(Ginv.dtype)
-        except Exception:
+        except Exception as exc:
+            if debug_mode:
+                print(f"[Σ BUILDER] eigh/normalization failed: {exc}; using raw precision")
             Ginv_norm = Ginv
 
         eye = torch.eye(d, device=Ginv.device, dtype=Ginv.dtype).unsqueeze(0)
 
-        # Adapt alpha to hit a target Euclidean radius for initial draws
+        try:
+            G_basis = torch.linalg.inv(Ginv_norm.float())
+        except RuntimeError as exc:
+            if debug_mode:
+                print(f"[Σ BUILDER] Precision inversion failed: {exc}; falling back to identity")
+            G_basis = torch.eye(d, device=Ginv.device, dtype=torch.float32).unsqueeze(0).expand_as(Ginv_norm)
+
+        G_basis = _symmetrize(G_basis.to(Ginv.dtype))
+
         target_r = self.initial_target_radius if target_radius is None else float(target_radius)
-        
-        # DIAGNOSTIC: Show target radius adjustment
-        if os.environ.get("RLVAE_DEBUG", "0") == "1":
-            print(f"\n[_make_covariance TARGET RADIUS]")
+        if debug_mode:
+            print("\n[_make_covariance TARGET RADIUS]")
             print(f"  initial_target_radius: {self.initial_target_radius:.6f}")
             if target_radius is not None:
                 print(f"  override_target_radius: {target_r:.6f}")
             print(f"  input alpha:           {alpha:.6f}")
             print(f"  eps_reg:               {self.eps_reg:.6e}")
-        
+
         if target_r > 0:
             try:
-                tr_ginv = torch.einsum('bii->b', Ginv_norm.float()).unsqueeze(-1)
-                # E||δ||^2 ≈ trace(Sigma) = alpha*trace(Ginv_norm)+ d*eps
-                alpha_eff = ((target_r ** 2) - d * self.eps_reg) / torch.clamp(tr_ginv, min=1e-12)
-                # Keep batch-shapes aligned
-                alpha_eff = alpha_eff.clamp(min=1e-6).to(Ginv_norm.dtype)
+                tr_g = torch.einsum("bii->b", G_basis.float()).unsqueeze(-1)
+                alpha_eff = ((target_r ** 2) - d * self.eps_reg) / torch.clamp(tr_g, min=1e-12)
+                alpha_eff = alpha_eff.clamp(min=1e-6).to(Ginv.dtype)
                 if math.isfinite(self.max_alpha_eff):
                     alpha_eff = alpha_eff.clamp(max=self.max_alpha_eff)
-                import numpy as np
-                Sigma = alpha_eff.unsqueeze(-1).unsqueeze(-1) * torch.linalg.inv(Ginv_norm) + self.eps_reg * eye
-                print('okokok2')
-                if os.environ.get("RLVAE_DEBUG", "0") == "1":
-                    print(f"  trace(G⁻¹_norm):       {tr_ginv.mean().item():.6f}")
+
+                Sigma = alpha_eff.unsqueeze(-1).unsqueeze(-1) * G_basis + self.eps_reg * eye
+
+                if debug_mode:
+                    print(f"  trace(G):              {tr_g.mean().item():.6f}")
                     print(f"  alpha_eff (adjusted):  {alpha_eff.mean().item():.6f}")
-                    eigvals_sigma = torch.linalg.eigvalsh(Sigma)
-                    trace_sigma = torch.diagonal(Sigma, dim1=-2, dim2=-1).sum(dim=-1)
-                    print(f"  Final Σ eigenvalues:   min={eigvals_sigma.min().item():.6f}, max={eigvals_sigma.max().item():.6f}")
-                    print(f"  Final trace(Σ):        {trace_sigma.mean().item():.6f}")
-                    print(f"  → TARGET RADIUS FORCES trace(Σ) ≈ {target_r**2:.2f}")
-            except Exception:
-                Sigma = alpha * Ginv_norm + self.eps_reg * eye
-                if os.environ.get("RLVAE_DEBUG", "0") == "1":
-                    print(f"  Target radius adjustment failed, using alpha={alpha}")
+
+                stagec_debugger.log_event(
+                    "make_covariance_target_radius",
+                    {
+                        "target_r": float(target_r),
+                        "alpha_eff_mean": float(alpha_eff.mean().item()),
+                        "trace_G_mean": float(tr_g.mean().item()),
+                    },
+                )
+            except Exception as exc:
+                if debug_mode:
+                    print(f"  Target radius adjustment failed ({exc}); falling back to alpha={alpha}")
+                Sigma = alpha * G_basis + self.eps_reg * eye
         else:
-            import numpy as np
-            print('okokok3')
-            Sigma = alpha * Ginv_norm + self.eps_reg * eye
-            if os.environ.get("RLVAE_DEBUG", "0") == "1":
-                print(f"  Target radius disabled (target_r=0), using alpha={alpha}")
-                # Consistency check: log|Σ| versus log|G⁻¹| + d·log α (ignoring εI effect)
-                try:
-                    sign_s, logdet_s = torch.slogdet(Sigma)
-                    sign_ginv, logdet_ginv = torch.slogdet(Ginv_norm)
-                    alpha_log = torch.log(torch.as_tensor(alpha, dtype=Ginv_norm.dtype, device=Ginv_norm.device))
-                    expected = logdet_ginv + (d * alpha_log)
-                    diff = (logdet_s - expected).abs().mean()
-                    print(f"  [Σ CONSISTENCY] mean|log|Σ| - (log|G⁻¹|+d·log α)| = {diff.item():.4e}")
-                    # Additional diagnostic: check which interpretation (G vs G⁻¹)
-                    # better matches Σ ignoring εI effect. If treating the input as a
-                    # metric G explains Σ much better than as precision G⁻¹, warn.
-                    try:
-                        # Build G (metric) from Ginv_norm via Cholesky solve
-                        chol_gi, _ = self._cholesky_spd(Ginv_norm.float(), jitter=1e-6)
-                        dloc = Ginv_norm.shape[-1]
-                        eye_loc = torch.eye(dloc, device=Ginv_norm.device, dtype=Ginv_norm.dtype).unsqueeze(0).expand_as(Ginv_norm)
-                        G_norm = torch.cholesky_solve(eye_loc, chol_gi).to(Ginv_norm.dtype)
-                        sign_g, logdet_g = torch.slogdet(G_norm)
-                        expected_if_G = (-logdet_g + (d * alpha_log))
-                        diff_if_G = (logdet_s - expected_if_G).abs().mean()
-                        # If G interpretation is much closer than G⁻¹, warn loudly
-                        if diff_if_G.item() + 0.5 < diff.item():
-                            print(
-                                f"[COV WARN] _make_covariance: input likely METRIC G (not G⁻¹). "
-                                f"mean|Δ| vs G: {diff_if_G.item():.3e}  vs G⁻¹: {diff.item():.3e}"
-                            )
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
+            Sigma = alpha * G_basis + self.eps_reg * eye
+            if debug_mode:
+                print("  Target radius disabled (target_r=0), using input alpha")
 
         Sigma = self._stabilize_spd(_symmetrize(Sigma), self.min_cov_eig)
         Sigma = self._cap_covariance_eigs(Sigma)
+
+        sigma_eigs = torch.linalg.eigvalsh(Sigma.float())
+
+        if debug_mode:
+            print("[_make_covariance RESULT]")
+            print(
+                f"  Sigma eigs: min={sigma_eigs.min().item():.6f}, max={sigma_eigs.max().item():.6f}, "
+                f"trace={torch.trace(Sigma.mean(0)).item():.6f}"
+            )
+
+        stagec_debugger.log_event(
+            "make_covariance_result",
+            {
+                "alpha": float(alpha),
+                "target_radius": float(target_radius or 0.0),
+                "sigma_min_eig": float(sigma_eigs.min().item()),
+                "sigma_max_eig": float(sigma_eigs.max().item()),
+            },
+        )
+
         return Sigma
 
     def _resolve_alpha(self) -> float:
@@ -1412,10 +1524,11 @@ class RiemannianRHMCPosterior(nn.Module):
         print(f"[INITIAL SAMPLING DIAGNOSTICS]")
         print(f"{'='*80}")
         
+        Sigma_dbg = _to_float32(Sigma)
         # 1. Σ_μ Properties
         try:
-            eigvals_sigma = torch.linalg.eigvalsh(Sigma)
-            logdet_sigma = torch.linalg.slogdet(Sigma)[1]
+            eigvals_sigma = torch.linalg.eigvalsh(Sigma_dbg)
+            logdet_sigma = torch.linalg.slogdet(Sigma_dbg)[1]
             trace_sigma = torch.diagonal(Sigma, dim1=-2, dim2=-1).sum(dim=-1)
             cond_sigma = eigvals_sigma.max(dim=-1)[0] / eigvals_sigma.min(dim=-1)[0].clamp(min=1e-12)
             
@@ -1443,7 +1556,7 @@ class RiemannianRHMCPosterior(nn.Module):
             
             # Mahalanobis distances for both stages
             try:
-                Sigma_inv = torch.linalg.inv(Sigma.float())
+                Sigma_inv = torch.linalg.inv(Sigma_dbg)
                 diff_selected = z_selected - mu
                 diff_z0 = z0 - mu
                 mahal_sq_selected = torch.einsum('bi,bij,bj->b', diff_selected.float(), Sigma_inv, diff_selected.float())
@@ -1486,8 +1599,8 @@ class RiemannianRHMCPosterior(nn.Module):
         # 4. Mahalanobis Distance & Decomposition
         try:
             diff = z0 - mu
-            Sigma_inv = torch.linalg.inv(Sigma)
-            mahal_sq = torch.einsum('bi,bij,bj->b', diff, Sigma_inv, diff)
+            Sigma_inv = torch.linalg.inv(Sigma_dbg)
+            mahal_sq = torch.einsum('bi,bij,bj->b', diff.float(), Sigma_inv, diff.float())
             mahal_dist = torch.sqrt(mahal_sq)
             
             # Compare Euclidean vs Mahalanobis
@@ -1500,7 +1613,7 @@ class RiemannianRHMCPosterior(nn.Module):
             print(f"  Ratio (Mahal²/Euclid²): {(mahal_sq.mean() / euclidean_sq.mean().clamp(min=1e-12)).item():.4f}")
             
             # Decompose in eigenbasis of Σ
-            eigvals, eigvecs = torch.linalg.eigh(Sigma)
+            eigvals, eigvecs = torch.linalg.eigh(Sigma_dbg)
             # Transform diff to eigenspace: y = V^T (z-μ)
             y = torch.einsum('bij,bj->bi', eigvecs.transpose(-1, -2), diff)
             # Contribution per eigenvalue: y_i² / λ_i
@@ -1711,8 +1824,8 @@ class RiemannianRHMCPosterior(nn.Module):
                 return
             
             # Compute log determinants
-            _, logdet_mu = torch.linalg.slogdet(G_inv_mu)
-            _, logdet_z0 = torch.linalg.slogdet(G_inv_z0)
+            _, logdet_mu = torch.linalg.slogdet(_to_float32(G_inv_mu))
+            _, logdet_z0 = torch.linalg.slogdet(_to_float32(G_inv_z0))
             
             print(f"\n[LOG DET G⁻¹ DISTRIBUTION]")
             print(f"  At μ:                  mean={logdet_mu.mean().item():.4f}")
@@ -1765,7 +1878,7 @@ class RiemannianRHMCPosterior(nn.Module):
                     G_inv_base = None
                 
                 if G_inv_base is not None:
-                    _, logdet_base = torch.linalg.slogdet(G_inv_base)
+                    _, logdet_base = torch.linalg.slogdet(_to_float32(G_inv_base))
                 
                 print(f"\n[VOLUME ACCEPTANCE EFFECT]")
                 print(f"  log|G⁻¹(z_base)|:      mean={logdet_base.mean().item():.4f}")
@@ -1805,8 +1918,9 @@ class RiemannianRHMCPosterior(nn.Module):
         results = {}
         
         try:
+            Sigma_dbg = _to_float32(Sigma)
             diff = z - mu
-            Sigma_inv = torch.linalg.inv(Sigma)
+            Sigma_inv = torch.linalg.inv(Sigma_dbg)
             
             # Chi-squared test: (z-μ)ᵀ Σ⁻¹ (z-μ) ~ χ²(D)
             mahal_sq = torch.einsum('bi,bij,bj->b', diff, Sigma_inv, diff)
@@ -1834,7 +1948,7 @@ class RiemannianRHMCPosterior(nn.Module):
             # Empirical covariance mismatch
             if z.shape[0] > 1:
                 emp_cov = torch.cov(diff.T)
-                sigma_mean = Sigma.mean(dim=0) if Sigma.shape[0] > 1 else Sigma[0]
+                sigma_mean = Sigma_dbg.mean(dim=0) if Sigma_dbg.shape[0] > 1 else Sigma_dbg[0]
                 frobenius_error = torch.norm(emp_cov - sigma_mean, p='fro') / torch.norm(sigma_mean, p='fro').clamp(min=1e-12)
                 
                 results['cov_mismatch'] = {
@@ -1892,7 +2006,7 @@ class RiemannianRHMCPosterior(nn.Module):
                     G_inv_z0 = None
                 
                 if G_inv_z0 is not None:
-                    _, logdet_z0 = torch.linalg.slogdet(G_inv_z0)
+                    _, logdet_z0 = torch.linalg.slogdet(_to_float32(G_inv_z0))
                     init_logdet = logdet_z0.mean().item()
                 else:
                     init_logdet = 0.0
@@ -1995,7 +2109,7 @@ class RiemannianRHMCPosterior(nn.Module):
                         G_inv_z = None
                     
                     if G_inv_z is not None:
-                        _, logdet_z = torch.linalg.slogdet(G_inv_z)
+                        _, logdet_z = torch.linalg.slogdet(_to_float32(G_inv_z))
                         logdet_val = logdet_z.mean().item()
                     else:
                         logdet_val = 0.0
@@ -2347,8 +2461,9 @@ class RiemannianRHMCPosterior(nn.Module):
             # DIAGNOSTIC: Log Sigma details before passing to log_q_riem
             if os.environ.get("RLVAE_DEBUG", "0") == "1":
                 try:
-                    eigvals_sigma = torch.linalg.eigvalsh(Sigma)
-                    logdet_sigma = torch.linalg.slogdet(Sigma)[1]
+                    sigma_dbg = _to_float32(Sigma)
+                    eigvals_sigma = torch.linalg.eigvalsh(sigma_dbg)
+                    logdet_sigma = torch.linalg.slogdet(sigma_dbg)[1]
                     trace_sigma = torch.diagonal(Sigma, dim1=-2, dim2=-1).sum(dim=-1)
                     
                     print(f"\n[_compute_log_riemannian_gaussian BEFORE log_q_riem]")
@@ -2363,8 +2478,9 @@ class RiemannianRHMCPosterior(nn.Module):
                     # Always compare with raw G_inv_mu
                     print(f"  [Comparison with raw G⁻¹(μ)]")
                     G_inv_raw = self._ctx['model'].G_inv(mu)  # FIX: Use G_inv() not Ginv()
-                    eigvals_ginv_raw = torch.linalg.eigvalsh(G_inv_raw)
-                    logdet_ginv_raw = torch.linalg.slogdet(G_inv_raw)[1]
+                    G_inv_dbg = _to_float32(G_inv_raw)
+                    eigvals_ginv_raw = torch.linalg.eigvalsh(G_inv_dbg)
+                    logdet_ginv_raw = torch.linalg.slogdet(G_inv_dbg)[1]
                     print(f"    G⁻¹(μ) eigenvalues:  min={eigvals_ginv_raw.min().item():.6f}, max={eigvals_ginv_raw.max().item():.6f}")
                     print(f"    log|G⁻¹(μ)|:         {logdet_ginv_raw.mean().item():.6f}")
                     print(f"    Expected log|Σ|:     {logdet_ginv_raw.mean().item():.6f} (if α=1, ε≈0)")
@@ -2482,15 +2598,15 @@ class RiemannianRHMCPosterior(nn.Module):
 
         # Volume term: attract to high log|G^{-1}| by following ∇U(z) = -∇log p(z),
         # where log p(z) = ½ log|G^{-1}(z)| for the uniform volume prior.
-        print('?!!!!computing potential gradient 1!!!')
+        #print('?!!!!computing potential gradient 1!!!')
         try:
-            print('?!!!!computing potential gradient 2!!!')
+            #computing potential gradient 2!!!')
             rep = getattr(self, 'volume_force_representation', 'g')
             rep = rep if rep in ('g', 'ginv') else 'g'
             grad_jitter = float(getattr(self, 'volume_grad_jitter', self.eps_reg))
             eig_floor = float(getattr(self, 'volume_grad_eig_floor', 0.0))
             if rep == 'g':
-                print('using g??????')
+                #print('using g??????')
                 G = self._ctx['model'].G(z)
                 G32 = G.float() if G.dtype in (torch.float16, torch.bfloat16) else G
                 # Clamp spectrum before logdet gradient to avoid NaNs
@@ -2525,12 +2641,12 @@ class RiemannianRHMCPosterior(nn.Module):
                 create_graph=True,
                 allow_unused=True
             )
-            print('we did the grad of the log volume!!!')
+            #print('we did the grad of the log volume!!!')
             if grad_log_vol is None:
                 grad_log_vol = torch.zeros_like(z)
             # Resolve force sign with optional inversion via env for debugging
             sign = 1 #float(getattr(self, 'volume_force_sign', 1.0))
-            print('!!!!sign is +1!!!')
+            #print('!!!!sign is +1!!!')
             
 
             scale = sign #* float(getattr(self, 'volume_grad_scale', 1.0)) * float(getattr(self, 'volume_bias_weight', 1.0))
