@@ -1294,9 +1294,13 @@ class RiemannianRHMCPosterior(nn.Module):
 
         if debug_mode:
             print("[_make_covariance RESULT]")
+            try:
+                trace_val = torch.trace(Sigma.mean(0)).item() if Sigma.ndim >= 2 else float('nan')
+            except Exception:
+                trace_val = float('nan')
             print(
                 f"  Sigma eigs: min={sigma_eigs.min().item():.6f}, max={sigma_eigs.max().item():.6f}, "
-                f"trace={torch.trace(Sigma.mean(0)).item():.6f}"
+                f"trace={trace_val:.6f}"
             )
 
         stagec_debugger.log_event(

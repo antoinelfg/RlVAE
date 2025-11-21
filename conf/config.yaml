@@ -113,16 +113,17 @@ settings:
       activation: relu
 
     flows:
-      hidden_size: 256
+      hidden_size: 64
       n_blocks: 2
       n_hidden: 1
-      output_clip: 8.0
-      logdet_clip: 2.0
+      output_clip: 4.0
+      logdet_clip: 1.0
+
 
     losses:
       beta: 1.0
       riemannian_beta: 1.0
-      flow_weight: 10.0
+      flow_weight: 1.0
       loop_penalty_weight: 0.0
       mu_l2_weight: 0
       mu_volume_weight: 0.0           # Disable μ volume bias for cleaner gradients
@@ -171,7 +172,7 @@ settings:
       maha_clip: 20.0
       cov_norm_mode: none                # FIX: No normalization
       sigma_normalization_mode: none     # FIX: PRESERVE anisotropy - no normalization
-      initial_target_radius: 0.2        # Target Euclidean radius for Σ-based draw
+      initial_target_radius: 0.0        # Target Euclidean radius for Σ-based draw
       max_cov_eig: inf                 # Softer cap to avoid constant clamping
     
       rhmc_kl_mode: mc
@@ -186,7 +187,7 @@ settings:
       path: outputs/stages/B_RHVAE_MLP_2_SPRITES/metric_diverse_latest.pt
       trainable: false
       init_from_fixed: true
-      temperature_override: 0.75
+      temperature_override: 0.8
       regularization_override: 0.01
       normalize_weight_sum: false
       topk_weights: 20
@@ -231,7 +232,7 @@ settings:
 
     optimizer:
       name: adam
-      lr: 1.0e-5
+      lr: 1.0e-4
       weight_decay: 1.0e-4
       betas: [0.9, 0.999]
 
@@ -283,7 +284,7 @@ settings:
       stage_c:
         enabled: true
         epochs: 200
-        lr: 1.0e-5
+        lr: 1.0e-4
         riemannian_beta: 1.0
         posterior:
           rhmc_alpha: 0.3                # FIX: Override with diagnostic-based value

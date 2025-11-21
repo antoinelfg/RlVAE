@@ -1341,7 +1341,7 @@ class LossManager(nn.Module):
         max_sv = sv.max(dim=-1).values
         j_cond = max_sv / (min_sv + 1e-12)
 
-        if (j_cond > 5000.0).any():
+        if (j_cond > 50000.0).any():
             if os.environ.get("RLVAE_DEBUG", "0") == "1":
                 print(f"[PUSH STABIL] Jacobian poorly conditioned (max cond={j_cond.max().item():.2e}), falling back")
             # Return None to trigger Formulation A fallback
