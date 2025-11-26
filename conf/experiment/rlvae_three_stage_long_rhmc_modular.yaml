@@ -54,7 +54,7 @@ model:
     type: riemannian_rhmc
     rhmc_steps: 4
     rhmc_step_size: 0.12  # Raised above runtime defaults
-    rhmc_alpha: 0.1  # Small alpha to scale down G⁻¹ while preserving anisotropy
+    rhmc_alpha: 1.0  # Larger alpha for broader initial Σ
     rhmc_eps_reg: 1.0e-3  # Increased from 3e-6 to stabilize
     soft_position_norm: 5.5
     kinetic_grad_enabled: false
@@ -80,7 +80,7 @@ model:
   posterior_type: riemannian_rhmc
   rhmc_steps: 4
   rhmc_step_size: 0.12  # Raised above runtime defaults
-  rhmc_alpha: 5.0  # Increased from 3.0
+  rhmc_alpha: 1.0
   rhmc_eps_reg: 1.0e-3  # Increased from 3e-6
   soft_position_norm: 5.5
   kinetic_grad_enabled: true
@@ -109,7 +109,7 @@ training:
       type: riemannian_rhmc
       rhmc_steps: 4
       rhmc_step_size: 0.12  # Raised above runtime defaults
-      rhmc_alpha: 0.1  # Small alpha to scale down G⁻¹ while preserving anisotropy
+      rhmc_alpha: 1.0
       rhmc_eps_reg: 1.0e-3  # Increased from 3e-6
       # FIX: PRESERVE anisotropy - no normalization
       sigma_normalization_mode: 'none'

@@ -113,21 +113,21 @@ settings:
       activation: relu
 
     flows:
-      hidden_size: 64
+      hidden_size: 256
       n_blocks: 2
       n_hidden: 1
       output_clip: 4.0
-      logdet_clip: 1.0
+      logdet_clip: 5.0
 
 
     losses:
       beta: 1.0
       riemannian_beta: 1.0
-      flow_weight: 1.0
+      flow_weight: 10.0
       loop_penalty_weight: 0.0
       mu_l2_weight: 0
       mu_volume_weight: 0.0           # Disable μ volume bias for cleaner gradients
-      mu_centroid_weight: 5.0         # Keep centroid pull off unless desired
+      mu_centroid_weight: 1.0         # Keep centroid pull off unless desired
       metric_representation: ginv
       kl_prior_mode: uniform
       kl_metric_eval_point: mu
@@ -146,9 +146,9 @@ settings:
       type: riemannian_rhmc
       rhmc_steps: 8                     # Slightly more exploration
       rhmc_step_size: 0.03              # Larger step size for better mixing
-      rhmc_alpha: 0.3                   # FIX: Increased for better Σ_μ scale
-      rhmc_eps_reg: 1.0e-4               # FIX: Standard regularization
-      min_cov_eig: 1.0e-3                # FIX: Minimum eigenvalue for Cholesky
+      rhmc_alpha: 0.01                   # Broader initial Σ for less negative log|Σ|
+      rhmc_eps_reg: 1.0e-3              # More jitter to keep Σ PD after pushforward
+      min_cov_eig: 5.0e-3               # Raise floor to avoid tiny determinants
       volume_force_representation: g     # Use metric 'g' for volume gradient
       
       # CRITICAL FIX: Disable multi-try and volume acceptance to avoid distribution bias
@@ -167,7 +167,7 @@ settings:
       max_position_step: 1.0             # FIX: INCREASED to allow larger steps (was 0.1, too restrictive)
       max_position_norm: 0.0             # Disable hard position clamping
       
-      posterior_local_alpha: 1.
+      posterior_local_alpha: 0.01
       posterior_alpha_ramp_enabled: false
       maha_clip: 20.0
       cov_norm_mode: none                # FIX: No normalization
@@ -177,7 +177,7 @@ settings:
     
       rhmc_kl_mode: mc
       rhmc_kl_source: z0
-      rhmc_kl_jacobian: false
+      rhmc_kl_jacobian: true
 
     # Disable μ alignment transform so encoder μ is used directly
     mu_alignment_enabled: false
@@ -190,11 +190,11 @@ settings:
       temperature_override: 0.8
       regularization_override: 0.01
       normalize_weight_sum: false
-      topk_weights: 20
+      topk_weights: 0
       #weight_kernel: mahalanobis_normed
       weight_metric_normalization: none
-      use_background_identity: false
-      bg_strength: 0.0
+      use_background_identity: true
+      bg_strength: 0.0001
       eig_ceiling: 50.0
       regularization_weight: 0.0
       update_frequency: null
@@ -266,7 +266,7 @@ settings:
       stage_a:
         enabled: false
         epochs: 100
-        lr: 1.0e-5
+        lr: 1.0e-4
         batch_size: 64
         architecture: mlp
         latent_dim: 2
@@ -287,9 +287,9 @@ settings:
         lr: 1.0e-4
         riemannian_beta: 1.0
         posterior:
-          rhmc_alpha: 0.3                # FIX: Override with diagnostic-based value
-          rhmc_steps: 8                  # FIX: Ensure RHMC is active
-          rhmc_step_size: 0.05           # FIX: Match increased step size
+          rhmc_alpha: 0.1                # FIX: Override with diagnostic-based value
+          rhmc_steps: 10                  # FIX: Ensure RHMC is active
+          rhmc_step_size: 0.02           # FIX: Match increased step size
           max_position_norm: 0.0
           max_position_step: 1.0         # FIX: Match increased position step limit
           max_velocity_norm: 2.0         # FIX: Match increased velocity limit
@@ -302,7 +302,7 @@ settings:
   pipeline:
     mode: three_stage
     run_stage_a: false
-    run_stage_b: true
+    run_stage_b: false
     run_stage_c: true
     run_sampling: false
     resume_from:

@@ -547,11 +547,22 @@ class MetricTensor(nn.Module):
                 G_dbg = G_metric if G_metric is not None else _robust_inverse_from_cholesky(G_inv64).to(target_dtype)
                 prod = G_dbg @ G_inv.float()
                 err = (prod - torch.eye(d, device=z.device)).norm(dim=(1, 2)).mean().item()
-                logdet = self.compute_log_det_inverse_metric(z).mean().item()
+        # Compute log|G⁻¹| directly from eigenvalues to avoid recursion
+        try:
+            logdet = torch.log(torch.clamp(evals, min=1e-18)).sum(dim=-1).mean().item()
+        except Exception:
+            logdet = float("nan")
+
+        if os.getenv("RLVAE_METRIC_DEBUG", "0") == "1":
+            with torch.no_grad():
+                G_dbg = G_metric if G_metric is not None else _robust_inverse_from_cholesky(G_inv64).to(target_dtype)
+                prod = G_dbg @ G_inv.float()
+                err = (prod - torch.eye(d, device=z.device)).norm(dim=(1, 2)).mean().item()
                 sum_w = weights.sum(dim=-1)
                 print(f"[MetricDebug] ||G·G⁻¹ - I|| ≈ {err:.3e}, mean log|det(G⁻¹)| ≈ {logdet:.3f}, "
                       f"sum_w mean={sum_w.mean().item():.3f} min={sum_w.min().item():.3f} max={sum_w.max().item():.3f}, "
                       f"dmin mean={d2min.mean().item():.3f}, T={float(temperature):.3f}")
+
         if stagec_debugger.enabled:
             try:
                 stagec_debugger.log_event(

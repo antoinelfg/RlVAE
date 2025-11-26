@@ -882,6 +882,12 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
                           'volume_grad_scale','volume_bias_weight'):
                     if k in rhmc_config:
                         setattr(self.posterior_sampler_rhmc, k if k != 'eps_regularization' else 'eps_reg', rhmc_config[k])
+                # Keep sampler aware of the configured step size to detect unintended overrides later
+                if 'rhmc_step_size' in rhmc_config:
+                    try:
+                        self.posterior_sampler_rhmc._configured_step_size = float(rhmc_config['rhmc_step_size'])
+                    except Exception:
+                        pass
             except Exception:
                 pass
         except Exception as e:
@@ -1213,6 +1219,22 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             encoder_out = self.encoder(x_0)
         mu = encoder_out.embedding
         log_var = encoder_out.log_covariance
+        # Hard finite check immediately after encoder forward
+        for name, tensor in (("mu", mu), ("log_var", log_var)):
+            if isinstance(tensor, torch.Tensor) and (torch.isnan(tensor).any() or torch.isinf(tensor).any()):
+                print(f"\n[ENCODER NAN GUARD][post-encoder] {name} contains NaN/Inf before any alignment/metric")
+                try:
+                    finite = torch.isfinite(tensor)
+                    print(f"  {name} finite count: {finite.sum().item()} / {tensor.numel()}")
+                    if finite.any():
+                        print(f"  {name} stats (finite): min={tensor[finite].min().item():.3e}, max={tensor[finite].max().item():.3e}, mean={tensor[finite].mean().item():.3e}, std={tensor[finite].std().item():.3e}")
+                except Exception:
+                    pass
+                try:
+                    print(f"  Input x stats: min={x_0.min().item():.3e}, max={x_0.max().item():.3e}, mean={x_0.mean().item():.3e}, std={x_0.std().item():.3e}")
+                except Exception:
+                    pass
+                raise RuntimeError(f"NaN/Inf detected in encoder output immediately after forward: {name}")
         stagec_debugger.log_event(
             "encoder_forward",
             {
@@ -1361,6 +1383,23 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
                     print(f"TRACE ENCODER log_var: dtype={log_var.dtype}, shape={tuple(log_var.shape)}, mean={log_var.mean().item():.4g}, std={log_var.std().item():.4g}, min={log_var.min().item():.4g}, max={log_var.max().item():.4g}")
         except Exception:
             pass
+
+        # Hard stop on the first NaN/Inf encoder output to pinpoint the source
+        for name, tensor in (("mu", mu), ("log_var", log_var if isinstance(log_var, torch.Tensor) else None)):
+            if isinstance(tensor, torch.Tensor) and (torch.isnan(tensor).any() or torch.isinf(tensor).any()):
+                print(f"\n[ENCODER NAN GUARD] Detected NaN/Inf in {name} (forward_modular)")
+                try:
+                    finite = torch.isfinite(tensor)
+                    print(f"  {name} finite count: {finite.sum().item()} / {tensor.numel()}")
+                    print(f"  {name} stats (finite only): min={tensor[finite].min().item():.3e}, max={tensor[finite].max().item():.3e}, mean={tensor[finite].mean().item():.3e}, std={tensor[finite].std().item():.3e}")
+                except Exception:
+                    pass
+                # Also report input stats
+                try:
+                    print(f"  Input x stats: min={x.min().item():.3e}, max={x.max().item():.3e}, mean={x.mean().item():.3e}, std={x.std().item():.3e}")
+                except Exception:
+                    pass
+                raise RuntimeError(f"NaN/Inf detected in encoder output: {name}")
 
         # One-time metric orientation and conditioning diagnostics (Stage C)
         try:

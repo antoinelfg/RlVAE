@@ -46,7 +46,7 @@ class LossManager(nn.Module):
         # Prior mode for KL: 'uniform' (default, cancels volume) or 'volume_gaussian'
         kl_prior_mode: str = 'uniform',
         # Optional amplification of volume terms / gradients
-        volume_bias_weight: float = 2.0,
+        volume_bias_weight: float = 1.0,
         volume_grad_scale: float = 1.0,
         use_pushforward_metric: Optional[bool] = True,
         use_flow_corrections: Optional[bool] = True,
@@ -59,7 +59,7 @@ class LossManager(nn.Module):
         # RHMC KL switches
         rhmc_kl_mode: str = 'mc',          # {'mc','jac','bound'}
         rhmc_kl_source: str = 'z0',        # {'z0','zk'}
-        rhmc_kl_jacobian: bool = False,
+        rhmc_kl_jacobian: bool = True,
         # Covariance spectrum controls to mirror RHMC caps (optional)
         cov_eig_floor: float = 1e-6,
         cov_eig_ceiling: Optional[float] = None,

@@ -321,8 +321,11 @@ class RiemannianRHMCPosterior(nn.Module):
                 return self.config.get(key, default)
             except Exception:
                 return default
-        self.rhmc_steps = int(_cfg_get('rhmc_steps', 3))
-        self.rhmc_step_size = float(_cfg_get('rhmc_step_size', 0.02))
+        # RHMC integration defaults (tuned for Stage C)
+        self.rhmc_steps = int(_cfg_get('rhmc_steps', 4))
+        self.rhmc_step_size = float(_cfg_get('rhmc_step_size', 0.05))
+        # Persist the configured step size so unexpected overrides can be detected and corrected
+        self._configured_step_size = self.rhmc_step_size
         # DEBUG: Log what config was passed
         import os
         if os.environ.get("RLVAE_DEBUG", "0") == "1":
@@ -485,6 +488,16 @@ class RiemannianRHMCPosterior(nn.Module):
                 raise RuntimeError(
                     "RiemannianRHMCPosterior requires gradients; wrap call in torch.enable_grad() before sampling."
                 )
+            # Guard against accidental external overwrites of the step size
+            try:
+                cfg_eps = getattr(self, "_configured_step_size", None)
+                if cfg_eps is not None:
+                    if (self.rhmc_step_size < 1e-3) or (abs(self.rhmc_step_size - cfg_eps) > 1e-6):
+                        if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                            print(f"[RHMC STEP GUARD] restoring rhmc_step_size from {self.rhmc_step_size} to configured {cfg_eps}")
+                        self.rhmc_step_size = cfg_eps
+            except Exception:
+                pass
             # Route tracing: RHMC parameters (once)
             if not hasattr(self, '_rhmc_traced'):
                 print(f"[ROUTE] RHMC: steps={self.rhmc_steps}, step_size={self.rhmc_step_size}, alpha={self.rhmc_alpha}, eps_reg={self.eps_reg}")
@@ -745,10 +758,8 @@ class RiemannianRHMCPosterior(nn.Module):
                     z_eval = z_cand.reshape(B * K, D)
                     Gz = self._ctx['model'].G(z_eval)
                     print('checkkkkkk')
-                    # Selection score: maximize +½ log|G^{-1}(z)|. For rep='g',
-                    # half_logdet_volume(G, 'g') returns -½ log|G| = +½ log|G^{-1}|.
-                    # So we should NOT negate here.
-                    h = half_logdet_volume(Gz, 'g', jitter=self.eps_reg).reshape(B, K)
+                    # Selection score: invert sign to favor lower metric volume (smaller log|G^{-1}|).
+                    h = -half_logdet_volume(Gz, 'g', jitter=self.eps_reg).reshape(B, K)
                 best = torch.argmax(h, dim=1)
                 
                 # DIAGNOSTIC: Analyze candidates before selection
@@ -909,8 +920,9 @@ class RiemannianRHMCPosterior(nn.Module):
             with torch.no_grad():
                 z_eval = z_cand.reshape(B * K, D)
                 Gz = self._ctx['model'].G(z_eval)
-                # Same selection score for the standard path
-                h = half_logdet_volume(Gz, 'g', jitter=self.eps_reg).reshape(B, K)
+                print('checkkkkkkiiiing')
+                # Invert sign to favor lower metric volume (smaller log|G^{-1}|).
+                h = -half_logdet_volume(Gz, 'g', jitter=self.eps_reg).reshape(B, K)
             best_idx = torch.argmax(h, dim=1)
 
             # DIAGNOSTIC: Analyze candidates before selection
@@ -1179,139 +1191,49 @@ class RiemannianRHMCPosterior(nn.Module):
         *,
         target_radius: Optional[float] = None,
     ) -> torch.Tensor:
-        """Build SPD covariance Σ = α·G(μ) + εI using the metric (inverse of precision)."""
-
-        debug_mode = os.environ.get("RLVAE_DEBUG", "0") == "1"
-
+        # Ensure symmetry
         Ginv = _symmetrize(G_inv)
-        if Ginv.ndim == 2:
-            Ginv = Ginv.unsqueeze(0)
         d = Ginv.shape[-1]
-
-        try:
-            evals, evecs = torch.linalg.eigh(Ginv.float())
-            evals_orig = evals.clone()
-
-            evals = torch.clamp(evals, min=self.min_cov_eig)
-            if math.isfinite(self.metric_eig_ceiling):
-                evals = torch.clamp(evals, max=self.metric_eig_ceiling)
-
-            mode = str(getattr(self, "sigma_normalization_mode", "none")).lower()
-            if mode == "geomean":
-                gm = torch.exp(torch.log(torch.clamp(evals, min=1e-12)).mean(dim=-1, keepdim=True))
-                evals = evals / gm
-            elif mode == "trace":
-                tr = evals.sum(dim=-1, keepdim=True)
-                evals = d * evals / torch.clamp(tr, min=1e-12)
-
-            if math.isfinite(self.metric_eig_ceiling):
-                evals = torch.clamp(evals, max=self.metric_eig_ceiling)
-
-            if debug_mode:
-                print("\n[_get_inverse_metric NORMALIZATION]")
-                print(f"  mode:                  {mode}")
-                print(
-                    f"  Original G⁻¹ eigenvalues: min={evals_orig.min().item():.6f}, max={evals_orig.max().item():.6f}"
-                )
-                print(
-                    f"  After clamping/normalization: min={evals.min().item():.6f}, max={evals.max().item():.6f}"
-                )
-
-            stagec_debugger.log_event(
-                "make_covariance_eigs",
-                {
-                    "alpha": float(alpha),
-                    "target_radius": float(target_radius or 0.0),
-                    "mode": mode,
-                    "min_eig_before": float(evals_orig.min().item()),
-                    "max_eig_before": float(evals_orig.max().item()),
-                    "min_eig_after": float(evals.min().item()),
-                    "max_eig_after": float(evals.max().item()),
-                },
-            )
-
-            Ginv_norm = (evecs @ torch.diag_embed(evals) @ evecs.transpose(-1, -2)).to(Ginv.dtype)
-        except Exception as exc:
-            if debug_mode:
-                print(f"[Σ BUILDER] eigh/normalization failed: {exc}; using raw precision")
-            Ginv_norm = Ginv
-
         eye = torch.eye(d, device=Ginv.device, dtype=Ginv.dtype).unsqueeze(0)
 
-        try:
-            G_basis = torch.linalg.inv(Ginv_norm.float())
-        except RuntimeError as exc:
-            if debug_mode:
-                print(f"[Σ BUILDER] Precision inversion failed: {exc}; falling back to identity")
-            G_basis = torch.eye(d, device=Ginv.device, dtype=torch.float32).unsqueeze(0).expand_as(Ginv_norm)
+        # --- FIX: Avoid eigh() on isotropic matrices (NaN gradient risk) ---
+        # Instead of clamping eigenvalues explicitly, we add jitter to diagonal.
+        # This is numerically safer and avoids the degenerate eigenvalue problem.
+        
+        # 1. Enforce floor via addition (Soft Clamp)
+        # This guarantees evals >= min_cov_eig without decomposition
+        # (Assuming G_inv is already PSD from the metric definition)
+        floor_jitter = max(self.min_cov_eig, 1e-6)
+        Ginv_safe = Ginv + floor_jitter * eye
 
-        G_basis = _symmetrize(G_basis.to(Ginv.dtype))
+        # 2. Optional: Cap huge values (Hard Clamp on diagonal only)
+        # This is approximate but gradient-safe
+        if math.isfinite(self.metric_eig_ceiling):
+            Ginv_safe = torch.clamp(Ginv_safe, max=self.metric_eig_ceiling)
 
-        target_r = self.initial_target_radius if target_radius is None else float(target_radius)
-        if debug_mode:
-            print("\n[_make_covariance TARGET RADIUS]")
-            print(f"  initial_target_radius: {self.initial_target_radius:.6f}")
-            if target_radius is not None:
-                print(f"  override_target_radius: {target_r:.6f}")
-            print(f"  input alpha:           {alpha:.6f}")
-            print(f"  eps_reg:               {self.eps_reg:.6e}")
-
-        if target_r > 0:
+        # 3. Normalization (Volume preservation) using Cholesky (Safe)
+        mode = str(getattr(self, 'sigma_normalization_mode', 'none')).lower()
+        
+        if mode == 'geomean':
+            # Use logdet (via Cholesky) instead of product of eigenvalues
             try:
-                tr_g = torch.einsum("bii->b", G_basis.float()).unsqueeze(-1)
-                alpha_eff = ((target_r ** 2) - d * self.eps_reg) / torch.clamp(tr_g, min=1e-12)
-                alpha_eff = alpha_eff.clamp(min=1e-6).to(Ginv.dtype)
-                if math.isfinite(self.max_alpha_eff):
-                    alpha_eff = alpha_eff.clamp(max=self.max_alpha_eff)
-
-                Sigma = alpha_eff.unsqueeze(-1).unsqueeze(-1) * G_basis + self.eps_reg * eye
-
-                if debug_mode:
-                    print(f"  trace(G):              {tr_g.mean().item():.6f}")
-                    print(f"  alpha_eff (adjusted):  {alpha_eff.mean().item():.6f}")
-
-                stagec_debugger.log_event(
-                    "make_covariance_target_radius",
-                    {
-                        "target_r": float(target_r),
-                        "alpha_eff_mean": float(alpha_eff.mean().item()),
-                        "trace_G_mean": float(tr_g.mean().item()),
-                    },
-                )
-            except Exception as exc:
-                if debug_mode:
-                    print(f"  Target radius adjustment failed ({exc}); falling back to alpha={alpha}")
-                Sigma = alpha * G_basis + self.eps_reg * eye
-        else:
-            Sigma = alpha * G_basis + self.eps_reg * eye
-            if debug_mode:
-                print("  Target radius disabled (target_r=0), using input alpha")
-
-        Sigma = self._stabilize_spd(_symmetrize(Sigma), self.min_cov_eig)
-        Sigma = self._cap_covariance_eigs(Sigma)
-
-        sigma_eigs = torch.linalg.eigvalsh(Sigma.float())
-
-        if debug_mode:
-            print("[_make_covariance RESULT]")
-            try:
-                trace_val = torch.trace(Sigma.mean(0)).item() if Sigma.ndim >= 2 else float('nan')
+                chol_norm, _ = _safe_cholesky(Ginv_safe, 1e-6)
+                diag_chol = torch.diagonal(chol_norm, dim1=-2, dim2=-1)
+                logdet = 2.0 * torch.log(diag_chol.clamp(min=1e-12)).sum(-1, keepdim=True)
+                gm = torch.exp(logdet / d).unsqueeze(-1)
+                Ginv_norm = Ginv_safe / (gm + 1e-12)
             except Exception:
-                trace_val = float('nan')
-            print(
-                f"  Sigma eigs: min={sigma_eigs.min().item():.6f}, max={sigma_eigs.max().item():.6f}, "
-                f"trace={trace_val:.6f}"
-            )
+                Ginv_norm = Ginv_safe
+                
+        elif mode == 'trace':
+            tr = torch.einsum('bii->b', Ginv_safe).unsqueeze(-1).unsqueeze(-1)
+            Ginv_norm = d * Ginv_safe / tr.clamp(min=1e-12)
+        else:
+            Ginv_norm = Ginv_safe
 
-        stagec_debugger.log_event(
-            "make_covariance_result",
-            {
-                "alpha": float(alpha),
-                "target_radius": float(target_radius or 0.0),
-                "sigma_min_eig": float(sigma_eigs.min().item()),
-                "sigma_max_eig": float(sigma_eigs.max().item()),
-            },
-        )
+        # 4. Scale by alpha (Logic: Variance ~ Alpha * Precision)
+        # Note: We use Precision (Ginv) directly as Variance basis per your configuration
+        Sigma = alpha * Ginv_norm + self.eps_reg * eye
 
         return Sigma
 
@@ -2645,15 +2567,11 @@ class RiemannianRHMCPosterior(nn.Module):
                 create_graph=True,
                 allow_unused=True
             )
-            #print('we did the grad of the log volume!!!')
             if grad_log_vol is None:
                 grad_log_vol = torch.zeros_like(z)
-            # Resolve force sign with optional inversion via env for debugging
-            sign = 1 #float(getattr(self, 'volume_force_sign', 1.0))
-            #print('!!!!sign is +1!!!')
-            
-
-            scale = sign #* float(getattr(self, 'volume_grad_scale', 1.0)) * float(getattr(self, 'volume_bias_weight', 1.0))
+            # Resolve force sign/scale from config so we can flip during debugging
+            sign = float(getattr(self, 'volume_force_sign', 1.0))
+            scale = sign * float(getattr(self, 'volume_grad_scale', 1.0)) * float(getattr(self, 'volume_bias_weight', 1.0))
             grad = base - scale * grad_log_vol  # ∇U = -scale * ∇(½ log|G^{-1}|)
             grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
             

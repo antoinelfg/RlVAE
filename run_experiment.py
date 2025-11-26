@@ -635,6 +635,26 @@ class ExperimentRunner:
                     "val/kld_loss": avg_val_kld_loss
                 })
                 print(f"[Stage 1] Epoch {epoch+1}/{epochs} - Train Loss: {avg_loss:.4f} (Recon: {avg_recon_loss:.4f} + KL: {avg_kld_loss:.4f}) | Val Loss: {avg_val_loss:.4f}")
+            print("[Stage 1] Training complete. Running encoder sanity check...")
+            try:
+                sample_batch = next(iter(train_loader))
+                if isinstance(sample_batch, (list, tuple)):
+                    sample_batch = sample_batch[0]
+                sample_batch = sample_batch.to(self.device)
+                if architecture.lower() in ["mlp", "pythae"]:
+                    enc_out = model.encoder({"data": sample_batch})
+                else:
+                    enc_out = model.encoder(sample_batch)
+                mu_chk = enc_out.embedding
+                logvar_chk = enc_out.log_covariance
+                print(f"[Stage 1][ENC CHECK] mu: min={mu_chk.min().item():.4e}, max={mu_chk.max().item():.4e}, mean={mu_chk.mean().item():.4e}, std={mu_chk.std().item():.4e}")
+                print(f"[Stage 1][ENC CHECK] log_var: min={logvar_chk.min().item():.4e}, max={logvar_chk.max().item():.4e}, mean={logvar_chk.mean().item():.4e}, std={logvar_chk.std().item():.4e}")
+                if torch.isnan(mu_chk).any() or torch.isinf(mu_chk).any() or torch.isnan(logvar_chk).any() or torch.isinf(logvar_chk).any():
+                    print("[Stage 1][ENC CHECK] ⚠️ Detected NaN/Inf in encoder outputs!")
+                else:
+                    print("[Stage 1][ENC CHECK] ✅ Encoder outputs are finite.")
+            except Exception as enc_exc:
+                print(f"[Stage 1][ENC CHECK] ⚠️ Encoder sanity check failed: {enc_exc}")
             print("[Stage 1] Training complete. Saving components...")
             component_paths = save_model_components(model, architecture, latent_dim)
             print("[Stage 1] Extracting diverse metric...")
@@ -1437,36 +1457,83 @@ class ExperimentRunner:
                                 pass
                     except Exception as e:
                         print(f"[Stage A] ⚠️ Periodic PCA failed (epoch {epoch+1}): {e}")
-                # Reconstructions vs real for Stage A (vanilla path)
+
+                # Small helper to robustly unwrap batches that may be dict/tuple/list
+                def _extract_tensor(batch):
+                    # Recursively grab the first tensor we can find.
+                    if isinstance(batch, torch.Tensor):
+                        return batch
+                    if isinstance(batch, dict):
+                        if "data" in batch:
+                            try:
+                                return _extract_tensor(batch["data"])
+                            except Exception:
+                                pass
+                        for v in batch.values():
+                            try:
+                                return _extract_tensor(v)
+                            except Exception:
+                                continue
+                        raise ValueError("No tensor found in dict batch")
+                    if isinstance(batch, (tuple, list)):
+                        for elem in batch:
+                            try:
+                                return _extract_tensor(elem)
+                            except Exception:
+                                continue
+                        raise ValueError("No tensor found in tuple/list batch")
+                    raise ValueError(f"Unsupported batch type: {type(batch)}")
+
+                # Encoder sanity check (post-training) before saving artifacts
                 try:
-                    import torchvision.utils as vutils
                     vanilla.eval()
-                    # Sample random, independent frames (not a temporal sequence)
-                    sample_loader = TorchDataLoader(
-                        full_training_dataset,
-                        batch_size=8,
-                        shuffle=True
-                    )
-                    batch = next(iter(sample_loader))
-                    batch = batch[0] if isinstance(batch, (tuple, list)) else batch
-                    batch = batch.to(self.device)
-                    if batch.dim() == 5:
-                        b, t = batch.shape[:2]
-                        batch = batch.reshape(b * t, *batch.shape[2:])
-                    with torch.no_grad():
-                        if effective_arch in ["mlp", "pythae"]:
-                            out = vanilla({"data": batch}); recon = out.recon_x.clamp(0, 1)
-                        else:
-                            out = vanilla(batch); recon = out.recon_x.clamp(0, 1)
-                    grid = vutils.make_grid(
-                        torch.cat([batch, recon], dim=0),
-                        nrow=8,
-                        normalize=False
-                    )
-                    if wandb.run is not None:
-                        wandb.log({"stageA/recon_vs_real": wandb.Image(grid)})
-                except Exception as e:
-                    print(f"[Stage A] ⚠️ Recon vs real logging failed: {e}")
+                    sample_batch = next(iter(loader))
+                    sample_batch = _extract_tensor(sample_batch)
+                    sample_batch = sample_batch.to(self.device)
+                    if effective_arch in ["mlp", "pythae"]:
+                        enc_out = vanilla.encoder({"data": sample_batch})
+                    else:
+                        enc_out = vanilla.encoder(sample_batch)
+                    mu_chk = enc_out.embedding
+                    logvar_chk = enc_out.log_covariance
+                    print(f"[Stage A][ENC CHECK] mu: min={mu_chk.min().item():.4e}, max={mu_chk.max().item():.4e}, mean={mu_chk.mean().item():.4e}, std={mu_chk.std().item():.4e}")
+                    print(f"[Stage A][ENC CHECK] log_var: min={logvar_chk.min().item():.4e}, max={logvar_chk.max().item():.4e}, mean={logvar_chk.mean().item():.4e}, std={logvar_chk.std().item():.4e}")
+                    if torch.isnan(mu_chk).any() or torch.isinf(mu_chk).any() or torch.isnan(logvar_chk).any() or torch.isinf(logvar_chk).any():
+                        print("[Stage A][ENC CHECK] ⚠️ Detected NaN/Inf in encoder outputs after training!")
+                    else:
+                        print("[Stage A][ENC CHECK] ✅ Encoder outputs are finite.")
+                except Exception as enc_exc:
+                    print(f"[Stage A][ENC CHECK] ⚠️ Encoder sanity check failed: {enc_exc}")
+            # Reconstructions vs real for Stage A (vanilla path)
+            try:
+                import torchvision.utils as vutils
+                vanilla.eval()
+                # Sample random, independent frames (not a temporal sequence)
+                sample_loader = TorchDataLoader(
+                    full_training_dataset,
+                    batch_size=8,
+                    shuffle=True
+                )
+                batch = next(iter(sample_loader))
+                batch = _extract_tensor(batch)
+                batch = batch.to(self.device)
+                if batch.dim() == 5:
+                    b, t = batch.shape[:2]
+                    batch = batch.reshape(b * t, *batch.shape[2:])
+                with torch.no_grad():
+                    if effective_arch in ["mlp", "pythae"]:
+                        out = vanilla({"data": batch}); recon = out.recon_x.clamp(0, 1)
+                    else:
+                        out = vanilla(batch); recon = out.recon_x.clamp(0, 1)
+                grid = vutils.make_grid(
+                    torch.cat([batch, recon], dim=0),
+                    nrow=8,
+                    normalize=False
+                )
+                if wandb.run is not None:
+                    wandb.log({"stageA/recon_vs_real": wandb.Image(grid)})
+            except Exception as e:
+                print(f"[Stage A] ⚠️ Recon vs real logging failed: {e}")
 
                 # Stage A latent space PCA visualization (μ embeddings)
                 try:
@@ -3455,13 +3522,29 @@ class ExperimentRunner:
                     except Exception:
                         return fallback_value
 
-                rh_steps = _posterior_get('rhmc_steps', getattr(self.config.model, 'rhmc_steps', 3))
+                rh_steps = _posterior_get('rhmc_steps', None)
+                if rh_steps is None:
+                    try:
+                        rh_steps = self.config.settings.model.posterior.rhmc_steps
+                    except Exception:
+                        rh_steps = None
+                if rh_steps is None:
+                    print("[RHMC ENFORCE] ⚠️ rhmc_steps missing; falling back to 8")
+                    rh_steps = 8
                 try:
                     rh_steps = int(rh_steps)
-                except Exception:
-                    rh_steps = 0
+                except Exception as exc:
+                    raise ValueError(f"Invalid rhmc_steps value '{rh_steps}': {exc}")
 
-                rh_eps = _posterior_get('rhmc_step_size', getattr(self.config.model, 'rhmc_step_size', 0.02))
+                rh_eps = _posterior_get('rhmc_step_size', None)
+                if rh_eps is None:
+                    try:
+                        rh_eps = self.config.settings.model.posterior.rhmc_step_size
+                    except Exception:
+                        rh_eps = None
+                if rh_eps is None:
+                    print("[RHMC ENFORCE] ⚠️ rhmc_step_size missing; falling back to 0.03")
+                    rh_eps = 0.03
                 import os
                 if os.environ.get("RLVAE_DEBUG", "0") == "1":
                     print(f"[RUN_EXP DEBUG] rhmc_step_size from config: {rh_eps}")
@@ -3470,13 +3553,13 @@ class ExperimentRunner:
                     if os.environ.get("RLVAE_DEBUG", "0") == "1":
                         print(f"[RUN_EXP DEBUG] rhmc_step_size after float(): {rh_eps}")
                 except Exception as e:
-                    if os.environ.get("RLVAE_DEBUG", "0") == "1":
-                        print(f"[RUN_EXP DEBUG] rhmc_step_size conversion failed: {e}, using fallback 0.02")
-                    rh_eps = 0.02
-                rh_alpha = _positive_or(
-                    _posterior_get('rhmc_alpha', getattr(self.config.model, 'rhmc_alpha', None)),
-                    getattr(self.config.model, 'posterior_local_alpha', 0.01) ###where that counts!!!
-                )
+                    raise ValueError(f"Invalid rhmc_step_size value '{rh_eps}': {e}")
+                rh_alpha = _posterior_get('rhmc_alpha', getattr(self.config.model, 'rhmc_alpha', None))
+                if rh_alpha is None:
+                    raise ValueError("rhmc_alpha must be set in the main config (model.posterior.rhmc_alpha)")
+                rh_alpha = _positive_or(rh_alpha, None)
+                if rh_alpha is None:
+                    raise ValueError("rhmc_alpha must be a positive finite value in the main config")
                 # Hard override via environment takes precedence for end-to-end consistency
                 try:
                     env_alpha = os.environ.get('RLVAE_ALPHA', None)

@@ -966,6 +966,24 @@ class LightningRlVAETrainer(L.LightningModule):
                     total_scalars = sum(p.numel() for p in dec_params)
                     trainable_scalars = sum(p.numel() for p in dec_params if p.requires_grad)
                     print(f"  Decoder params: {len(dec_params)} tensors | scalars={total_scalars} (trainable={trainable_scalars})")
+
+        # One-time NaN detector for encoder outputs to catch the first failure early
+        if not hasattr(self, "_nan_tripped"):
+            self._nan_tripped = False
+        if not self._nan_tripped:
+            mu_t = result.get("mu") if isinstance(result, dict) else None
+            logvar_t = result.get("log_var") if isinstance(result, dict) else None
+            for name, tensor in (("mu", mu_t), ("log_var", logvar_t)):
+                if isinstance(tensor, torch.Tensor) and (torch.isnan(tensor).any() or torch.isinf(tensor).any()):
+                    self._nan_tripped = True
+                    print(f"\n[NAN GUARD][train] Detected NaN/Inf in {name} at batch {batch_idx}")
+                    try:
+                        print(f"  {name} stats: min={tensor.nanmin().item():.3e}, max={tensor.nanmax().item():.3e}, mean={tensor.nanmean().item():.3e}, std={tensor[torch.isfinite(tensor)].std().item():.3e}")
+                    except Exception:
+                        pass
+                    if isinstance(x, torch.Tensor):
+                        print(f"  Input stats: min={x.min().item():.3e}, max={x.max().item():.3e}, mean={x.mean().item():.3e}, std={x.std().item():.3e}")
+                    break
         
         return total_loss
     
@@ -1030,6 +1048,24 @@ class LightningRlVAETrainer(L.LightningModule):
                     print(f"[DEBUG] Output {k} contains NaN or Inf! Value: {v}")
                 else:
                     print(f"[DEBUG] Output {k}: min={v.min().item():.4f}, max={v.max().item():.4f}, mean={v.mean().item():.4f}, std={v.std().item():.4f}")
+        # One-time NaN detector for encoder outputs during validation
+        if not hasattr(self, "_nan_tripped_val"):
+            self._nan_tripped_val = False
+        if not self._nan_tripped_val:
+            mu_t = result.get("mu") if isinstance(result, dict) else None
+            logvar_t = result.get("log_var") if isinstance(result, dict) else None
+            for name, tensor in (("mu", mu_t), ("log_var", logvar_t)):
+                if isinstance(tensor, torch.Tensor) and (torch.isnan(tensor).any() or torch.isinf(tensor).any()):
+                    self._nan_tripped_val = True
+                    print(f"\n[NAN GUARD][val] Detected NaN/Inf in {name} at batch {batch_idx}")
+                    try:
+                        print(f"  {name} stats: min={tensor.nanmin().item():.3e}, max={tensor.nanmax().item():.3e}, mean={tensor.nanmean().item():.3e}, std={tensor[torch.isfinite(tensor)].std().item():.3e}")
+                    except Exception:
+                        pass
+                    if isinstance(x, torch.Tensor):
+                        print(f"  Input stats: min={x.min().item():.3e}, max={x.max().item():.3e}, mean={x.mean().item():.3e}, std={x.std().item():.3e}")
+                    break
+
         # Extract losses using the robust extraction
         total_loss = main_loss
         recon_loss = result.get('recon_loss', result.get('reconstruction_loss', None))
@@ -1350,7 +1386,7 @@ class LightningRlVAETrainer(L.LightningModule):
             for flow in self.model.flow_manager.flows:
                 flow_params += list(flow.parameters())
             if flow_params:
-                param_groups.append({'params': flow_params, 'lr': base_lr * 0.1, 'weight_decay': wd})
+                param_groups.append({'params': flow_params, 'lr': base_lr * 1.0, 'weight_decay': wd})
         flow_ids = set(id(p) for p in flow_params)
 
         metric_params = []
