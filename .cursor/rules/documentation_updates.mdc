@@ -1,4 +1,0 @@
----
-alwaysApply: true
----
-Document all new features/components in a "new_things" changelog or similar file. Do not update the main documentation for every small change; batch updates in the changelog for each PR. See [CURSOR_RULES.md](mdc:CURSOR_RULES.md) rule 10.

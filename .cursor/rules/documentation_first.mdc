@@ -1,4 +1,0 @@
----
-alwaysApply: true
----
-Always read all documentation files (.md and .cursor_context.md) at the start of a new chat or when context may have changed, before answering or making code changes. See [CURSOR_RULES.md](mdc:CURSOR_RULES.md) rule 1.

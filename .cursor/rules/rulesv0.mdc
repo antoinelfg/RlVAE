@@ -1,5 +1,0 @@
----
-alwaysApply: true
----
-
-All Cursor agents and contributors must read and follow the rules in [CURSOR_RULES.md](mdc:CURSOR_RULES.md) before answering any question or making any code change. These rules are always enforced in every session.

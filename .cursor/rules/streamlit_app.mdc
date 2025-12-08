@@ -1,4 +1,0 @@
----
-alwaysApply: true
----
-Treat the Streamlit app as a secondary interface. Prioritize CLI and pipeline integration for new features. Only update the Streamlit app if specifically requested or if the feature is user-facing and interactive. See [CURSOR_RULES.md](mdc:CURSOR_RULES.md) rule 9.

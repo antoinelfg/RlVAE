@@ -1,5 +1,0 @@
----
-alwaysApply: true
----
-
-When you know what to do, directly modify the code without asking for permission or what the user wants to do, unless clarification is needed. See [CURSOR_RULES.md](mdc:CURSOR_RULES.md) rule 14.

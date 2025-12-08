@@ -1,4 +1,0 @@
----
-alwaysApply: true
----
-All new experiment types, models, and configurations must be Hydra-based. Do not create ad-hoc scripts or configs outside the Hydra system. Ensure all parameters are configurable via Hydra. See [CURSOR_RULES.md](mdc:CURSOR_RULES.md) rule 11.

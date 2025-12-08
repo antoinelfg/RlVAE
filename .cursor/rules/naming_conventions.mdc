@@ -1,5 +1,0 @@
----
-alwaysApply: true
----
-
-Enforce a consistent, descriptive naming scheme for all experiments, models, metrics, and outputs. If a naming pattern is not already established, propose one and confirm with the user before applying it broadly. Ensure all new files, folders, and WandB runs follow the agreed naming scheme. See [CURSOR_RULES.md](mdc:CURSOR_RULES.md) rule 3.
