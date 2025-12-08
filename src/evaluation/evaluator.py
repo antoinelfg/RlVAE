@@ -31,7 +31,7 @@ import wandb
 from src.evaluation.fid_scorer import FIDScorer, create_fid_scorer
 from src.generation.generator import RlVAEGenerator, GenerationConfig, create_generator
 from src.inference.inference_pipeline import RlVAEInferencePipeline, InferenceConfig, create_inference_pipeline
-from src.models.modular_rlvae import ModularRiemannianFlowVAE
+from rlvae.models.modular_rlvae import ModularRiemannianFlowVAE
 
 
 @dataclass

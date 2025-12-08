@@ -34,7 +34,7 @@ except ImportError:
     from pathlib import Path
     sys.path.append(str(Path(__file__).parent.parent.parent))
     
-    from src.models.modular_rlvae import ModularRiemannianFlowVAE as RlVAE
+    from rlvae.models.modular_rlvae import ModularRiemannianFlowVAE as RlVAE
     from src.data.datasets import get_dataloader
     from src.evaluation.fid_scorer import FIDScorer
     from src.visualizations.manager import VisualizationManager

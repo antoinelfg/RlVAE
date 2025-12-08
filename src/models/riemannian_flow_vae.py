@@ -10,7 +10,7 @@ from pythae.models.base.base_utils import ModelOutput
 from pythae.models.normalizing_flows.iaf import IAF, IAFConfig
 from pythae.models.nn import BaseEncoder, BaseDecoder
 from pythae.models.nn.default_architectures import Encoder_VAE_MLP, Decoder_AE_MLP
-from models.components.flow_manager import FlowManager
+from rlvae.models.components.flow_manager import FlowManager
 
 # Import official RHVAE components
 try:

@@ -19,7 +19,7 @@ import numpy as np
 import random
 import torchvision.utils as vutils
 
-from models.modular_rlvae import ModularRiemannianFlowVAE
+from rlvae.models.modular_rlvae import ModularRiemannianFlowVAE
 from visualizations.manager import VisualizationManager, VisualizationLevel, VisualizationConfig
 from generation.generator import RlVAEGenerator
 from evaluation.fid_scorer import FIDScorer

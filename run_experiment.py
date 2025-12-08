@@ -69,7 +69,7 @@ from visualizations.manager import VisualizationManager
 try:
     from rlvae.models.components.metric_utils import compute_metric_weights, normalize_metric_atoms, half_logdet_volume
 except Exception:
-    from models.components.metric_utils import compute_metric_weights, normalize_metric_atoms
+    from rlvae.models.components.metric_utils import compute_metric_weights, normalize_metric_atoms
 try:
     from rlvae.utils.stagec_debugger import stagec_debugger
 except Exception:
@@ -1012,8 +1012,8 @@ class ExperimentRunner:
                 extract_diverse_metric,
                 save_model_components,
             )
-        from models.components.metric_tensor import MetricTensor
-        from models.components.native_inverse_metric import NativeInverseMetricTensor, NativeInverseRHMC
+        from rlvae.models.components.metric_tensor import MetricTensor
+        from rlvae.models.components.native_inverse_metric import NativeInverseMetricTensor, NativeInverseRHMC
         import torch
         import os
         import yaml

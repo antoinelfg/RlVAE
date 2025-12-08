@@ -27,7 +27,7 @@ from PIL import Image
 import torchvision.transforms as transforms
 from omegaconf import DictConfig
 
-from src.models.modular_rlvae import ModularRiemannianFlowVAE
+from rlvae.models.modular_rlvae import ModularRiemannianFlowVAE
 
 
 @dataclass

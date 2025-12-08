@@ -24,7 +24,7 @@ import warnings
 from dataclasses import dataclass
 from omegaconf import DictConfig
 
-from src.models.modular_rlvae import ModularRiemannianFlowVAE
+from rlvae.models.modular_rlvae import ModularRiemannianFlowVAE
 from src.models.samplers import WorkingRiemannianSampler, RiemannianHMCSampler, OfficialRHVAESampler
 
 
