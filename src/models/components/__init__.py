@@ -1,49 +1,25 @@
 """
-Model components module.
+Legacy model components module.
 
-This module contains all the concrete implementations of model components
-(encoders, decoders, metrics, flows, priors, posteriors, samplers, losses).
+This module has been deprecated. Use rlvae.models.components instead.
 """
 
-# Import all component types
-from .encoders import *
-from .decoders import *
-from .metric import *
-from .flows import *
-from .priors import *
-from .posteriors import *
-from .samplers import *
-from .losses import *
+# Re-export from rlvae.models.components for backwards compatibility
+try:
+    from rlvae.models.components.encoder_manager import EncoderManager
+    from rlvae.models.components.decoder_manager import DecoderManager
+    from rlvae.models.components.flow_manager import FlowManager
+    from rlvae.models.components.loss_manager import LossManager
+    from rlvae.models.components.metric_tensor import MetricTensor
+    from rlvae.models.components.metric_loader import MetricLoader
+except ImportError:
+    pass
 
 __all__ = [
-    # Encoders
-    "MLPEncoder",
-    "CNNEncoder",
-    # Decoders  
-    "MLPDecoder",
-    "CNNDecoder",
-    # Metrics
-    "LearnedMetric",
-    "IdentityMetric",
-    "FixedMetric",
-    # Flows
-    "AffineFlow",
-    "PlanarFlow",
-    "RadialFlow",
-    # Priors
-    "VolumePrior",
-    "RiemannianGaussianPrior",
-    "StandardGaussianPrior",
-    # Posteriors
-    "LocalRiemannianPosterior",
-    "EuclideanGaussianPosterior",
-    # Samplers
-    "ReparameterizationSampler",
-    "RHMCSampler",
-    # Losses
-    "GaussianReconstructionLoss",
-    "BernoulliReconstructionLoss",
-    "KLVolumePriorLoss",
-    "KLEuclideanLoss",
-    "ELBOLoss",
-] 
+    "EncoderManager",
+    "DecoderManager", 
+    "FlowManager",
+    "LossManager",
+    "MetricTensor",
+    "MetricLoader",
+]
