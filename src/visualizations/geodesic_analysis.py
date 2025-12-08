@@ -24,8 +24,12 @@ except ImportError as e:
     GEODESIC_TOOLBOX_AVAILABLE = False
 
 from .base import BaseVisualization
-from .adapters import RLVAEGeodesicAdapter
+from .adapters import RLVAEGeodesicAdapter, GEODESIC_TOOLBOX_AVAILABLE as ADAPTER_AVAILABLE
 from .adapters.unified_model_adapter import UnifiedModelAdapter
+
+# Update availability flag based on adapter
+if not ADAPTER_AVAILABLE:
+    GEODESIC_TOOLBOX_AVAILABLE = False
 
 
 class GeodesicAnalysisVisualizations(BaseVisualization):

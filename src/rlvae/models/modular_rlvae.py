@@ -141,18 +141,23 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             # we'll still replace G/G_inv with the modular metric below.
             extra_kwargs['metric'] = config.metric
 
+        # Store extra_kwargs for modular use, but don't pass to parent
+        # (parent RiemannianFlowVAE has a simpler signature)
+        self._extra_config = extra_kwargs
+
         super().__init__(
             input_dim=tuple(config.input_dim),
             latent_dim=int(config.latent_dim),
             n_flows=int(config.n_flows),
-            flow_hidden_dims=flow_hidden_dims,
+            flow_hidden_size=flow_hidden_size,
+            flow_n_blocks=flow_n_blocks,
+            flow_n_hidden=flow_n_hidden,
             beta=float(config.beta),
             encoder=None,  # Will be created by manager
             decoder=None,  # Will be created by manager
             loop_mode=str(config.loop.mode),
             posterior_type=str(config.posterior.type),
             riemannian_beta=float(config.get('riemannian_beta', config.beta)),
-            **extra_kwargs
         )
         self._debug_prev_logvar_stats: Optional[Dict[str, float]] = None
         # Handle case where encoder is None (will be created automatically)

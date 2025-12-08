@@ -8,7 +8,16 @@ with the geodesic_toolbox for computing geodesic trajectories.
 import torch
 import numpy as np
 from typing import Optional, Union, Tuple
-from geodesic_toolbox import CoMetric, CentroidsCometric, IdentityCoMetric
+
+# Optional geodesic_toolbox import
+try:
+    from geodesic_toolbox import CoMetric, CentroidsCometric, IdentityCoMetric
+    GEODESIC_TOOLBOX_AVAILABLE = True
+except ImportError:
+    GEODESIC_TOOLBOX_AVAILABLE = False
+    CoMetric = None
+    CentroidsCometric = None
+    IdentityCoMetric = None
 
 from .unified_model_adapter import UnifiedModelAdapter
 
