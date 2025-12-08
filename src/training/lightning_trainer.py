@@ -26,7 +26,7 @@ from generation.generator import RlVAEGenerator
 from evaluation.fid_scorer import FIDScorer
 from evaluation.evaluator import ModelEvaluator
 from inference.inference_pipeline import RlVAEInferencePipeline
-from models.factory import ModelFactory
+from rlvae.models.factory import ModelFactory
 from config.validator import validate_model_config
 from config.settings_views import build_model_config_from_settings
 

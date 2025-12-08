@@ -39,27 +39,27 @@ class ModelFactory:
             'config_style': 'direct'
         },
         'riemannian_flow_vae': {
-            'module': 'models.riemannian_flow_vae',
+            'module': 'rlvae.models.base.riemannian_flow_vae',
             'class': 'RiemannianFlowVAE',
             'config_style': 'kwargs'  # Pass config fields as kwargs
         },
         'rhvae_working': {
-            'module': 'models.rhvae_working',
+            'module': 'models.rhvae_working',  # Legacy, may be removed
             'class': 'RiemannianFlowVAE',
             'config_style': 'kwargs'
         },
         'composite_rlvae': {
-            'module': 'models.composite.rlvae',
+            'module': 'models.composite.rlvae',  # Legacy, may be removed
             'class': 'RLVAE',
-            'config_style': 'hydra'  # Use Hydra instantiate
+            'config_style': 'hydra'
         },
         'composite_vae': {
-            'module': 'models.composite.vae',
+            'module': 'models.composite.vae',  # Legacy, may be removed
             'class': 'VAE',
             'config_style': 'hydra'
         },
         'vanilla_vae': {
-            'module': 'models.modular_vanilla_vae',
+            'module': 'models.modular_vanilla_vae',  # Legacy, may be removed
             'class': 'ModularVanillaVAE',
             'config_style': 'direct'
         }

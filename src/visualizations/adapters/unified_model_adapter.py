@@ -12,7 +12,7 @@ from typing import Optional, Dict, Any, Tuple, Union
 import warnings
 import numpy as np
 
-from models.base.unified_rlvae import UnifiedRLVAEInterface, ensure_unified_interface
+from rlvae.models.base.unified_rlvae import UnifiedRLVAEInterface, ensure_unified_interface
 
 
 class UnifiedModelAdapter:

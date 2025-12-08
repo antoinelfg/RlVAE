@@ -1,9 +1,13 @@
 """
-Lightweight models package init to avoid heavy imports at package import time.
+Lightweight models package init.
 
-Import modules directly where needed, e.g.:
-  from models.riemannian_flow_vae import RiemannianFlowVAE
-  from models.modular_vanilla_vae import ModularVanillaVAE
+Note: Most model implementations have moved to rlvae.models.*
+This package contains legacy/specialized models.
+
+For main models, use:
+  from rlvae.models.modular_rlvae import ModularRiemannianFlowVAE
+  from rlvae.models.riemannian_flow_vae import RiemannianFlowVAE
+  from rlvae.models.factory import ModelFactory
 """
 
 __all__ = []
