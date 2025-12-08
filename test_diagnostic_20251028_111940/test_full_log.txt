@@ -1,7 +1,0 @@
-Could not override 'trainer.max_epochs'.
-To append to your config use +trainer.max_epochs=1
-Key 'trainer' is not in struct
-    full_key: trainer
-    object_type=dict
-
-Set the environment variable HYDRA_FULL_ERROR=1 for a complete stack trace.
