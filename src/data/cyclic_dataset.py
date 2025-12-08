@@ -151,6 +151,7 @@ class CyclicSpritesDataModule(L.LightningDataModule):
         self.num_workers = config.get('num_workers', 4)
         self.pin_memory = config.get('pin_memory', True)
         self.persistent_workers = config.get('persistent_workers', True)
+        self.drop_last = bool(config.get('drop_last', False))
         
         # Data validation
         self.verify_cyclicity = config.get('verify_cyclicity', True)
@@ -188,6 +189,8 @@ class CyclicSpritesDataModule(L.LightningDataModule):
                 self.batch_size = training_config.data.batch_size
                 self.num_workers = training_config.data.num_workers
                 self.pin_memory = training_config.data.pin_memory
+                if hasattr(training_config.data, 'drop_last'):
+                    self.drop_last = bool(training_config.data.drop_last)
             # Re-apply safety override after reading training config
             import os
             if os.environ.get("RLVAE_CUDA_SAFE_DATALOADER", "0") == "1":
@@ -199,6 +202,7 @@ class CyclicSpritesDataModule(L.LightningDataModule):
                 self.batch_size = training_config.batch_size
                 self.num_workers = training_config.get('num_workers', 4)
                 self.pin_memory = training_config.get('pin_memory', True)
+                self.drop_last = bool(training_config.get('drop_last', self.drop_last))
             
             # Handle data splits
             if hasattr(training_config, 'data_splits'):
@@ -250,6 +254,7 @@ class CyclicSpritesDataModule(L.LightningDataModule):
             shuffle=True,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
+            drop_last=self.drop_last,
             persistent_workers=self.num_workers > 0  # Enable if we have workers
         )
     
@@ -263,6 +268,7 @@ class CyclicSpritesDataModule(L.LightningDataModule):
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
+            drop_last=self.drop_last,
             persistent_workers=self.num_workers > 0  # Enable if we have workers
         )
     
@@ -276,6 +282,7 @@ class CyclicSpritesDataModule(L.LightningDataModule):
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
+            drop_last=self.drop_last,
             persistent_workers=self.num_workers > 0  # Enable if we have workers
         )
     

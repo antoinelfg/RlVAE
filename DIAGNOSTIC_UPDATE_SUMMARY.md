@@ -187,3 +187,4 @@ rhmc_alpha: 1.0                      # Try adjusting scaling
 **Next**: Run training with `RLVAE_DEBUG=1` and analyze output  
 **Expected**: Clear identification of where Σ gets modified
 
+

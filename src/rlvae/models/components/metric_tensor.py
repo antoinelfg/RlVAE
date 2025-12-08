@@ -283,7 +283,7 @@ class MetricTensor(nn.Module):
         fit_batch_size: int = 128,
         fit_print_every: int = 200,
         normalize_weight_sum: bool = False,
-        weight_kernel: str = 'mahalanobis_normed',
+        weight_kernel: str = 'isotropic',
         weight_metric_normalization: str = 'trace',
         topk_weights: Optional[int] = 0,
         regularization_mode: str = 'precision',
@@ -305,7 +305,8 @@ class MetricTensor(nn.Module):
 
         # ---- weighting / mixing (defaults emulate the original working code)
         self.normalize_weight_sum = bool(normalize_weight_sum)
-        self.weight_kernel = str(weight_kernel).lower()
+        # Default to isotropic Euclidean weighting when unset to match Slide 42
+        self.weight_kernel = str(weight_kernel or 'isotropic').lower()
         self.weight_metric_normalization = str(weight_metric_normalization).lower()
         self.topk_weights = int(topk_weights) if topk_weights is not None else None
         if self.topk_weights is not None and self.topk_weights <= 0:

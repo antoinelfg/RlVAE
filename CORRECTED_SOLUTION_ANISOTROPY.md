@@ -286,3 +286,4 @@ python run_experiment.py experiment=rlvae_three_stage_long_rhmc_modular
 **Statut** : ✅ **SOLUTION CORRIGÉE APPLIQUÉE**  
 **Prochaine validation** : Après 5-10 epochs avec `alpha=0.1`, `mode=none`
 
+

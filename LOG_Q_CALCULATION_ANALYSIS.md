@@ -249,3 +249,4 @@ Le calcul de `log_q` est **mathématiquement correct**, mais la distribution gau
 
 **Test crucial** : Redémarrer l'entraînement avec `sigma_normalization_mode: 'trace'` et vérifier si `log_q` devient moins négatif et si KL devient positive.
 
+

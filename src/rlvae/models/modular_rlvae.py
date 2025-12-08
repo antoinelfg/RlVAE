@@ -185,7 +185,14 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         self.expects_sequence_input = True
         
         # Initialize μ alignment settings
-        self.mu_alignment_enabled = bool(getattr(self.config, 'mu_alignment_enabled', True))
+        # CRITICAL: Default was True which causes μ to be forcibly aligned to centroids - breaking training!
+        _mu_align_cfg = getattr(self.config, 'mu_alignment_enabled', None)
+        if _mu_align_cfg is None:
+            print("⚠️ [ANCHOR BUG] mu_alignment_enabled NOT in config - defaulting to FALSE (was True, broke training!)")
+            self.mu_alignment_enabled = False
+        else:
+            self.mu_alignment_enabled = bool(_mu_align_cfg)
+            print(f"[ANCHOR CONFIG] mu_alignment_enabled={self.mu_alignment_enabled} (from config)")
         self._mu_align_ready = False
         self._mu_align_scale = None  # [D]
         self._mu_align_bias = None   # [D]
@@ -296,7 +303,7 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             init_from_fixed=init_from_fixed,
             fixed_metric_path=fixed_metric_path,
             normalize_weight_sum=metric_cfg.get('normalize_weight_sum', False),
-            weight_kernel=metric_cfg.get('weight_kernel', 'mahalanobis_normed'),
+            weight_kernel=metric_cfg.get('weight_kernel') or 'isotropic',
             weight_metric_normalization=metric_cfg.get('weight_metric_normalization', 'trace'),
             topk_weights=metric_cfg.get('topk_weights', None),
             regularization_mode=metric_cfg.get('regularization_mode', 'precision'),
@@ -310,6 +317,16 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
                 self.modular_metric.eig_ceiling = float(metric_cfg['eig_ceiling'])
             if 'bg_strength' in metric_cfg and metric_cfg['bg_strength'] is not None:
                 self.modular_metric.bg_strength = float(metric_cfg['bg_strength'])
+            # Diagnostic: show metric bounds and expected condition number
+            g_inv_floor = self.modular_metric.eig_floor_abs
+            g_inv_ceil = self.modular_metric.eig_ceiling
+            g_max = 1.0 / g_inv_floor if g_inv_floor > 0 else float('inf')
+            g_min = 1.0 / g_inv_ceil if g_inv_ceil < float('inf') else 0
+            cond = g_max / g_min if g_min > 0 else float('inf')
+            print(f"[METRIC BOUNDS] G^-1 eigenvalues: [{g_inv_floor}, {g_inv_ceil}]")
+            print(f"[METRIC BOUNDS] G eigenvalues: [{g_min:.2f}, {g_max:.2f}]")
+            print(f"[METRIC BOUNDS] Expected condition number: {cond:.1f}")
+            print(f"[METRIC BOUNDS] bg_strength={self.modular_metric.bg_strength}")
             if 'bg_floor' in metric_cfg and metric_cfg['bg_floor'] is not None:
                 self.modular_metric.bg_floor = float(metric_cfg['bg_floor'])
             if 'use_background_identity' in metric_cfg and metric_cfg['use_background_identity'] is not None:
@@ -363,6 +380,7 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         kl_amp_safe = loss_cfg.get('kl_amp_safe', getattr(self.config, 'kl_amp_safe', True))
         kl_metric_eval_point = loss_cfg.get('kl_metric_eval_point', getattr(self.config, 'kl_metric_eval_point', 'z'))
         mu_l2_weight = float(loss_cfg.get('mu_l2_weight', getattr(self.config, 'mu_l2_weight', 0.0)))
+        flow_weight = float(loss_cfg.get('flow_weight', getattr(self.config, 'flow_weight', 0.0)))
         kl_prior_mode_cfg = loss_cfg.get('kl_prior_mode', getattr(self.config, 'kl_prior_mode', 'uniform'))
         volume_bias_weight = float(loss_cfg.get('volume_bias_weight', getattr(self.config, 'volume_bias_weight', 1.0)))
         volume_grad_scale = float(loss_cfg.get('volume_grad_scale', getattr(self.config, 'volume_grad_scale', 1.0)))
@@ -382,6 +400,18 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
         metric_rep_pref = loss_cfg.get('metric_representation', 'g')
         mu_centroid_weight = float(loss_cfg.get('mu_centroid_weight', getattr(self.config, 'mu_centroid_weight', 5.0)))
         mu_volume_weight = float(loss_cfg.get('mu_volume_weight', getattr(self.config, 'mu_volume_weight', 0.0)))
+        # DIAGNOSTIC: Print anchoring params to catch config forwarding issues
+        print(f"[ANCHOR CONFIG] mu_centroid_weight={mu_centroid_weight} (default would be 5.0)")
+        print(f"[ANCHOR CONFIG] mu_volume_weight={mu_volume_weight}")
+        print(f"[ANCHOR CONFIG] mu_alignment_enabled={getattr(self.config, 'mu_alignment_enabled', 'NOT_SET')}")
+        # Flow loss mode: 'relu' (default), 'l2', 'abs', 'frobenius', 'none'
+        flow_loss_mode = str(loss_cfg.get('flow_loss_mode', getattr(self.config, 'flow_loss_mode', 'relu')))
+        # FIX: recon_scale was hardcoded to 500.0, causing reconstruction to dominate!
+        recon_scale = float(loss_cfg.get('recon_scale', getattr(self.config, 'recon_scale', 1.0)))
+        beta_val = float(loss_cfg.get('beta', self.config_resolved.get('beta', 1.0)))
+        riem_beta_val = float(loss_cfg.get('riemannian_beta', self.config_resolved.get('riemannian_beta', beta_val)))
+        print(f"[LOSS BALANCE] recon_scale={recon_scale}, beta={beta_val}, riemannian_beta={riem_beta_val}")
+        print(f"[LOSS BALANCE] Expected: recon_loss ≈ {recon_scale}*MSE, kl_loss ≈ {beta_val}*KL")
         self.loss_manager = LossManager(
             beta=float(loss_cfg.get('beta', self.config_resolved.get('beta', 1.0))),
             riemannian_beta=float(loss_cfg.get('riemannian_beta', self.config_resolved.get('riemannian_beta', self.config_resolved.get('beta', 1.0)))),
@@ -394,6 +424,8 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             mu_l2_weight=mu_l2_weight,
             mu_centroid_weight=mu_centroid_weight,
             mu_volume_weight=mu_volume_weight,
+            flow_weight=flow_weight,
+            recon_scale=recon_scale,
             kl_prior_mode=kl_prior_mode_cfg,
             kl_use_metric_normalization=kl_use_metric_normalization,
             kl_metric_norm_mode=kl_metric_norm_mode,
@@ -405,6 +437,7 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             use_flow_corrections=use_flow_corrections,
             kl_include_logZ_in_loss=bool(loss_cfg.get('kl_include_logZ_in_loss', getattr(self.config, 'kl_include_logZ_in_loss', False))),
             kl_flip_logq_sign=bool(loss_cfg.get('kl_flip_logq_sign', getattr(self.config, 'kl_flip_logq_sign', False))),
+            flow_loss_mode=flow_loss_mode,
         )
         # Route tracing: LossManager created successfully
         if not hasattr(self, '_loss_created_traced'):
@@ -1219,10 +1252,13 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             encoder_out = self.encoder(x_0)
         mu = encoder_out.embedding
         log_var = encoder_out.log_covariance
-        # Hard finite check immediately after encoder forward
-        for name, tensor in (("mu", mu), ("log_var", log_var)):
-            if isinstance(tensor, torch.Tensor) and (torch.isnan(tensor).any() or torch.isinf(tensor).any()):
-                print(f"\n[ENCODER NAN GUARD][post-encoder] {name} contains NaN/Inf before any alignment/metric")
+        # Hard finite check immediately after encoder forward (sanitize instead of crash)
+        def _sanitize_latent(name: str, tensor: torch.Tensor) -> torch.Tensor:
+            if not isinstance(tensor, torch.Tensor):
+                return tensor
+            if torch.isnan(tensor).any() or torch.isinf(tensor).any():
+                print(f"\n[ENCODER NAN GUARD][post-encoder] {name} contains NaN/Inf before any alignment/metric; applying nan_to_num")
+                finite = None
                 try:
                     finite = torch.isfinite(tensor)
                     print(f"  {name} finite count: {finite.sum().item()} / {tensor.numel()}")
@@ -1234,7 +1270,22 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
                     print(f"  Input x stats: min={x_0.min().item():.3e}, max={x_0.max().item():.3e}, mean={x_0.mean().item():.3e}, std={x_0.std().item():.3e}")
                 except Exception:
                     pass
-                raise RuntimeError(f"NaN/Inf detected in encoder output immediately after forward: {name}")
+                try:
+                    stagec_debugger.log_fallback(
+                        "encoder_nan_guard",
+                        reason=f"{name}_nan",
+                        payload={
+                            "finite_frac": float(finite.sum().item()) / float(tensor.numel()) if finite is not None else 0.0,
+                            "shape": list(tensor.shape),
+                        },
+                    )
+                except Exception:
+                    pass
+                tensor = torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
+            return tensor
+
+        mu = _sanitize_latent("mu", mu)
+        log_var = _sanitize_latent("log_var", log_var)
         stagec_debugger.log_event(
             "encoder_forward",
             {
@@ -1690,6 +1741,7 @@ class ModularRiemannianFlowVAE(RiemannianFlowVAE):
             'reconstruction_loss': losses['reconstruction_loss'],
             'kl_divergence_loss': losses['kl_divergence_loss'],
             'flow_loss': losses['flow_loss'],
+            'linear_flow_loss': losses.get('linear_flow_loss', None),
             'loop_penalty': losses['loop_penalty'],
             'total_loss': losses['total_loss']
         }

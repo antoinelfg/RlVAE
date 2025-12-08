@@ -221,3 +221,4 @@ But this (target radius + geomean) is almost certainly the main cause of the dis
 **Fix**: Set `initial_target_radius: 0.0` and `sigma_normalization_mode: 'none'`  
 **Next**: Test with fixed configuration
 
+

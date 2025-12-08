@@ -249,3 +249,4 @@ You'll see detailed output for:
 
 All diagnostics are **silent** by default (`RLVAE_DEBUG=0`) to avoid cluttering training logs.
 
+

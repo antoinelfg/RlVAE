@@ -908,9 +908,14 @@ class LightningRlVAETrainer(L.LightningModule):
         if flow_loss is None and hasattr(result, 'get'):
             # Fallback for modular wrapper aliases
             flow_loss = result.get('kl_divergence_loss', None)
+        linear_flow_loss = result.get('linear_flow_loss', None)
         # Only log if present
         if recon_loss is not None:
             self.log('train_recon_loss', recon_loss)
+            # Log UNSCALED MSE for cross-sweep comparability
+            recon_scale = getattr(self.model.loss_manager, 'recon_scale', 1.0) if hasattr(self.model, 'loss_manager') else 1.0
+            if recon_scale != 0:
+                self.log('train_mse', recon_loss / recon_scale, prog_bar=False)
         else:
             print("[WARNING] 'reconstruction_loss' not in model output during training_step.")
         if kl_loss is not None:
@@ -921,6 +926,8 @@ class LightningRlVAETrainer(L.LightningModule):
         # Log additional metrics if available
         if flow_loss is not None:
             self.log('train_flow_loss', flow_loss)
+        if linear_flow_loss is not None:
+            self.log('train_linear_flow_loss', linear_flow_loss)
         if 'riemannian_kl' in result:
             self.log('train_riemannian_kl', result['riemannian_kl'])
         if 'cyclicity_error' in result:
@@ -984,6 +991,13 @@ class LightningRlVAETrainer(L.LightningModule):
                     if isinstance(x, torch.Tensor):
                         print(f"  Input stats: min={x.min().item():.3e}, max={x.max().item():.3e}, mean={x.mean().item():.3e}, std={x.std().item():.3e}")
                     break
+        
+        # ===== NaN LOSS PROTECTION =====
+        # If loss is NaN/Inf, return zero to skip this step and prevent gradient corruption
+        if total_loss is not None and not torch.isfinite(total_loss):
+            print(f"[LOSS SANITIZE] Loss is NaN/Inf ({total_loss.item():.4e}), returning zero loss to skip step")
+            return torch.tensor(0.0, device=total_loss.device, requires_grad=True)
+        # ===============================
         
         return total_loss
     
@@ -1076,8 +1090,16 @@ class LightningRlVAETrainer(L.LightningModule):
         self.log('val_loss', total_loss, prog_bar=True)
         self.log('val_recon_loss', recon_loss)
         self.log('val_kl_loss', kl_loss)
+        
+        # Log UNSCALED MSE for cross-sweep comparability (independent of recon_scale)
+        recon_scale = getattr(self.model.loss_manager, 'recon_scale', 1.0) if hasattr(self.model, 'loss_manager') else 1.0
+        if recon_scale != 0:
+            val_mse = recon_loss / recon_scale
+            self.log('val_mse', val_mse, prog_bar=False)
         if 'flow_loss' in result and result['flow_loss'] is not None:
             self.log('val_flow_loss', result['flow_loss'])
+        if 'linear_flow_loss' in result and result['linear_flow_loss'] is not None:
+            self.log('val_linear_flow_loss', result['linear_flow_loss'])
         # Log additional metrics
         if 'riemannian_kl' in result:
             self.log('val_riemannian_kl', result['riemannian_kl'])
@@ -1134,6 +1156,8 @@ class LightningRlVAETrainer(L.LightningModule):
         }
         if 'flow_loss' in result and result['flow_loss'] is not None:
             metrics['test_flow_loss'] = result['flow_loss']
+        if 'linear_flow_loss' in result and result['linear_flow_loss'] is not None:
+            metrics['test_linear_flow_loss'] = result['linear_flow_loss']
         
         # Add additional metrics
         if 'riemannian_kl' in result:
@@ -1386,7 +1410,7 @@ class LightningRlVAETrainer(L.LightningModule):
             for flow in self.model.flow_manager.flows:
                 flow_params += list(flow.parameters())
             if flow_params:
-                param_groups.append({'params': flow_params, 'lr': base_lr * 1.0, 'weight_decay': wd})
+                param_groups.append({'params': flow_params, 'lr': base_lr * 10, 'weight_decay': wd})
         flow_ids = set(id(p) for p in flow_params)
 
         metric_params = []
@@ -1674,7 +1698,22 @@ class LightningRlVAETrainer(L.LightningModule):
             print(f"⚠️ Metric panel logging failed: {e}")
 
     def on_before_optimizer_step(self, optimizer, optimizer_idx: int = 0):
-        """Log gradient norms and learning rate for the metric network."""
+        """Log gradient norms and learning rate for the metric network.
+        Also sanitize NaN/Inf gradients to prevent encoder corruption."""
+        # ===== NaN GRADIENT PROTECTION =====
+        # Replace NaN/Inf gradients with zeros to prevent weight corruption
+        nan_grad_count = 0
+        total_grad_count = 0
+        for param in self.model.parameters():
+            if param.grad is not None:
+                total_grad_count += 1
+                if not torch.isfinite(param.grad).all():
+                    nan_grad_count += 1
+                    param.grad = torch.nan_to_num(param.grad, nan=0.0, posinf=0.0, neginf=0.0)
+        if nan_grad_count > 0:
+            print(f"[GRAD SANITIZE] Replaced NaN/Inf in {nan_grad_count}/{total_grad_count} parameter gradients")
+        # ===================================
+        
         metric_net = getattr(self.model, 'modular_metric', None)
         if metric_net is None or not getattr(metric_net, 'trainable', False):
             return

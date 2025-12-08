@@ -79,3 +79,4 @@ python rescale_stage_b_metric.py --scale-factor 50.0
 
 See `STAGE_B_RESCALING_SOLUTION.md` for complete analysis and technical details.
 
+

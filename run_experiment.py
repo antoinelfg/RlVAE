@@ -165,10 +165,47 @@ class ExperimentRunner:
             except Exception:
                 pass
             try:
-                cloned = OmegaConf.to_container(cfg_value, resolve=False)
+                    cloned = OmegaConf.to_container(cfg_value, resolve=False)
             except Exception:
                 cloned = cfg_value
             OmegaConf.update(cfg, settings_path, cloned, force_add=True)
+
+    def _maybe_run_data_analysis(self, data_module=None, wandb_run=None) -> None:
+        """Optionally build a quick ellipse data overview panel before training."""
+        cfg_da = getattr(self.config, "data_analysis", None)
+        if cfg_da is None or not bool(getattr(cfg_da, "enabled", False)):
+            return
+        if "data_analysis" in self.results:
+            return
+        try:
+            from data.ellipse_analysis import generate_ellipse_data_report
+
+            dm = data_module
+            if dm is None:
+                dm = build_data_module(self.config.data)
+                dm.setup("fit", getattr(self.config, "training", None))
+
+            root_dir = getattr(cfg_da, "output_dir", None)
+            if root_dir is None or ("${" in str(root_dir)):
+                try:
+                    root_dir = getattr(self.config.output, "run_dir", None)
+                except Exception:
+                    root_dir = None
+            base_dir = Path(root_dir) if root_dir else self.output_dir
+            out_dir = base_dir / "data_analysis"
+
+            report = generate_ellipse_data_report(
+                cfg=self.config,
+                data_module=dm,
+                output_dir=out_dir,
+                max_sequences=int(getattr(cfg_da, "max_sequences", 256)),
+                pairwise_pairs=int(getattr(cfg_da, "pairwise_pairs", 120)),
+                preview_sequences=int(getattr(cfg_da, "preview_sequences", 9)),
+                log_to_wandb=bool(getattr(cfg_da, "log_to_wandb", False) and wandb_run is not None),
+            )
+            self.results["data_analysis"] = report
+        except Exception as e:
+            print(f"[DATA ANALYSIS] ⚠️ Dataset overview failed: {e}")
 
     @staticmethod
     def _get_wandb_artifacts_cfg(cfg: DictConfig) -> Optional[DictConfig]:
@@ -340,6 +377,7 @@ class ExperimentRunner:
         # Create data module
         data_module = build_data_module(self.config.data)
         data_module.setup("fit", self.config.training)
+        self._maybe_run_data_analysis(data_module=data_module, wandb_run=getattr(wandb_logger, "experiment", None))
         
         # Create model
         model_wrapper = LightningRlVAETrainer(
@@ -364,10 +402,12 @@ class ExperimentRunner:
         test_results = trainer.test(model_wrapper, data_module)
         
         # Save results
-        self.results = {
+        combined_results = dict(getattr(self, "results", {}))
+        combined_results.update({
             'test_results': test_results[0] if test_results else {},
             'model_summary': model_wrapper.model.get_model_summary()
-        }
+        })
+        self.results = combined_results
         
         print(f"✅ Single experiment completed!")
         self._save_results()
@@ -435,11 +475,13 @@ class ExperimentRunner:
         wandb_logger = self._setup_wandb("comparison_analysis")
         metrics_collector.log_comparison_to_wandb()
         
-        self.results = {
+        combined_results = dict(getattr(self, "results", {}))
+        combined_results.update({
             'comparison_summary': comparison_summary,
             'individual_results': all_results,
             'comparison_metrics': comparison_metrics
-        }
+        })
+        self.results = combined_results
         
         print(f"✅ Comparison study completed!")
         self._save_results()
@@ -470,6 +512,7 @@ class ExperimentRunner:
         import torchvision.utils as vutils
         import numpy as np
         import yaml
+        self._maybe_run_data_analysis()
         # --- Stage 1: Vanilla VAE + Diverse Metric ---
         if hasattr(self.config.experiment, 'skip_stage1') and self.config.experiment.skip_stage1:
             print("⏭️ Skipping Stage 1 (vanilla VAE) as requested by experiment.skip_stage1=true")
@@ -954,6 +997,8 @@ class ExperimentRunner:
         """
         from torch.utils.data import DataLoader
         cfg = self.config
+        # Fallback component paths (e.g., encoder/decoder) when Stage A is skipped
+        comp_paths = {}
 
         # Lazy-import Stage A/B helpers only when those stages are requested.
         create_vanilla = None
@@ -995,6 +1040,12 @@ class ExperimentRunner:
                 print("Continuing without WandB logging...")
                 self._set_config_value(self.config, "wandb.mode", "disabled")
                 cfg = self.config
+
+        # Optional data sanity panel (ellipse-specific)
+        try:
+            self._maybe_run_data_analysis(wandb_run=wandb.run)
+        except Exception as da_err:
+            print(f"[Data Analysis] ⚠️ Skipping data overview: {da_err}")
 
         # ============================================================================
         # CENTRALIZED STAGE DATA LOOKUP - ELIMINATE ALL DUPLICATION
@@ -1535,88 +1586,102 @@ class ExperimentRunner:
             except Exception as e:
                 print(f"[Stage A] ⚠️ Recon vs real logging failed: {e}")
 
-                # Stage A latent space PCA visualization (μ embeddings)
-                try:
-                    import matplotlib.pyplot as plt
-                    import plotly.graph_objects as go
-                    from torch.utils.data import DataLoader as TorchLoader
-                    from torch.utils.data import ConcatDataset as TorchConcat
-                    vanilla.eval()
-                    combined_dataset = full_training_dataset
-                    full_loader = TorchLoader(combined_dataset, batch_size=256, shuffle=False)
-                    mus = []
-                    with torch.no_grad():
-                        for xb in full_loader:
-                            xb = xb[0] if isinstance(xb, (tuple, list)) else xb
-                            xb = xb.to(self.device)
-                            if xb.dim() == 5:
-                                b, t = xb.shape[:2]
-                                xb = xb.reshape(b * t, *xb.shape[2:])
-                            if effective_arch in ["mlp", "pythae"]:
-                                enc = vanilla.encoder(xb)
-                                mu = enc.embedding
-                            else:
-                                mu, _ = vanilla.encode(xb)
-                            mus.append(mu.detach().cpu())
-                            if sum(t.shape[0] for t in mus) >= 5000:
-                                break
-                    if mus:
-                        Z = torch.cat(mus, dim=0)
-                        Zc = Z - Z.mean(dim=0, keepdim=True)
-                        # Torch PCA via SVD
-                        U, S, Vh = torch.linalg.svd(Zc, full_matrices=False)
-                        comp = Vh[:2].T  # [D,2]
-                        proj = (Zc @ comp).numpy()
-                        plt.figure(figsize=(6,5))
-                        plt.scatter(proj[:,0], proj[:,1], s=4, alpha=0.4, c='tab:blue')
-                        plt.title('Stage A: Latent μ PCA(2)')
-                        plt.xlabel('PC1'); plt.ylabel('PC2'); plt.tight_layout()
-                        if wandb.run is not None:
-                            wandb.log({"stageA/latent_pca": wandb.Image(plt.gcf())})
-                        plt.close()
+            # Stage A latent space PCA visualization (μ embeddings)
+            try:
+                import matplotlib.pyplot as plt
+                import plotly.graph_objects as go
+                from torch.utils.data import DataLoader as TorchLoader
+                from torch.utils.data import ConcatDataset as TorchConcat
+                vanilla.eval()
+                combined_dataset = full_training_dataset
+                full_loader = TorchLoader(combined_dataset, batch_size=256, shuffle=False)
+                mus = []
+                with torch.no_grad():
+                    for xb in full_loader:
+                        xb = xb[0] if isinstance(xb, (tuple, list)) else xb
+                        xb = xb.to(self.device)
+                        if xb.dim() == 5:
+                            b, t = xb.shape[:2]
+                            xb = xb.reshape(b * t, *xb.shape[2:])
+                        if effective_arch in ["mlp", "pythae"]:
+                            enc = vanilla.encoder(xb)
+                            mu = enc.embedding
+                        else:
+                            mu, _ = vanilla.encode(xb)
+                        mus.append(mu.detach().cpu())
+                        if sum(t.shape[0] for t in mus) >= 5000:
+                            break
+                if mus:
+                    Z = torch.cat(mus, dim=0)
+                    Zc = Z - Z.mean(dim=0, keepdim=True)
+                    # Torch PCA via SVD
+                    U, S, Vh = torch.linalg.svd(Zc, full_matrices=False)
+                    comp = Vh[:2].T  # [D,2]
+                    proj = (Zc @ comp).numpy()
+                    plt.figure(figsize=(6,5))
+                    plt.scatter(proj[:,0], proj[:,1], s=4, alpha=0.4, c='tab:blue')
+                    plt.title('Stage A: Latent μ PCA(2)')
+                    plt.xlabel('PC1'); plt.ylabel('PC2'); plt.tight_layout()
+                    if wandb.run is not None:
+                        wandb.log({"stageA/latent_pca": wandb.Image(plt.gcf())})
+                    plt.close()
+            except Exception as e:
+                print(f"[Stage A] ⚠️ Latent PCA visualization failed: {e}")
 
-                        # No epoch sliders — only periodic images every ~10 epochs are logged above
+            # Save vanilla VAE to organized Stage A folder
+            stageA_paths = get_stage_paths(cfg, 'A', 'VANILLA', arch, latent_dim)
+            comp_paths = save_model_components(vanilla, arch, latent_dim, save_dir=str(stageA_paths['base_dir']))
+            # Also persist canonical encoder/decoder filenames for downstream stages
+            try:
+                torch.save(vanilla.encoder.state_dict(), stageA_paths['encoder_path'])
+                torch.save(vanilla.decoder.state_dict(), stageA_paths['decoder_path'])
+            except Exception as save_exc:
+                print(f"[Stage A] ⚠️ Failed to save canonical encoder/decoder: {save_exc}")
+            torch.save(vanilla.state_dict(), stageA_paths['model_path'])
+            # Mirror fresh Stage A weights to generic outputs/stageA for downstream fallback
+            try:
+                stageA_generic = Path(cfg.output_dir) / "stageA"
+                stageA_generic.mkdir(parents=True, exist_ok=True)
+                torch.save(vanilla.encoder.state_dict(), stageA_generic / "encoder.pt")
+                torch.save(vanilla.decoder.state_dict(), stageA_generic / "decoder.pt")
+                torch.save(vanilla.state_dict(), stageA_generic / "model.pt")
+            except Exception as save_exc:
+                print(f"[Stage A] ⚠️ Failed to update generic stageA checkpoints: {save_exc}")
+            
+            # Save Stage A configuration
+            beta_value = getattr(cfg.experiment.stage_a, 'beta', None)
+            if beta_value is None:
+                beta_value = getattr(self.config.settings.model.losses, 'beta', None)
+            stageA_config = {
+                'stage': 'A',
+                'model_type': 'VANILLA',
+                'architecture': arch,
+                'latent_dim': latent_dim,
+                'epochs': cfg.experiment.stage_a.epochs,
+                'lr': cfg.experiment.stage_a.lr,
+                'beta': beta_value,
+                'timestamp': datetime.now().isoformat()
+            }
+            with open(stageA_paths['config_path'], 'w') as f:
+                yaml.dump(stageA_config, f)
+            print(f"[Stage A] ✅ Saved Stage A config to {stageA_paths['config_path']}")
+            # Log Stage A artifacts (encoder/decoder/model) to WandB for pipeline chaining
+            artifacts_enabled = self._wandb_artifacts_enabled(cfg)
+            if cfg.wandb.mode != "disabled" and wandb.run is not None and artifacts_enabled:
+                try:
+                    art = wandb.Artifact(
+                        name=f"stageA_vae_{arch}_ld{latent_dim}",
+                        type="model",
+                        metadata={"stage": "A", "architecture": arch, "latent_dim": latent_dim}
+                    )
+                    if 'encoder' in comp_paths: art.add_file(comp_paths['encoder'])
+                    if 'decoder' in comp_paths: art.add_file(comp_paths['decoder'])
+                    if 'model' in comp_paths:   art.add_file(comp_paths['model'])
+                    alias = self._resolve_wandb_alias(cfg, 'stage_a_latest', 'stageA_latest')
+                    aliases = [alias]
+                    wandb.log_artifact(art, aliases=aliases)
                 except Exception as e:
-                    print(f"[Stage A] ⚠️ Latent PCA visualization failed: {e}")
-                # Save vanilla VAE to organized Stage A folder
-                stageA_paths = get_stage_paths(cfg, 'A', 'VANILLA', arch, latent_dim)
-                comp_paths = save_model_components(vanilla, arch, latent_dim, save_dir=str(stageA_paths['base_dir']))
-                torch.save(vanilla.state_dict(), stageA_paths['model_path'])
-                
-                # Save Stage A configuration
-                beta_value = getattr(cfg.experiment.stage_a, 'beta', None)
-                if beta_value is None:
-                    beta_value = getattr(self.config.settings.model.losses, 'beta', None)
-                stageA_config = {
-                    'stage': 'A',
-                    'model_type': 'VANILLA',
-                    'architecture': arch,
-                    'latent_dim': latent_dim,
-                    'epochs': cfg.experiment.stage_a.epochs,
-                    'lr': cfg.experiment.stage_a.lr,
-                    'beta': beta_value,
-                    'timestamp': datetime.now().isoformat()
-                }
-                with open(stageA_paths['config_path'], 'w') as f:
-                    yaml.dump(stageA_config, f)
-                print(f"[Stage A] ✅ Saved Stage A config to {stageA_paths['config_path']}")
-                # Log Stage A artifacts (encoder/decoder/model) to WandB for pipeline chaining
-                artifacts_enabled = self._wandb_artifacts_enabled(cfg)
-                if cfg.wandb.mode != "disabled" and wandb.run is not None and artifacts_enabled:
-                    try:
-                        art = wandb.Artifact(
-                            name=f"stageA_vae_{arch}_ld{latent_dim}",
-                            type="model",
-                            metadata={"stage": "A", "architecture": arch, "latent_dim": latent_dim}
-                        )
-                        if 'encoder' in comp_paths: art.add_file(comp_paths['encoder'])
-                        if 'decoder' in comp_paths: art.add_file(comp_paths['decoder'])
-                        if 'model' in comp_paths:   art.add_file(comp_paths['model'])
-                        alias = self._resolve_wandb_alias(cfg, 'stage_a_latest', 'stageA_latest')
-                        aliases = [alias]
-                        wandb.log_artifact(art, aliases=aliases)
-                    except Exception as e:
-                        print(f"[Stage A] ⚠️ Artifact logging failed: {e}")
+                    print(f"[Stage A] ⚠️ Artifact logging failed: {e}")
                     # keep single run open
             self.config = stage_a_base
             cfg = self.config
@@ -2350,8 +2415,15 @@ class ExperimentRunner:
                     print(f"  - Encoder path: {stage_a_data['encoder_path']}")
                     print(f"  - Decoder path: {stage_a_data['decoder_path']}")
                     stageB_model = create_vanilla(canonical_arch, input_dim=(cfg.data.channels, cfg.data.image_size[0], cfg.data.image_size[1]), latent_dim=latent_dim).to(self.device)
-                    stageB_model.encoder.load_state_dict(torch.load(stage_a_data['encoder_path'], map_location=self.device, weights_only=False))
-                    stageB_model.decoder.load_state_dict(torch.load(stage_a_data['decoder_path'], map_location=self.device, weights_only=False))
+                    enc_state = torch.load(stage_a_data['encoder_path'], map_location=self.device, weights_only=False)
+                    # Strip possible "encoder." prefix from keys when loading raw state dicts
+                    if isinstance(enc_state, dict):
+                        enc_state = {k.replace("encoder.", "", 1): v for k, v in enc_state.items()}
+                    stageB_model.encoder.load_state_dict(enc_state)
+                    dec_state = torch.load(stage_a_data['decoder_path'], map_location=self.device, weights_only=False)
+                    if isinstance(dec_state, dict):
+                        dec_state = {k.replace("decoder.", "", 1): v for k, v in dec_state.items()}
+                    stageB_model.decoder.load_state_dict(dec_state)
                     print(f"[Stage B] ✅ Successfully loaded Stage A encoder/decoder")
                 else:
                     print(f"[Stage B] ⚠️ No Stage A data found, using fallback model")
@@ -2719,7 +2791,7 @@ class ExperimentRunner:
                     lbd,
                     device,
                     normalize_weight_sum=False,
-                    weight_kernel: str = 'mahalanobis_normed',
+                    weight_kernel: str = 'isotropic',
                     weight_metric_normalization: str = 'trace',
                     topk_weights: int | None = None,
                     metric_scale: float = 1.0,
@@ -2732,7 +2804,7 @@ class ExperimentRunner:
                     self.temperature = torch.as_tensor(T, device=device, dtype=base_dtype)
                     self.regularization = torch.as_tensor(lbd, device=device, dtype=base_dtype)
                     self.normalize_weight_sum = bool(normalize_weight_sum)
-                    self.weight_kernel = (weight_kernel or 'mahalanobis_normed').lower()
+                    self.weight_kernel = (weight_kernel or 'isotropic').lower()
                     self.weight_metric_normalization = (weight_metric_normalization or 'trace').lower()
                     self.topk_weights = int(topk_weights) if topk_weights is not None else None
                     if self.topk_weights is not None and self.topk_weights <= 0:
@@ -2818,7 +2890,7 @@ class ExperimentRunner:
             # Match Stage A behavior if available (fallback False)
             model_cfg = getattr(cfg, 'model', None)
             normalize_w = bool(getattr(model_cfg, 'normalize_weight_sum', True)) if model_cfg else True
-            weight_kernel = str(getattr(model_cfg, 'weight_kernel', 'mahalanobis_normed')) if model_cfg else 'mahalanobis_normed'
+            weight_kernel = str(getattr(model_cfg, 'weight_kernel', 'isotropic') or 'isotropic') if model_cfg else 'isotropic'
             weight_metric_norm = str(getattr(model_cfg, 'weight_metric_normalization', 'trace')) if model_cfg else 'trace'
             topk_weights = getattr(model_cfg, 'topk_weights', 8) if model_cfg else 8
             metric_scale = float(getattr(model_cfg, 'metric_scale', 1.0)) if model_cfg else 1.0
@@ -2947,6 +3019,7 @@ class ExperimentRunner:
                             kernel=weight_kernel,
                             normalize=normalize_w,
                             topk=topk_weights,
+                            stabilize=False
                         )
                         atoms_mix = M2.to(dtype=weights.dtype, device=self.device)
                         Ginv2 = torch.einsum('bk,kij->bij', weights, atoms_mix) + lambda_tensor * eye2  # [b, 2, 2]
@@ -3252,10 +3325,14 @@ class ExperimentRunner:
                 else:
                     print(f"[Stage C] ❌ No encoder/decoder found!")
             
+            # Final path summary (tolerate missing keys)
+            enc_path = getattr(getattr(self.config.model, 'pretrained', {}), 'encoder_path', None)
+            dec_path = getattr(getattr(self.config.model, 'pretrained', {}), 'decoder_path', None)
+            met_path = getattr(getattr(self.config.model, 'pretrained', {}), 'metric_path', None)
             print(f"[Stage C] Final config paths:")
-            print(f"  - Encoder: {self.config.model.pretrained.encoder_path}")
-            print(f"  - Decoder: {self.config.model.pretrained.decoder_path}")
-            print(f"  - Metric: {self.config.model.pretrained.metric_path}")
+            print(f"  - Encoder: {enc_path}")
+            print(f"  - Decoder: {dec_path}")
+            print(f"  - Metric: {met_path}")
             print(f"[Stage C] Final metric config:")
             try:
                 metric_cfg = getattr(self.config.model, 'metric', None)
@@ -4070,7 +4147,7 @@ def get_stage_folder_name(stage, model_type, architecture, latent_dim, dataset_n
     """
     return f"{stage}_{model_type}_{architecture.upper()}_{latent_dim}_{dataset_name}"
 
-def get_stage_paths(cfg, stage, model_type, architecture, latent_dim):
+def get_stage_paths(cfg, stage, model_type, architecture, latent_dim, dataset_name=None):
     """
     Get organized paths for a specific stage.
     
@@ -4084,7 +4161,12 @@ def get_stage_paths(cfg, stage, model_type, architecture, latent_dim):
     Returns:
         dict with organized paths
     """
-    stage_folder = get_stage_folder_name(stage, model_type, architecture, latent_dim)
+    if dataset_name is None:
+        try:
+            dataset_name = str(getattr(cfg.data, 'dataset', 'SPRITES')).upper()
+        except Exception:
+            dataset_name = "SPRITES"
+    stage_folder = get_stage_folder_name(stage, model_type, architecture, latent_dim, dataset_name)
     base_dir = Path(cfg.output_dir) / "stages" / stage_folder
     base_dir.mkdir(parents=True, exist_ok=True)
     
@@ -4128,6 +4210,13 @@ def find_stage_a_data(cfg, architecture, latent_dim):
     stages_dir = Path(cfg.output_dir) / "stages"
     if not stages_dir.exists():
         return None
+    try:
+        dataset_name = str(getattr(cfg.data, 'dataset', 'SPRITES')).upper()
+    except Exception:
+        dataset_name = "SPRITES"
+    dataset_candidates = [dataset_name]
+    if "SPRITES" not in dataset_candidates:
+        dataset_candidates.append("SPRITES")
     
     # Decide preference order based on configured Stage A model
     prefer_vanilla = False
@@ -4136,16 +4225,18 @@ def find_stage_a_data(cfg, architecture, latent_dim):
         prefer_vanilla = (model_choice.startswith('vanilla'))
     except Exception:
         prefer_vanilla = False
-    if prefer_vanilla:
-        possible_folders = [
-            get_stage_folder_name('A', 'VANILLA', architecture, latent_dim),
-            get_stage_folder_name('A', 'RHVAE', architecture, latent_dim)
-        ]
-    else:
-        possible_folders = [
-            get_stage_folder_name('A', 'RHVAE', architecture, latent_dim),
-            get_stage_folder_name('A', 'VANILLA', architecture, latent_dim)
-        ]
+    possible_folders = []
+    for ds_name in dataset_candidates:
+        if prefer_vanilla:
+            possible_folders.extend([
+                get_stage_folder_name('A', 'VANILLA', architecture, latent_dim, ds_name),
+                get_stage_folder_name('A', 'RHVAE', architecture, latent_dim, ds_name)
+            ])
+        else:
+            possible_folders.extend([
+                get_stage_folder_name('A', 'RHVAE', architecture, latent_dim, ds_name),
+                get_stage_folder_name('A', 'VANILLA', architecture, latent_dim, ds_name)
+            ])
     
     # Add debug info
     print(f"[Stage B] Looking for Stage A data in folders: {possible_folders}")
@@ -4177,8 +4268,25 @@ def find_stage_a_data(cfg, architecture, latent_dim):
                     'decoder_path': decoder_path,
                     'config_path': config_path
                 }
-    
+
     print(f"[Stage B] No Stage A data found for {architecture}_{latent_dim}")
+    # Fallback: generic stageA directory if staged runs are missing
+    try:
+        fallback_dir = Path(cfg.output_dir) / "stageA"
+        enc_fallback = fallback_dir / "encoder.pt"
+        dec_fallback = fallback_dir / "decoder.pt"
+        cfg_fallback = fallback_dir / "config.yaml"
+        if enc_fallback.exists() and dec_fallback.exists():
+            print(f"[Stage B] Using fallback Stage A data in {fallback_dir}")
+            return {
+                'base_dir': fallback_dir,
+                'metric_path': None,
+                'encoder_path': enc_fallback,
+                'decoder_path': dec_fallback,
+                'config_path': cfg_fallback if cfg_fallback.exists() else None,
+            }
+    except Exception:
+        pass
     return None
 
 def find_stage_b_data(cfg, architecture, latent_dim, metric_type):
@@ -4197,23 +4305,36 @@ def find_stage_b_data(cfg, architecture, latent_dim, metric_type):
     stages_dir = Path(cfg.output_dir) / "stages"
     if not stages_dir.exists():
         return None
+    try:
+        dataset_name = str(getattr(cfg.data, 'dataset', 'SPRITES')).upper()
+    except Exception:
+        dataset_name = "SPRITES"
+    dataset_candidates = [dataset_name]
+    if "SPRITES" not in dataset_candidates:
+        dataset_candidates.append("SPRITES")
     
     # Look for Stage B folder
-    folder_name = get_stage_folder_name('B', metric_type, architecture, latent_dim)
-    stage_b_dir = stages_dir / folder_name
+    stage_b_dir = None
+    metric_path = None
+    config_path = None
+    for ds_name in dataset_candidates:
+        folder_name = get_stage_folder_name('B', metric_type, architecture, latent_dim, ds_name)
+        candidate_dir = stages_dir / folder_name
+        metric_candidate = candidate_dir / 'metric.pt'
+        config_candidate = candidate_dir / 'config.yaml'
+        if candidate_dir.exists() and metric_candidate.exists() and config_candidate.exists():
+            stage_b_dir = candidate_dir
+            metric_path = metric_candidate
+            config_path = config_candidate
+            break
     
-    if stage_b_dir.exists():
-        # Check if it has the required files
-        metric_path = stage_b_dir / 'metric.pt'
-        config_path = stage_b_dir / 'config.yaml'
-        
-        if metric_path.exists() and config_path.exists():
-            print(f"[Stage C] Found Stage B data in: {stage_b_dir}")
-            return {
-                'base_dir': stage_b_dir,
-                'metric_path': metric_path,
-                'config_path': config_path
-            }
+    if stage_b_dir is not None:
+        print(f"[Stage C] Found Stage B data in: {stage_b_dir}")
+        return {
+            'base_dir': stage_b_dir,
+            'metric_path': metric_path,
+            'config_path': config_path
+        }
     
     print(f"[Stage C] No Stage B data found for {metric_type}_{architecture}_{latent_dim}")
     return None

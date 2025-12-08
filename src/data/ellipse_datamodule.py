@@ -32,6 +32,7 @@ class EllipseSequenceDataModule(L.LightningDataModule):
         self.num_workers = config.get("num_workers", 4)
         self.pin_memory = config.get("pin_memory", True)
         self.persistent_workers = config.get("persistent_workers", False)
+        self.drop_last = bool(config.get("drop_last", False))
         self.seed = int(config.get("seed", 42))
         self.train_ratio = float(config.get("train_ratio", 0.8))
         self.val_ratio = float(config.get("val_ratio", 0.1))
@@ -114,6 +115,8 @@ class EllipseSequenceDataModule(L.LightningDataModule):
             self.batch_size = data_cfg.batch_size
             self.num_workers = data_cfg.num_workers
             self.pin_memory = data_cfg.pin_memory
+            if hasattr(data_cfg, "drop_last"):
+                self.drop_last = bool(data_cfg.drop_last)
         # Re-apply safety override after reading training config
         import os
         if os.environ.get("RLVAE_CUDA_SAFE_DATALOADER", "0") == "1":
@@ -131,6 +134,7 @@ class EllipseSequenceDataModule(L.LightningDataModule):
             shuffle=True,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
+            drop_last=self.drop_last,
             persistent_workers=self.persistent_workers,
         )
 
@@ -141,6 +145,7 @@ class EllipseSequenceDataModule(L.LightningDataModule):
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
+            drop_last=self.drop_last,
             persistent_workers=self.persistent_workers,
         )
 
@@ -151,5 +156,6 @@ class EllipseSequenceDataModule(L.LightningDataModule):
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
+            drop_last=self.drop_last,
             persistent_workers=self.persistent_workers,
         )

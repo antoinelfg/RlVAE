@@ -209,3 +209,4 @@ min_cov_eig: 1e-3        # Minimum eigenvalue for Cholesky (jitter value)
 
 In your config file (e.g., `conf/model/rlvae_rotation_rhmc_stage2.yaml`).
 
+

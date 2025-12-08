@@ -40,7 +40,8 @@ class LossManager(nn.Module):
         # μ anchoring
         mu_l2_weight: float = 0.0,
         mu_centroid_weight: float = 5.0,
-        recon_scale: float = 255.0,
+        flow_weight: float = 0.0,
+        recon_scale: float = 500.0,
         kl_monitor_baseline_tau: float = 0.98,
         metric_representation: str = "g",
         # Prior mode for KL: 'uniform' (default, cancels volume) or 'volume_gaussian'
@@ -67,6 +68,16 @@ class LossManager(nn.Module):
         kl_include_logZ_in_loss: bool = False,
         # Experimental: flip the sign of log q when assembling KL
         kl_flip_logq_sign: bool = False,
+        # Flow loss mode: how to penalize flow Jacobians
+        # 'relu' (default): one-sided penalty on expansion, max(0, log det)
+        # 'l2': squared penalty (log det)^2, penalizes both directions
+        # 'abs': absolute value |log det|, penalizes both directions
+        # 'frobenius': Frobenius norm of Jacobian ||J||_F (requires autograd, expensive)
+        # 'none': no flow loss (set flow_weight=0 instead for same effect)
+        # 'rlvae': From RLVAE document Corollary 6.1: (λ - 2) * log|det J|
+        #          Use flow_weight as λ: when λ=2, no regularization (pure ELBO)
+        #          λ>2: penalize expansion, λ<2: encourage expansion
+        flow_loss_mode: str = 'relu',
     ):
         super().__init__()
         self.beta = beta
@@ -79,6 +90,7 @@ class LossManager(nn.Module):
         self.mu_volume_weight = float(mu_volume_weight)
         self.mu_l2_weight = float(mu_l2_weight)
         self.mu_centroid_weight = float(mu_centroid_weight)
+        self.flow_weight = float(flow_weight)
         self.recon_scale = float(recon_scale)
         self.kl_monitor_baseline_tau = float(kl_monitor_baseline_tau)
         self._kl_monitor_baseline: Optional[torch.Tensor] = None
@@ -105,7 +117,24 @@ class LossManager(nn.Module):
         # KL true-constant control
         self.kl_include_logZ_in_loss = bool(kl_include_logZ_in_loss)
         self.kl_flip_logq_sign = bool(kl_flip_logq_sign)
+        # Flow loss mode
+        valid_flow_loss_modes = {'relu', 'l2', 'abs', 'frobenius', 'none', 'rlvae'}
+        self.flow_loss_mode = str(flow_loss_mode).lower()
+        if self.flow_loss_mode not in valid_flow_loss_modes:
+            raise ValueError(f"flow_loss_mode must be one of {valid_flow_loss_modes}, got '{flow_loss_mode}'")
         self.to(self.device)
+        # Pushforward diagnostics
+        self._pushforward_diag = {
+            "attempt": 0,
+            "success": 0,
+            "no_metric": 0,
+            "graph_broken": 0,
+            "nan_jacobian": 0,
+            "svd_fail": 0,
+            "nonfinite_logdet": 0,
+            "fallback_other": 0,
+            "jac_clamped": 0,
+        }
         
         # Loss tracking
         self.loss_history = {
@@ -113,6 +142,7 @@ class LossManager(nn.Module):
             'kl_divergence': [],
             'riemannian_kl': [],
             'flow_loss': [],
+            'linear_flow_loss': [],
             'loop_penalty': [],
             'total': [],
             'metric_reg': [],  # NEW
@@ -393,7 +423,166 @@ class LossManager(nn.Module):
             total += contrib
 
         total = torch.nan_to_num(total, nan=0.0, posinf=0.0, neginf=0.0)
+        # Clamp to prevent explosive expansion/volume terms from destabilizing loss
+        total = torch.clamp(total, min=-100.0, max=100.0)
         return total
+
+    def _compute_linear_flow_loss(
+        self,
+        sum_logdet_flow: torch.Tensor,
+        *,
+        log_det_jacobians: Optional[list] = None,
+        flow_manager: Optional[Any] = None,
+        z_seq: Optional[list] = None,
+    ) -> torch.Tensor:
+        """
+        Compute flow Jacobian penalty based on self.flow_loss_mode.
+        
+        Modes:
+          'relu':      max(0, sum_logdet_flow).mean() - penalize expansion only
+          'l2':        (sum_logdet_flow ** 2).mean() - penalize both directions (squared)
+          'abs':       |sum_logdet_flow|.mean() - penalize both directions (linear)
+          'frobenius': ||J||_F penalty - penalize large Jacobians (expensive, requires autograd)
+          'none':      0 - no flow loss
+          'rlvae':     (λ - 2) * log|det J| from RLVAE document Corollary 6.1
+                       flow_weight acts as λ: λ=2 -> no regularization (pure ELBO)
+                       λ>2 -> penalize expansion, λ<2 -> encourage expansion
+        
+        Args:
+            sum_logdet_flow: Per-sample sum of log|det J_t| [B]
+            log_det_jacobians: List of per-flow log|det| tensors (for frobenius mode)
+            flow_manager: FlowManager instance (for frobenius mode)
+            z_seq: Latent sequence [z_0, z_1, ...] (for frobenius mode)
+            
+        Returns:
+            Scalar flow loss
+        """
+        if self.flow_loss_mode == 'none':
+            return torch.tensor(0.0, device=self.device)
+        
+        # Sanitize input
+        safe_logdet = torch.nan_to_num(sum_logdet_flow, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        if self.flow_loss_mode == 'relu':
+            # One-sided: penalize expansion (positive log det), neutral on compression
+            if self.flow_weight <= 0:
+                return torch.tensor(0.0, device=self.device)
+            loss = torch.relu(safe_logdet).mean()
+            return self.flow_weight * loss
+            
+        elif self.flow_loss_mode == 'l2':
+            # Two-sided squared penalty: penalize deviation from det=1 (log det=0)
+            if self.flow_weight <= 0:
+                return torch.tensor(0.0, device=self.device)
+            loss = (safe_logdet ** 2).mean()
+            return self.flow_weight * loss
+            
+        elif self.flow_loss_mode == 'abs':
+            # Two-sided absolute penalty: penalize deviation from det=1 (log det=0)
+            if self.flow_weight <= 0:
+                return torch.tensor(0.0, device=self.device)
+            loss = safe_logdet.abs().mean()
+            return self.flow_weight * loss
+            
+        elif self.flow_loss_mode == 'frobenius':
+            # Frobenius norm: ||J||_F = sqrt(sum of squared singular values)
+            # This requires computing the full Jacobian via autograd
+            if self.flow_weight <= 0:
+                return torch.tensor(0.0, device=self.device)
+            loss = self._compute_frobenius_flow_loss(z_seq, flow_manager)
+            return self.flow_weight * loss
+            
+        elif self.flow_loss_mode == 'rlvae':
+            # RLVAE document formulation from Corollary 6.1:
+            # F_flow = (λ_flow - 2) * log|det J_F|
+            #
+            # Here flow_weight acts as λ_flow:
+            #   - λ = 2.0: no regularization (pure ELBO, flows are free)
+            #   - λ > 2.0: penalize expansion (det > 1)
+            #   - λ < 2.0: encourage expansion (can help with exploration)
+            #
+            # This is the mathematically principled formulation that couples
+            # with the reconstruction-induced curvature (Proposition 6.6)
+            lambda_flow = self.flow_weight
+            coefficient = lambda_flow - 2.0
+            
+            # When coefficient = 0, this returns 0 (no regularization)
+            loss = coefficient * safe_logdet.mean()
+            return loss
+            
+        else:
+            # Should not reach here due to __init__ validation
+            print(f"[FLOW LOSS] Unknown mode '{self.flow_loss_mode}', using relu fallback")
+            loss = torch.relu(safe_logdet).mean()
+            return self.flow_weight * loss
+    
+    def _compute_frobenius_flow_loss(
+        self,
+        z_seq: Optional[list],
+        flow_manager: Optional[Any],
+    ) -> torch.Tensor:
+        """
+        Compute Frobenius norm penalty on flow Jacobians: ||J - I||_F.
+        
+        This encourages flows to stay close to identity (small perturbations).
+        Expensive: requires computing full Jacobian via autograd.
+        
+        Returns:
+            Scalar loss = mean(||J_t - I||_F) across all flows and samples
+        """
+        if z_seq is None or flow_manager is None or len(z_seq) < 2:
+            return torch.tensor(0.0, device=self.device)
+        
+        if not hasattr(flow_manager, 'flows') or len(flow_manager.flows) == 0:
+            return torch.tensor(0.0, device=self.device)
+        
+        total_frob = torch.tensor(0.0, device=self.device)
+        n_flows = 0
+        D = z_seq[0].shape[-1]
+        eye = torch.eye(D, device=z_seq[0].device, dtype=z_seq[0].dtype)
+        
+        try:
+            for t in range(1, len(z_seq)):
+                flow_idx = (t - 1) % len(flow_manager.flows)
+                flow = flow_manager.flows[flow_idx]
+                z_prev = z_seq[t - 1]
+                
+                if not isinstance(z_prev, torch.Tensor):
+                    continue
+                
+                # Compute full Jacobian via autograd
+                z_in = z_prev.detach().clone().requires_grad_(True)
+                out_struct = flow(z_in)
+                z_out = out_struct.out
+                
+                # Build Jacobian matrix [B, D, D]
+                B = z_in.shape[0]
+                J = torch.zeros(B, D, D, device=z_in.device, dtype=z_in.dtype)
+                
+                for d in range(D):
+                    grad_d = torch.autograd.grad(
+                        z_out[:, d].sum(),
+                        z_in,
+                        retain_graph=(d < D - 1),
+                        create_graph=False,
+                        allow_unused=False,
+                    )[0]
+                    J[:, d, :] = grad_d
+                
+                # Frobenius norm of (J - I)
+                J_minus_I = J - eye.unsqueeze(0)
+                frob_norm = torch.sqrt((J_minus_I ** 2).sum(dim=(-2, -1)) + 1e-8)  # [B]
+                total_frob = total_frob + frob_norm.mean()
+                n_flows += 1
+                
+        except Exception as e:
+            if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                print(f"[FLOW LOSS] Frobenius computation failed: {e}")
+            return torch.tensor(0.0, device=self.device)
+        
+        if n_flows > 0:
+            return total_frob / n_flows
+        return torch.tensor(0.0, device=self.device)
 
         
     def _evaluate_metric(
@@ -1266,8 +1455,10 @@ class LossManager(nn.Module):
             half_logdet_push_ginv:  +1/2 log det G'^{-1} (always returned)
         """
         # 0) Get base tensor in configured representation
+        self._pushforward_diag["attempt"] += 1
         Gbase, base_rep = self._evaluate_metric(z0, metric_tensor, rhmc_posterior, with_rep=True)
         if Gbase is None or base_rep is None:
+            self._pushforward_diag["no_metric"] += 1
             return (None, None), None, None, None
 
         B, D = z0.shape
@@ -1305,11 +1496,12 @@ class LossManager(nn.Module):
             z = z0.detach().clone().requires_grad_(True)
             eye = torch.eye(D, device=z.device, dtype=z.dtype).unsqueeze(0)
             J_total = eye.repeat(B, 1, 1)
-            for flow in flow_manager.flows:
+            for flow_idx, flow in enumerate(flow_manager.flows):
                 out_struct = flow(z)
                 z_next = out_struct.out
                 if not z_next.requires_grad:
                     # Fall back to no-flow formulas if graph is broken
+                    self._pushforward_diag["graph_broken"] += 1
                     half_logdet_push_g    = self._half_logdet_volume(G0, 'g', jitter=1e-6)
                     half_logdet_push_ginv = self._half_logdet_volume(Ginv0, 'ginv', jitter=1e-6)
                     GT_sel = G0 if rep == "g" else Ginv0
@@ -1320,6 +1512,29 @@ class LossManager(nn.Module):
                         half_logdet_push_ginv.to(z0.dtype),
                     )
                 jac = self._batch_jacobian(z, z_next)  # [B, D, D] of ∂z_next/∂z
+                # Sanitize per-flow Jacobian to avoid poison from exploding grads
+                jac_clip = float(os.environ.get("RLVAE_JAC_CLIP", "10.0"))
+                nan_before = (~torch.isfinite(jac)).sum().item()
+                if nan_before > 0 or jac_clip > 0:
+                    jac = torch.nan_to_num(jac, nan=0.0, posinf=jac_clip, neginf=-jac_clip)
+                    jac = torch.clamp(jac, -jac_clip, jac_clip)
+                    self._pushforward_diag["jac_clamped"] += 1
+                    if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                        try:
+                            jac_stats = (jac.min().item(), jac.max().item(), jac.mean().item(), jac.std().item())
+                            print(f"[PUSH STABIL] Clamped/cleaned per-flow Jacobian at flow={flow_idx}: stats={jac_stats}, nan_before={nan_before}")
+                        except Exception:
+                            print(f"[PUSH STABIL] Clamped/cleaned per-flow Jacobian at flow={flow_idx}, nan_before={nan_before}")
+                if not torch.isfinite(jac).all():
+                    self._pushforward_diag["nan_jacobian"] += 1
+                    if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                        try:
+                            jac_stats = (jac.min().item(), jac.max().item(), jac.mean().item(), jac.std().item())
+                            nan_jac = (~torch.isfinite(jac)).sum().item()
+                            print(f"[PUSH STABIL] Non-finite per-flow Jacobian at flow={flow_idx}: stats={jac_stats}, nan_count={nan_jac}")
+                        except Exception:
+                            print(f"[PUSH STABIL] Non-finite per-flow Jacobian at flow={flow_idx}")
+                    return (None, None), None, None, None
                 J_total = torch.bmm(jac, J_total)
                 z = z_next.detach().clone().requires_grad_(True)
 
@@ -1328,46 +1543,64 @@ class LossManager(nn.Module):
         G064  = G0.double()
         Ginv64 = Ginv0.double()
 
-        # Regularize base metrics if needed
-        G064_reg, g_was_reg = self._regularize_spd_matrix(G064, cond_threshold=5000.0)
+        # Quick NaN/Inf guard before SVD
+        if not torch.isfinite(J64).all():
+            self._pushforward_diag["nan_jacobian"] += 1
+            if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                print(f"[PUSH STABIL] Jacobian contains NaNs/Infs BEFORE clamp! Falling back.")
+            return (None, None), None, None, None
+
+        # === CRITICAL FIX: SVD SPECTRAL CLAMPING ===
+        # Prevents the Jacobian from becoming singular (collapse) or explosive.
+        # This guarantees the transported metric remains Positive Definite.
+        try:
+            U, S, Vh = torch.linalg.svd(J64)
+            
+            # Clamp singular values to a safe range [0.05, 20.0]
+            # - Min=0.05: Prevents dimension collapse (singularity)
+            # - Max=20.0: Prevents runaway expansion
+            # - Max Condition Number: 20 / 0.05 = 400 (Very safe for Cholesky)
+            S_clamped = torch.clamp(S, min=0.1, max=5.0)
+            if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                if (S != S_clamped).any():
+                    print(f"[PUSH STABIL] S_clamped: {S_clamped.min().item():.2e}, {S_clamped.max().item():.2e}")
+            # Reconstruct the stabilized Jacobian
+            J_stabilized = U @ torch.diag_embed(S_clamped) @ Vh
+            J64 = J_stabilized
+            min_sv = S_clamped.min(dim=-1).values
+
+            # Diagnostic print (optional)
+            if os.environ.get("RLVAE_DEBUG", "0") == "1":
+                cond_orig = S.max(dim=-1).values / S.min(dim=-1).values.clamp_min(1e-12)
+                if cond_orig.max() > 1000:
+                    print(f"[PUSH STABIL] Clamped high-cond Jacobian: max_cond={cond_orig.max().item():.2e} -> {S_clamped.max()/S_clamped.min():.2e}")
+                    
+        except Exception as e:
+            self._pushforward_diag["svd_fail"] += 1
+            print(f"[PUSH STABIL] SVD clamping failed: {e}")
+            # Fallback: Proceed with original (risky) or return None to trigger Formulation A
+            return (None, None), None, None, None
+        # ===========================================
+
+        # Regularize base precision if needed (more stable than metric path)
+        _, g_was_reg = self._regularize_spd_matrix(G064, cond_threshold=5000.0)
         Ginv64_reg, ginv_was_reg = self._regularize_spd_matrix(Ginv64, cond_threshold=5000.0)
         if g_was_reg or ginv_was_reg:
             if os.environ.get("RLVAE_DEBUG", "0") == "1":
                 print(f"[PUSH STABIL] Base metric regularized: G={g_was_reg}, Ginv={ginv_was_reg}")
 
-        # Diagnostics
-        sv = torch.linalg.svdvals(J64)
-        min_sv = sv.min(dim=-1).values
-        max_sv = sv.max(dim=-1).values
-        j_cond = max_sv / (min_sv + 1e-12)
-
-        if (j_cond > 50000.0).any():
-            if os.environ.get("RLVAE_DEBUG", "0") == "1":
-                print(f"[PUSH STABIL] Jacobian poorly conditioned (max cond={j_cond.max().item():.2e}), falling back")
-            # Return None to trigger Formulation A fallback
-            return (None, None), None, None, None
-
-        # G-transport:    G' = J^{-T} G J^{-1}
-        # Use stable solve instead of linalg.solve for J_inv
-        J_inv = self._stable_matrix_inverse(J64, jitter=1e-6)
-        
-        # Transport with regularized base metrics
-        GT_g  = torch.bmm(J_inv.transpose(1, 2), torch.bmm(G064_reg, J_inv))
-        GT_g  = 0.5 * (GT_g + GT_g.transpose(1, 2))
-
-        # G^{-1}-transport:  G'^{-1} = J G^{-1} J^T
+        # Transport precision only: G'^{-1} = J G^{-1} J^T
         GT_ginv = torch.bmm(J64, torch.bmm(Ginv64_reg, J64.transpose(1, 2)))
         GT_ginv = 0.5 * (GT_ginv + GT_ginv.transpose(1, 2))
 
-        # Regularize transported metrics
-        GT_g_reg, gt_g_was_reg = self._regularize_spd_matrix(GT_g, cond_threshold=5000.0)
+        # Regularize transported precision; derive metric from it to keep consistency
         GT_ginv_reg, gt_ginv_was_reg = self._regularize_spd_matrix(GT_ginv, cond_threshold=5000.0)
-
-        if gt_g_was_reg or gt_ginv_was_reg:
+        if gt_ginv_was_reg:
             if os.environ.get("RLVAE_DEBUG", "0") == "1":
-                print(f"[PUSH STABIL] Transported metric regularized: G'={gt_g_was_reg}, G'^-1={gt_ginv_was_reg}")
-            GT_g = GT_g_reg
+                print(f"[PUSH STABIL] Precision regularized post-transport")
             GT_ginv = GT_ginv_reg
+
+        GT_g = self._stable_matrix_inverse(GT_ginv, jitter=1e-6)
 
         # 5) Volumes (always return both canonical scalars)
         half_logdet_push_g    = self._half_logdet_volume(GT_g, 'g', jitter=1e-6)
@@ -1375,6 +1608,7 @@ class LossManager(nn.Module):
 
         # Verify numerical consistency before returning
         if not torch.isfinite(half_logdet_push_g).all() or not torch.isfinite(half_logdet_push_ginv).all():
+            self._pushforward_diag["nonfinite_logdet"] += 1
             if os.environ.get("RLVAE_DEBUG", "0") == "1":
                 print(f"[PUSH STABIL] Non-finite logdet detected, falling back")
             return (None, None), None, None, None
@@ -1400,6 +1634,7 @@ class LossManager(nn.Module):
             except Exception as exc:
                 print(f"[PUSH DEBUG] failed to gather stats ({exc})")
 
+        self._pushforward_diag["success"] += 1
         return (
             (GT_sel.to(z0.dtype).detach(), rep),
             min_sv.to(z0.dtype),
@@ -1996,7 +2231,6 @@ class LossManager(nn.Module):
                     kl_terms = (
                         log_q_eval.to(x.dtype)
                         - (self.volume_bias_weight * half_logdet_target_ginv).to(x.dtype)
-                        - flow_term.to(x.dtype)
                         + (delta_kin.to(x.dtype) - delta_vol.to(x.dtype))
                     )
                     print(f"[DEBUG] FORMULATION A - kl_terms mean: {kl_terms.mean().item()}")
@@ -2340,14 +2574,20 @@ class LossManager(nn.Module):
                 pass
         kl_loss = kl_sign * kl_loss
 
-        # Flow loss: for uniform MC path the Jacobian term is absorbed into KL
-        if stage_c_uniform:
-            flow_loss = torch.zeros((), device=x.device, dtype=x.dtype)
-        else:
-            flow_loss = self.compute_flow_loss(log_det_jacobians)
+        # Flow loss: always penalize expansion to prevent runaway volume growth
+        # Always penalize expansion drive to prevent infinite volume growth.
+        flow_loss = self.compute_flow_loss(log_det_jacobians)
         if not torch.isfinite(flow_loss) and os.environ.get("RLVAE_DEBUG") == "1":
             print("[DEBUG] flow_loss is not finite!", flow_loss)
-        
+
+        # Flow Jacobian penalty - mode controlled by self.flow_loss_mode
+        # Compute linear_flow_loss based on flow_loss_mode
+        linear_flow_loss = self._compute_linear_flow_loss(
+            sum_logdet_flow, 
+            log_det_jacobians=log_det_jacobians,
+            flow_manager=flow_manager,
+            z_seq=z_seq,
+        )
         loop_penalty = self.compute_loop_penalty(z_seq, loop_mode)
         if not torch.isfinite(loop_penalty) and os.environ.get("RLVAE_DEBUG") == "1":
             print("[DEBUG] loop_penalty is not finite!", loop_penalty)
@@ -2388,7 +2628,8 @@ class LossManager(nn.Module):
             try:
                 print(
                     f"[LOSS ROUTE] recon={float(recon_loss):.4f} | kl={float(kl_loss):.4f} (w={float(kl_weight):.2f}) | "
-                    f"flow={float(flow_loss):.4f} | loop={float(loop_penalty):.4f} | use_riem_kl={bool(use_riemannian_kl and metric_tensor is not None)}"
+                    f"flow={float(flow_loss):.4f} | linear_flow={float(linear_flow_loss):.4f} | loop={float(loop_penalty):.4f} | "
+                    f"use_riem_kl={bool(use_riemannian_kl and metric_tensor is not None)}"
                 )
             except Exception:
                 pass
@@ -2412,7 +2653,7 @@ class LossManager(nn.Module):
                 print(f"[GRAD TRACE] KL grad sanity failed: {_e}")
 
         # Combine losses
-        total_loss = recon_loss + kl_weight * kl_loss + flow_loss + loop_penalty + mu_volume_reg + mu_centroid_reg
+        total_loss = recon_loss + kl_weight * kl_loss + flow_loss + linear_flow_loss + loop_penalty + mu_volume_reg + mu_centroid_reg
 
         # Heavy gradient tracing focused on non-RHMC components
         if os.environ.get("RLVAE_GRAD_TRACE", "0") == "1":
@@ -2526,7 +2767,7 @@ class LossManager(nn.Module):
                 self._mu_l2_debugged = True
         if not torch.isfinite(total_loss) and os.environ.get("RLVAE_DEBUG") == "1":
             print("[DEBUG] total_loss is not finite!", total_loss)
-            print(f"[DEBUG] recon_loss: {recon_loss}, kl_loss: {kl_loss}, flow_loss: {flow_loss}, loop_penalty: {loop_penalty}")
+            print(f"[DEBUG] recon_loss: {recon_loss}, kl_loss: {kl_loss}, flow_loss: {flow_loss}, linear_flow_loss: {linear_flow_loss}, loop_penalty: {loop_penalty}")
         
         if self.mu_volume_weight > 0.0:
             self.loss_history['mu_volume'].append(mu_volume_reg.item())
@@ -2571,6 +2812,7 @@ class LossManager(nn.Module):
         self.loss_history['reconstruction'].append(recon_loss.item())
         self.loss_history['kl_divergence'].append(kl_loss.item())
         self.loss_history['flow_loss'].append(flow_loss.item())
+        self.loss_history['linear_flow_loss'].append(linear_flow_loss.item())
         self.loss_history['loop_penalty'].append(loop_penalty.item())
         self.loss_history['total'].append(total_loss.item())
         
@@ -2608,6 +2850,7 @@ class LossManager(nn.Module):
             'kl_divergence_loss': kl_loss,
             'kl_divergence_true_est': kl_aux_metrics.get('monitor/kl_true_est', kl_loss),
             'flow_loss': flow_loss,
+            'linear_flow_loss': linear_flow_loss,
             'loop_penalty': loop_penalty,
             'mu_l2_penalty': mu_l2_pen,
             'mu_volume_reg': mu_volume_reg,
@@ -2672,6 +2915,8 @@ class LossManager(nn.Module):
             'kl_use_metric_normalization': self.kl_use_metric_normalization,
             'kl_metric_norm_mode': self.kl_metric_norm_mode,
             'kl_amp_safe': self.kl_amp_safe,
+            'flow_loss_mode': self.flow_loss_mode,
+            'flow_weight': self.flow_weight,
         }
 
     # -----------------------------

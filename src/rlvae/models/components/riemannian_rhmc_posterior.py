@@ -757,7 +757,6 @@ class RiemannianRHMCPosterior(nn.Module):
                 with torch.no_grad():
                     z_eval = z_cand.reshape(B * K, D)
                     Gz = self._ctx['model'].G(z_eval)
-                    print('checkkkkkk')
                     # Selection score: invert sign to favor lower metric volume (smaller log|G^{-1}|).
                     h = -half_logdet_volume(Gz, 'g', jitter=self.eps_reg).reshape(B, K)
                 best = torch.argmax(h, dim=1)
@@ -920,7 +919,6 @@ class RiemannianRHMCPosterior(nn.Module):
             with torch.no_grad():
                 z_eval = z_cand.reshape(B * K, D)
                 Gz = self._ctx['model'].G(z_eval)
-                print('checkkkkkkiiiing')
                 # Invert sign to favor lower metric volume (smaller log|G^{-1}|).
                 h = -half_logdet_volume(Gz, 'g', jitter=self.eps_reg).reshape(B, K)
             best_idx = torch.argmax(h, dim=1)
@@ -1234,6 +1232,19 @@ class RiemannianRHMCPosterior(nn.Module):
         # 4. Scale by alpha (Logic: Variance ~ Alpha * Precision)
         # Note: We use Precision (Ginv) directly as Variance basis per your configuration
         Sigma = alpha * Ginv_norm + self.eps_reg * eye
+
+        # 5. Clamp covariance eigenvalues to control spread in flat regions
+        try:
+            eigvals, eigvecs = torch.linalg.eigh(_to_float32(Sigma))
+            eig_floor = float(max(self.min_cov_eig, 0.0))
+            eig_cap = float(self.metric_eig_ceiling) if math.isfinite(self.metric_eig_ceiling) else None
+            eigvals_clamped = torch.clamp(eigvals, min=eig_floor)
+            if eig_cap is not None:
+                eigvals_clamped = torch.clamp(eigvals_clamped, max=eig_cap)
+            Sigma = (eigvecs @ torch.diag_embed(eigvals_clamped) @ eigvecs.transpose(-1, -2)).to(Sigma.dtype)
+        except Exception:
+            # Fallback: leave Sigma as-is if eigendecomposition fails
+            pass
 
         return Sigma
 

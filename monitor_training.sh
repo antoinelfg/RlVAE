@@ -85,3 +85,4 @@ echo "========================================"
 echo "💡 To see full logs:"
 echo "   tail -f $LATEST_RUN/logs/debug.log"
 
+

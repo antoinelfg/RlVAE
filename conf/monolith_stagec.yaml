@@ -62,7 +62,7 @@ model:
   pretrained:
     encoder_path: outputs/stages/A_VANILLA_MLP_2_SPRITES/encoder_diverse_mlp_ld2_20251029_183040.pt
     decoder_path: outputs/stages/A_VANILLA_MLP_2_SPRITES/decoder_diverse_mlp_ld2_20251029_183040.pt
-    metric_path: outputs/stages/B_RHVAE_MLP_2_SPRITES/metric.pt
+    metric_path: outputs/stages/B_RHVAE_MLP_2_ELLIPSE_SEQUENCES/metric.pt
 training:
   trainer:
     max_epochs: 3

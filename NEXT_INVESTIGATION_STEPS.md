@@ -257,3 +257,4 @@ rhmc_alpha: 0.5  # Try different values (current default: 1.0)
 **Status**: Ready for next phase of investigation  
 **Blocker**: Need to add diagnostics to `_get_inverse_metric` and `_make_covariance`
 
+

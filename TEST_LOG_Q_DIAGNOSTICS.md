@@ -181,3 +181,4 @@ Comparer les valeurs de `Total log_q` et vérifier si KL devient positive.
 
 **Prochaine étape** : Lancer l'entraînement avec `RLVAE_DEBUG=1` et examiner les logs !
 
+

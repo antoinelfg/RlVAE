@@ -66,6 +66,7 @@ settings:
       num_workers: 4
       pin_memory: true
       shuffle: true
+      drop_last: true
       seed: 42
       splits:
         train: 0.8
@@ -116,25 +117,44 @@ settings:
       hidden_size: 256
       n_blocks: 2
       n_hidden: 1
-      output_clip: 4.0
-      logdet_clip: 5.0
+      output_clip: 5.5           # SWEEP BEST: 5.55
+      logdet_clip: 10.0
 
 
     losses:
-      beta: 1.0
-      riemannian_beta: 1.0
-      flow_weight: 10.0
+      # Loss balancing for [0,1] normalized images:
+      # SWEEP FINDING: Higher beta (0.01) helps organize latent space
+      # Best runs had beta ~0.009-0.01 with positive correlation
+      #
+      # With recon_loss ≈ 2.5-3, beta ≈ 0.01 gives good balance
+      beta: 0.0094                 # SWEEP BEST: 0.00943
+      riemannian_beta: 0.0094      # SWEEP BEST: Match beta  
+      flow_weight: 0.003           # SWEEP: Reduced (negative correlation - less is better)
+      recon_scale: 255.0           # Convert [0,1] MSE to pixel scale
+      # Flow loss mode: how to penalize flow Jacobians
+      # 'relu': one-sided penalty on expansion (default)
+      # 'l2': squared penalty (log det)^2, penalizes both directions
+      # 'abs': absolute |log det|, penalizes both directions
+      # 'frobenius': ||J - I||_F, expensive but penalizes large transforms
+      # 'none': disable flow loss
+      # 'rlvae': From Corollary 6.1: (λ - 2) * log|det J|
+      #          flow_weight acts as λ: λ=2 means no regularization (pure ELBO)
+      #          λ>2: penalize expansion, λ<2: encourage expansion
+      flow_loss_mode: relu
       loop_penalty_weight: 0.0
       mu_l2_weight: 0
       mu_volume_weight: 0.0           # Disable μ volume bias for cleaner gradients
-      mu_centroid_weight: 1.0         # Keep centroid pull off unless desired
+      mu_centroid_weight: 0.0         # Keep centroid pull off unless desired
       metric_representation: ginv
       kl_prior_mode: uniform
-      kl_metric_eval_point: mu
+      # FIX: Changed from 'mu' to 'z' - 'mu' was pushing encoder means toward origin!
+      # With 'z': Loss = 0.5*(z-μ)ᵀG(z)(z-μ) - penalizes posterior variance (correct KL)
+      # With 'mu': Loss = 0.5*μᵀG(μ)μ - pushes μ toward 0 (wrong, breaks training!)
+      kl_metric_eval_point: z
       kl_use_metric_normalization: false  # FIX: Disable metric normalization in KL
       kl_metric_norm_mode: none            # FIX: Changed from 'geomean' to 'none'
-      volume_bias_weight: 1.
-      volume_grad_scale: 1.
+      volume_bias_weight: 0.77     # SWEEP BEST: 0.7735
+      volume_grad_scale: 1.2       # SWEEP BEST: 1.1967
       use_riemannian_kl: true
       use_pushforward_metric: true
       use_flow_corrections: true
@@ -144,9 +164,9 @@ settings:
 
     posterior:
       type: riemannian_rhmc
-      rhmc_steps: 8                     # Slightly more exploration
-      rhmc_step_size: 0.03              # Larger step size for better mixing
-      rhmc_alpha: 0.01                   # Broader initial Σ for less negative log|Σ|
+      rhmc_steps: 1                      # SWEEP BEST: 1
+      rhmc_step_size: 0.0048             # SWEEP BEST: 0.00477
+      rhmc_alpha: 0.128                  # SWEEP BEST: 0.1279 (LOW alpha works best!)
       rhmc_eps_reg: 1.0e-3              # More jitter to keep Σ PD after pushforward
       min_cov_eig: 5.0e-3               # Raise floor to avoid tiny determinants
       volume_force_representation: g     # Use metric 'g' for volume gradient
@@ -167,12 +187,12 @@ settings:
       max_position_step: 1.0             # FIX: INCREASED to allow larger steps (was 0.1, too restrictive)
       max_position_norm: 0.0             # Disable hard position clamping
       
-      posterior_local_alpha: 0.01
+      posterior_local_alpha: ${settings.model.posterior.rhmc_alpha}
       posterior_alpha_ramp_enabled: false
       maha_clip: 20.0
       cov_norm_mode: none                # FIX: No normalization
       sigma_normalization_mode: none     # FIX: PRESERVE anisotropy - no normalization
-      initial_target_radius: 0.0        # Target Euclidean radius for Σ-based draw
+      initial_target_radius: 0.        # Target Euclidean radius for Σ-based draw (keeps start volume > 0)
       max_cov_eig: inf                 # Softer cap to avoid constant clamping
     
       rhmc_kl_mode: mc
@@ -183,19 +203,23 @@ settings:
     mu_alignment_enabled: false
 
     metric:
-      # Use the latest diverse Stage-B metric to recover the bean structure.
-      path: outputs/stages/B_RHVAE_MLP_2_SPRITES/metric_diverse_latest.pt
+      # Auto-wire Stage B metric; leave null to pick up latest matching artifact
+      path: null
       trainable: false
       init_from_fixed: true
-      temperature_override: 0.8
+      temperature_override: 1.0  # SWEEP BEST: 1 (sharper metric)
       regularization_override: 0.01
       normalize_weight_sum: false
       topk_weights: 0
-      #weight_kernel: mahalanobis_normed
+      weight_kernel: isotropic  # Enforces Euclidean distance for centroid weights (Slide 42)
       weight_metric_normalization: none
       use_background_identity: true
-      bg_strength: 0.0001
-      eig_ceiling: 50.0
+      bg_strength: 0.0046       # SWEEP BEST: 0.00459
+      # Wider bounds to allow real metric structure
+      # G^{-1} in [0.1, 50.0] → G in [0.02, 10.0]
+      eig_floor_abs: 0.1        # Floor G^{-1} → G max = 10
+      eig_ceiling: 50.0         # Higher ceiling for more variation
+      # Condition number up to 500 (allows meaningful structure)
       regularization_weight: 0.0
       update_frequency: null
 
@@ -211,9 +235,10 @@ settings:
     centroid_regularizer_enabled: false
     centroid_regularizer_weight: 0.2
 
+    # Let Stage A/B artifacts auto-wire; override here only if you want fixed checkpoints
     pretrained:
-      encoder_path: outputs/stages/A_VANILLA_MLP_2_SPRITES/encoder_diverse_mlp_ld2_20251016_115412.pt
-      decoder_path: outputs/stages/A_VANILLA_MLP_2_SPRITES/decoder_diverse_mlp_ld2_20251016_115412.pt
+      encoder_path: null
+      decoder_path: null
       metric_path: null
 
   training:
@@ -225,8 +250,8 @@ settings:
       devices: 1
       accumulate_grad_batches: 4
       log_every_n_steps: 5
-      val_check_interval: 0.5
-      num_sanity_val_steps: 2
+      val_check_interval: 1.0
+      num_sanity_val_steps: 0
       progress_bar: true
       model_summary: true
 
@@ -264,7 +289,7 @@ settings:
 
     stage_overrides:
       stage_a:
-        enabled: false
+        enabled: true
         epochs: 100
         lr: 1.0e-4
         batch_size: 64
@@ -285,11 +310,11 @@ settings:
         enabled: true
         epochs: 200
         lr: 1.0e-4
-        riemannian_beta: 1.0
+        riemannian_beta: 0.0094          # SWEEP BEST: Match main beta
         posterior:
-          rhmc_alpha: 0.1                # FIX: Override with diagnostic-based value
-          rhmc_steps: 10                  # FIX: Ensure RHMC is active
-          rhmc_step_size: 0.02           # FIX: Match increased step size
+          rhmc_alpha: ${settings.model.posterior.rhmc_alpha}
+          rhmc_steps: 1                  # SWEEP BEST: 1
+          rhmc_step_size: 0.0048         # SWEEP BEST: 0.00477
           max_position_norm: 0.0
           max_position_step: 1.0         # FIX: Match increased position step limit
           max_velocity_norm: 2.0         # FIX: Match increased velocity limit
@@ -385,6 +410,14 @@ settings:
     metric_file: "${settings.pipeline.outputs.metric_file}"
     rhmc_samples: "${settings.pipeline.outputs.rhmc_samples_file}"
 
+  data_analysis:
+    enabled: false
+    max_sequences: 256
+    pairwise_pairs: 120
+    preview_sequences: 9
+    output_dir: ${output.run_dir}
+    log_to_wandb: false
+
   debug:
     verbose: false
     print_shapes: false
@@ -404,6 +437,7 @@ data:
   batch_size: ${settings.data.common.batch_size}
   num_workers: 0 #${settings.data.common.num_workers}
   pin_memory: ${settings.data.common.pin_memory}
+  drop_last: ${settings.data.common.drop_last}
   shuffle: ${settings.data.common.shuffle}
   train_ratio: ${settings.data.common.splits.train}
   val_ratio: ${settings.data.common.splits.val}
@@ -435,10 +469,17 @@ model:
   beta: ${settings.model.losses.beta}
   riemannian_beta: ${settings.model.losses.riemannian_beta}
   mu_l2_weight: ${settings.model.losses.mu_l2_weight}
+  # FIX: These were missing - caused defaults of 5.0 and True to be used!
+  mu_centroid_weight: ${settings.model.losses.mu_centroid_weight}
+  mu_volume_weight: ${settings.model.losses.mu_volume_weight}
+  mu_alignment_enabled: ${settings.model.mu_alignment_enabled}
   kl_prior_mode: ${settings.model.losses.kl_prior_mode}
   kl_metric_eval_point: ${settings.model.losses.kl_metric_eval_point}
   kl_use_metric_normalization: ${settings.model.losses.kl_use_metric_normalization}
   kl_metric_norm_mode: ${settings.model.losses.kl_metric_norm_mode}
+  flow_loss_mode: ${settings.model.losses.flow_loss_mode}
+  volume_bias_weight: ${settings.model.losses.volume_bias_weight}
+  volume_grad_scale: ${settings.model.losses.volume_grad_scale}
   sampling: ${settings.model.sampling}
   loop:
     mode: ${settings.model.loop.mode}
@@ -472,6 +513,7 @@ sampling: ${settings.sampling}
 generation: ${settings.generation}
 checkpoint: ${settings.checkpoint}
 debug: ${settings.debug}
+data_analysis: ${settings.data_analysis}
 
 experiment:
   type: ${settings.pipeline.mode}

@@ -53,7 +53,7 @@ def compute_metric_weights(
     kernel: str = "mahalanobis_normed",
     normalize: bool = False,
     topk: Optional[int] = None,
-    stabilize: bool = True,
+    stabilize: bool = False,
     eps: float = 1e-12,
 ) -> torch.Tensor:
     """
@@ -81,7 +81,7 @@ def compute_metric_weights(
 
     device = z.device
     dtype = z.dtype
-    kernel = (kernel or "mahalanobis_normed").lower()
+    kernel = "isotropic" #(kernel or "mahalanobis_normed").lower()
 
     temp = torch.as_tensor(temperature, device=device, dtype=dtype).clamp_min(eps)
     temp2 = temp ** 2

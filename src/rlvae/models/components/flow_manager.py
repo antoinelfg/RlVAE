@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from typing import List, Optional, Dict, Any
 from pythae.models.normalizing_flows.iaf import IAF, IAFConfig
+import os
 
 
 class FlowManager(nn.Module):
@@ -167,6 +168,8 @@ class FlowManager(nn.Module):
             if not isinstance(log_det, torch.Tensor):
                 raise RuntimeError("Flow returned non-tensor log_abs_det_jac.")
 
+            # Safety clamp to prevent NaN gradients from exploding scales
+            log_det = torch.clamp(log_det, -50.0, 50.0)
             log_det = torch.nan_to_num(log_det, nan=0.0, posinf=0.0, neginf=0.0)
 
             # Expect shape [B]; try to fix if possible
@@ -187,6 +190,20 @@ class FlowManager(nn.Module):
             # Save
             z_sequence[t] = z_t
             log_det_jacobians.append(log_det)
+
+            # Optional per-step diagnostics
+            if os.environ.get("RLVAE_DEBUG_FLOW", "0") == "1":
+                try:
+                    z_stats = (z_t.min().item(), z_t.max().item(), z_t.mean().item(), z_t.std().item())
+                    ld_stats = (log_det.min().item(), log_det.max().item(), log_det.mean().item(), log_det.std().item())
+                    nan_z = (~torch.isfinite(z_t)).sum().item()
+                    nan_ld = (~torch.isfinite(log_det)).sum().item()
+                    print(
+                        f"[FLOW DEBUG] step={t-1} z_t min/max/mean/std={z_stats} "
+                        f"logdet min/max/mean/std={ld_stats} nan_z={nan_z} nan_ld={nan_ld}"
+                    )
+                except Exception:
+                    pass
 
             # Optional one-time verifier (2D, first step)
             if (

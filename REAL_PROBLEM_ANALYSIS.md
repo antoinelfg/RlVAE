@@ -254,3 +254,4 @@ riemannian_beta: 0.5  # Réduire le poids
 
 **Action immédiate** : Essayer `rhmc_alpha: 5.0` et `rhmc_eps_reg: 1e-3`
 
+

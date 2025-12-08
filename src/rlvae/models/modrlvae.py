@@ -257,6 +257,8 @@ class ModRLVAE(nn.Module):
         )
 
         # Loss manager
+        # Flow loss mode: 'relu' (default), 'l2', 'abs', 'frobenius', 'none'
+        flow_loss_mode = str(getattr(config, "flow_loss_mode", "relu"))
         self.loss_manager = LossManager(
             beta=self.beta,
             riemannian_beta=self.riemannian_beta,
@@ -266,6 +268,7 @@ class ModRLVAE(nn.Module):
             kl_metric_norm_mode=self.kl_metric_norm_mode,
             kl_amp_safe=self.kl_amp_safe,
             kl_metric_eval_point=self.kl_metric_eval_point,
+            flow_loss_mode=flow_loss_mode,
         )
 
         # Posterior sampler (local metric‑aligned Gaussian)

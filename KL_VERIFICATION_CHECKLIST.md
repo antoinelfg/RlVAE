@@ -364,3 +364,4 @@ Comparaison: KL_reporté=??, KL_manuel=??, Δ=??
 
 **Prêt à analyser les valeurs !** 🔍
 
+

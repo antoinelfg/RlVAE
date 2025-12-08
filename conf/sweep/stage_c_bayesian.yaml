@@ -1,0 +1,115 @@
+# =============================================================================
+# WandB Bayesian Hyperparameter Sweep Configuration
+# =============================================================================
+# 
+# Stage C focused sweep for RLVAE optimization
+# 
+# Usage:
+#   1. Initialize sweep:
+#      wandb sweep conf/sweep/stage_c_bayesian.yaml
+#   
+#   2. Launch agents (run multiple in parallel):
+#      wandb agent <entity>/<project>/<sweep_id>
+#
+# =============================================================================
+
+program: scripts/wandb_sweep_agent.py
+method: bayes
+name: rlvae-stage-c-bayesian-sweep
+
+# Optimization target
+# Note: Lightning logs as 'val_recon_loss' (no stage prefix)
+metric:
+  name: val_recon_loss
+  goal: minimize
+
+# Early termination for bad runs
+early_terminate:
+  type: hyperband
+  min_iter: 10
+  eta: 3
+  s: 2
+
+# =============================================================================
+# Parameters to sweep
+# =============================================================================
+parameters:
+  # -------------------------------------------------------------------------
+  # RHMC Configuration (High Priority)
+  # -------------------------------------------------------------------------
+  rhmc_steps:
+    distribution: int_uniform
+    min: 0
+    max: 10
+    
+  rhmc_step_size:
+    distribution: log_uniform_values
+    min: 0.001
+    max: 0.02
+    
+  rhmc_alpha:
+    distribution: uniform
+    min: 0.1
+    max: 0.5
+    
+  # -------------------------------------------------------------------------
+  # Flow Configuration (High Priority)
+  # -------------------------------------------------------------------------
+  n_flows:
+    values: [3, 5, 7]
+    
+  flow_weight:
+    distribution: log_uniform_values
+    min: 0.0001
+    max: 0.1
+    
+  flow_loss_mode:
+    values: ["relu", "l2", "abs", "frobenius", "rlvae"]
+    
+  # Flow output clipping (prevents saturation)
+  flow_output_clip:
+    distribution: uniform
+    min: 3.0
+    max: 10.0
+    
+  # -------------------------------------------------------------------------
+  # KL Balance (High Priority)
+  # -------------------------------------------------------------------------
+  # beta and riemannian_beta are tied together
+  beta:
+    distribution: log_uniform_values
+    min: 0.0001
+    max: 0.1
+    
+  # -------------------------------------------------------------------------
+  # Volume/Prior Configuration (Medium Priority)
+  # -------------------------------------------------------------------------
+  volume_bias_weight:
+    distribution: uniform
+    min: 0.5
+    max: 2.0
+    
+  volume_grad_scale:
+    distribution: uniform
+    min: 0.5
+    max: 1.5
+    
+  # -------------------------------------------------------------------------
+  # Metric Configuration (Medium Priority)
+  # -------------------------------------------------------------------------
+  temperature_override:
+    values: [0.5, 1.0, 2.0, 5.0]
+    
+  bg_strength:
+    distribution: log_uniform_values
+    min: 0.001
+    max: 0.01
+
+# =============================================================================
+# Run configuration
+# =============================================================================
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args_no_hyphens}

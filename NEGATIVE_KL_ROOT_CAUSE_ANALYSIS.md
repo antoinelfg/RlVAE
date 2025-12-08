@@ -290,3 +290,4 @@ python run_experiment.py experiment=rlvae_three_stage_long_rhmc_modular
 **Prochaine révision** : Après 5-10 epochs avec `alpha=0.5`  
 **Statut** : ✅ **CORRECTION APPLIQUÉE, EN ATTENTE DE VALIDATION**
 
+
