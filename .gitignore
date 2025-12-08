@@ -1,193 +1,78 @@
-# Byte-compiled / optimized / DLL files
+# ==============================================
+# Python
+# ==============================================
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
-
-# Distribution / packaging
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
 *.egg-info/
-.installed.cfg
 *.egg
-MANIFEST
+.eggs/
+dist/
+build/
 
-# PyInstaller
-*.manifest
-*.spec
+# ==============================================
+# Virtual Environments
+# ==============================================
+.env
+.venv
+venv/
+ENV/
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
+# ==============================================
+# IDE / Editors
+# ==============================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-*
 
-# Unit test / coverage reports
+# ==============================================
+# Testing
+# ==============================================
+.pytest_cache/
+.coverage
 htmlcov/
 .tox/
 .nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-cover/
 
-# Translations
-*.mo
-*.pot
-
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-.pybuilder/
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-.python-version
-
-# pipenv
-Pipfile.lock
-
-# poetry
-poetry.lock
-
-# pdm
-.pdm.toml
-
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
-
-# Environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venb.bak/
-
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
+# ==============================================
+# Type Checkers
+# ==============================================
 .mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Pyre type checker
+.pytype/
 .pyre/
 
-# pytype static type analyzer
-.pytype/
-
-# Cython debug symbols
-cython_debug/
-
-# PyCharm
-.idea/
-
-# VSCode
-.vscode/
-
-# Vim
-*.swp
-*.swo
-
-# Emacs
-*~
-
-# OS generated files
+# ==============================================
+# OS Generated
+# ==============================================
 .DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
 Thumbs.db
+.nfs*
 
-# ===== RlVAE SPECIFIC IGNORES =====
-
-# Training outputs and experiments (LARGE FILES)
+# ==============================================
+# RlVAE - Training Outputs
+# ==============================================
 outputs/
 wandb/
 lightning_logs/
 experiments/
-backups/
-metric_snapshots/
+sweep_logs/
 
-# Model checkpoints and training artifacts
+# ==============================================
+# RlVAE - Model Files
+# ==============================================
 *.ckpt
 *.pth
 *.pt
 *.pkl
-final_model.pt
-encoder.pt
-decoder.pt
 
-# Temporary files
-tmp/
-temp/
-*.tmp
-*.bak
-*.log
-
-# Hydra outputs
-.hydra/
-multirun/
-
-# Generated images and visualizations (LARGE FILES)
+# ==============================================
+# RlVAE - Generated Files
+# ==============================================
 *.png
 *.jpg
 *.jpeg
@@ -196,13 +81,24 @@ multirun/
 *.html
 html_latent_images_epoch_*/
 
-# SLURM job logs and outputs
+# ==============================================
+# RlVAE - Logs
+# ==============================================
+*.log
 *.out
 *.err
 slurm-*.out
 logs/
 
-# Data directories (keep structure but ignore content)
+# ==============================================
+# RlVAE - Hydra
+# ==============================================
+.hydra/
+multirun/
+
+# ==============================================
+# RlVAE - Data (keep structure)
+# ==============================================
 data/raw/*
 data/processed/*
 data/*.tar.gz
@@ -213,39 +109,19 @@ data/MNIST/
 data/fid_cache/
 !data/raw/.gitkeep
 !data/processed/.gitkeep
-!data/*/README.md
 
-# IDE and editor files
-.vscode/
-.idea/
-*.sublime-*
-
-# System files
-.nfs*
-
-# Legacy and backup directories
-original_rlvae/
-benchmark_VAE/
+# ==============================================
+# RlVAE - Temp Files
+# ==============================================
+tmp/
+temp/
+*.tmp
+*.bak
+backups/
 debug_outputs/
-debug_rhvae_*/
 
-# Development test files
-test_*.py
-debug_*.py
-*_test.py
-*_debug.py
-
-# Temporary experiment files
-*_EXPERIMENT_PLAN.md
-WEEKEND_EXPERIMENT_PLAN.md
-temp_*.yaml
-
-# Large documentation files (keep structure)
-docs/archive/
-docs/guides/archive/
-
-# Keep essential structure files
-!data/raw/.gitkeep
-!data/processed/.gitkeep
-!data/*/README.md
-!conf/*/README.md 
+# ==============================================
+# Keep These
+# ==============================================
+!.gitkeep
+!**/README.md
